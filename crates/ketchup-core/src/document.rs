@@ -18,15 +18,41 @@ pub struct Edge {
     pub b: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Face {
+    pub id: u64,
+    pub vertices: Vec<u64>,
+    #[serde(default)]
+    pub holes: Vec<Vec<u64>>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Model {
     pub vertices: BTreeMap<u64, Vertex>,
     pub edges: BTreeMap<u64, Edge>,
-    next_id: u64,
+    #[serde(default)]
+    pub faces: BTreeMap<u64, Face>,
+    #[serde(default)]
+    pub face_colors: BTreeMap<u64, [u8; 3]>,
+    #[serde(default)]
+    pub dimensions: BTreeMap<u64, crate::Dimension>,
+    #[serde(default)]
+    pub objects: BTreeMap<u64, crate::Object>,
+    #[serde(default)]
+    pub hidden: BTreeSet<u64>,
+    #[serde(default)]
+    pub locked: BTreeSet<u64>,
+    #[serde(skip)]
+    pub edit_context: Option<u64>,
+    #[serde(default)]
+    pub tags: BTreeMap<u64, crate::Tag>,
+    #[serde(default)]
+    pub entity_tags: BTreeMap<u64, u64>,
+    pub(crate) next_id: u64,
 }
 
 impl Model {
-    fn id(&mut self) -> u64 {
+    pub(crate) fn id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
     }
@@ -40,11 +66,11 @@ impl Model {
         let (a, b) = self.points(edge);
         a.distance(b)
     }
-    fn vertex_at(&mut self, position: DVec3) -> u64 {
+    fn vertex_at(&mut self, position: DVec3, drawing_vertices: &BTreeSet<u64>) -> u64 {
         if let Some(v) = self
             .vertices
             .values()
-            .find(|v| v.position.distance(position) < EPS)
+            .find(|v| drawing_vertices.contains(&v.id) && v.position.distance(position) < EPS)
         {
             return v.id;
         }
@@ -52,7 +78,7 @@ impl Model {
         self.vertices.insert(id, Vertex { id, position });
         id
     }
-    fn insert_edge(&mut self, a: u64, b: u64) -> u64 {
+    pub(crate) fn insert_edge(&mut self, a: u64, b: u64) -> u64 {
         if let Some(e) = self
             .edges
             .values()
@@ -64,11 +90,12 @@ impl Model {
         self.edges.insert(id, Edge { id, a, b });
         id
     }
-    fn split_at(&mut self, vertex: u64) {
+    fn split_at(&mut self, vertex: u64, drawing_edges: &mut BTreeSet<u64>) {
         let point = self.vertices[&vertex].position;
         let splits: Vec<_> = self
             .edges
             .values()
+            .filter(|e| drawing_edges.contains(&e.id))
             .filter(|e| e.a != vertex && e.b != vertex)
             .filter_map(|e| {
                 let (a, b) = self.points(e);
@@ -78,51 +105,157 @@ impl Model {
             })
             .collect();
         for edge in splits {
+            for face in self.faces.values_mut() {
+                for ring in std::iter::once(&mut face.vertices).chain(face.holes.iter_mut()) {
+                    if let Some(i) = (0..ring.len()).find(|&i| {
+                        let a = ring[i];
+                        let b = ring[(i + 1) % ring.len()];
+                        (a == edge.a && b == edge.b) || (a == edge.b && b == edge.a)
+                    }) {
+                        ring.insert(i + 1, vertex);
+                    }
+                }
+            }
             self.edges.remove(&edge.id);
-            self.insert_edge(edge.a, vertex);
-            self.insert_edge(vertex, edge.b);
+            drawing_edges.remove(&edge.id);
+            drawing_edges.insert(self.insert_edge(edge.a, vertex));
+            drawing_edges.insert(self.insert_edge(vertex, edge.b));
         }
     }
     pub fn add_edge(&mut self, start: DVec3, end: DVec3) -> Result<u64, &'static str> {
+        if self.edit_context.is_some() {
+            return self.edit_in_context(|model| model.add_edge(start, end));
+        }
         if !start.is_finite() || !end.is_finite() {
             return Err("Coordinates must be finite");
+        }
+        // Keep newly drawn geometry within the same limits enforced on reload.
+        // Reject before allocating vertices or splitting an existing edge.
+        if start.abs().max_element() > 1e10 || end.abs().max_element() > 1e10 {
+            return Err("Coordinates must be within ten billion meters of the origin");
         }
         if start.distance(end) < EPS {
             return Err("Give your line a little length");
         }
-        if self.edges.values().any(|e| {
-            let (a, b) = self.points(e);
-            (a.distance(start) < EPS && b.distance(end) < EPS)
-                || (a.distance(end) < EPS && b.distance(start) < EPS)
-        }) {
+        let mut drawing_edges = self.drawing_edges();
+        if let Some(edge) = self
+            .edges
+            .values()
+            .filter(|e| drawing_edges.contains(&e.id))
+            .find(|e| {
+                let (a, b) = self.points(e);
+                (a.distance(start) < EPS && b.distance(end) < EPS)
+                    || (a.distance(end) < EPS && b.distance(start) < EPS)
+            })
+            .cloned()
+        {
+            // Retracing an existing boundary heals an intentionally erased face.
+            if self.create_faces_with_edges(edge.a, edge.b, &drawing_edges) {
+                return Ok(edge.id);
+            }
             return Err("That edge already exists");
         }
-        let a = self.vertex_at(start);
-        let b = self.vertex_at(end);
-        self.split_at(a);
-        self.split_at(b);
-        Ok(self.insert_edge(a, b))
+        let drawing_vertices = drawing_edges
+            .iter()
+            .flat_map(|id| {
+                let edge = &self.edges[id];
+                [edge.a, edge.b]
+            })
+            .collect();
+        let a = self.vertex_at(start, &drawing_vertices);
+        let b = self.vertex_at(end, &drawing_vertices);
+        self.split_at(a, &mut drawing_edges);
+        self.split_at(b, &mut drawing_edges);
+        let id = self.insert_edge(a, b);
+        drawing_edges.insert(id);
+        self.create_faces_with_edges(a, b, &drawing_edges);
+        Ok(id)
     }
     pub fn erase(&mut self, ids: &BTreeSet<u64>) {
+        if self.edit_context.is_some() {
+            let _ = self.edit_in_context(|model| {
+                model.erase(ids);
+                Ok(())
+            });
+            return;
+        }
+        self.sync_dimensions();
+        let ids = self.erasable_entities(ids);
+        self.dimensions.retain(|id, _| !ids.contains(id));
+        let removed: BTreeSet<_> = self
+            .edges
+            .values()
+            .filter(|e| ids.contains(&e.id))
+            .map(|e| (e.a.min(e.b), e.a.max(e.b)))
+            .collect();
+        self.faces.retain(|id, face| {
+            !ids.contains(id)
+                && !std::iter::once(&face.vertices)
+                    .chain(face.holes.iter())
+                    .any(|ring| {
+                        (0..ring.len()).any(|i| {
+                            let a = ring[i];
+                            let b = ring[(i + 1) % ring.len()];
+                            removed.contains(&(a.min(b), a.max(b)))
+                        })
+                    })
+        });
+        self.face_colors.retain(|id, _| self.faces.contains_key(id));
         self.edges.retain(|id, _| !ids.contains(id));
         let used: BTreeSet<_> = self.edges.values().flat_map(|e| [e.a, e.b]).collect();
         self.vertices.retain(|id, _| used.contains(id));
+        self.sync_dimensions();
+        self.objects.retain(|id, _| !ids.contains(id));
+        self.clean_entity_state();
     }
     pub fn bounds(&self) -> Option<(DVec3, DVec3)> {
-        let mut vertices = self.vertices.values();
-        let first = vertices.next()?.position;
-        Some(vertices.fold((first, first), |(lo, hi), v| {
-            (lo.min(v.position), hi.max(v.position))
-        }))
+        // Expand inherited visibility once; walking every object's membership
+        // for each edge becomes quadratic on imported assemblies.
+        let mut hidden_roots = self.hidden.clone();
+        hidden_roots.extend(self.entity_tags.iter().filter_map(|(entity, tag)| {
+            self.tags
+                .get(tag)
+                .is_some_and(|tag| !tag.visible)
+                .then_some(*entity)
+        }));
+        let hidden = self.expand_entities(&hidden_roots);
+        let used: BTreeSet<_> = self
+            .edges
+            .values()
+            .filter(|e| !hidden.contains(&e.id))
+            .flat_map(|e| [e.a, e.b])
+            .chain(
+                self.faces
+                    .values()
+                    .filter(|f| !hidden.contains(&f.id))
+                    .flat_map(|f| f.vertices.iter().chain(f.holes.iter().flatten()).copied()),
+            )
+            .collect();
+        let mut vertices = used.iter().map(|id| self.vertices[id].position).chain(
+            self.dimensions
+                .values()
+                .filter(|d| !hidden.contains(&d.id))
+                .flat_map(|d| d.layout(self)),
+        );
+        let first = vertices.next()?;
+        Some(vertices.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p))))
     }
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.vertices.len() > 1_000_000 || self.edges.len() > 1_000_000 {
+        if self.vertices.len() > 1_000_000
+            || self.edges.len() > 1_000_000
+            || self.faces.len() > 1_000_000
+            || self.objects.len() > 1_000_000
+            || self.dimensions.len() > 1_000_000
+        {
             return Err("Model is too large");
         }
         let max_id = self
             .vertices
             .keys()
             .chain(self.edges.keys())
+            .chain(self.faces.keys())
+            .chain(self.objects.keys())
+            .chain(self.dimensions.keys())
             .max()
             .copied()
             .unwrap_or(0);
@@ -147,7 +280,56 @@ impl Model {
                 return Err("Invalid edge");
             }
         }
+        let mut boundaries = BTreeSet::new();
+        for (id, face) in &self.faces {
+            if *id != face.id
+                || self.vertices.contains_key(id)
+                || self.edges.contains_key(id)
+                || !boundaries.insert(crate::faces::canonical_ring(&face.vertices))
+            {
+                return Err("Invalid face ID");
+            }
+            for ring in std::iter::once(&face.vertices).chain(face.holes.iter()) {
+                if ring.len() < 3
+                    || ring.iter().any(|v| !self.vertices.contains_key(v))
+                    || crate::faces::plane(self, ring).is_none()
+                {
+                    return Err("Invalid face boundary");
+                }
+                for i in 0..ring.len() {
+                    let a = ring[i];
+                    let b = ring[(i + 1) % ring.len()];
+                    if !pairs.contains(&(a.min(b), a.max(b))) {
+                        return Err("Face boundary is missing an edge");
+                    }
+                }
+            }
+            let triangles = self.face_triangles(face);
+            let area: f64 = triangles
+                .iter()
+                .map(|[a, b, c]| (*b - *a).cross(*c - *a).length() * 0.5)
+                .sum();
+            if triangles.is_empty() || area <= EPS {
+                return Err("Invalid face surface");
+            }
+        }
+        self.validate_tags()?;
+        self.validate_objects()?;
+        self.validate_dimensions()?;
+        if self
+            .face_colors
+            .keys()
+            .any(|id| !self.faces.contains_key(id))
+        {
+            return Err("Paint refers to a missing face");
+        }
         Ok(())
+    }
+    pub fn contains_entity(&self, id: &u64) -> bool {
+        self.edges.contains_key(id)
+            || self.faces.contains_key(id)
+            || self.objects.contains_key(id)
+            || self.dimensions.contains_key(id)
     }
 }
 
@@ -157,24 +339,47 @@ pub struct Document {
     pub name: String,
     pub model: Model,
     pub camera: Camera,
+    #[serde(default = "enabled")]
+    pub snap_to_geometry: bool,
+    #[serde(default = "enabled")]
+    pub snap_to_axes: bool,
+    #[serde(default)]
+    pub display: crate::DisplaySettings,
+}
+fn enabled() -> bool {
+    true
 }
 impl Default for Document {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             name: "Untitled model".into(),
             model: Model::default(),
             camera: Camera::default(),
+            snap_to_geometry: true,
+            snap_to_axes: true,
+            display: crate::DisplaySettings::default(),
         }
     }
 }
 impl Document {
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let doc: Self = serde_json::from_str(json).map_err(|e| e.to_string())?;
-        if doc.version != 1 {
+        let mut doc: Self = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        if doc.version != 1 && doc.version != 2 {
             return Err("Unsupported document version".into());
         }
         doc.model.validate().map_err(str::to_owned)?;
+        if doc.version == 1 {
+            let edges: Vec<_> = doc.model.edges.values().map(|e| (e.a, e.b)).collect();
+            for (a, b) in edges {
+                doc.model.create_faces(a, b);
+            }
+            doc.version = 2;
+        }
+        doc.model.initialize_instance_transforms();
+        if !doc.display.valid() {
+            return Err("Invalid display settings".into());
+        }
         if !doc.camera.valid() {
             return Err("Invalid camera".into());
         }

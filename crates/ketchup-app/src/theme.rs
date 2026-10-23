@@ -2,7 +2,7 @@ use eframe::egui::{self, Color32, FontFamily, FontId, Stroke, TextStyle};
 
 pub const INK: Color32 = Color32::from_rgb(39, 53, 46);
 pub const MUTED: Color32 = Color32::from_rgb(122, 132, 123);
-pub const ACCENT: Color32 = Color32::from_rgb(207, 83, 59);
+pub const ACCENT: Color32 = Color32::from_rgb(217, 72, 54);
 pub const BORDER: Color32 = Color32::from_rgb(225, 228, 220);
 pub const PAPER: Color32 = Color32::from_rgb(250, 251, 247);
 pub const CANVAS: Color32 = Color32::from_rgb(240, 242, 234);

@@ -18,6 +18,33 @@ fn rejects_degenerate_and_duplicate_edges_without_mutating() {
 }
 
 #[test]
+fn drawing_past_coordinate_limits_is_atomic_and_keeps_the_document_reloadable() {
+    for context in [false, true] {
+        let mut doc = Document::default();
+        let limit = DVec3::X * 1e10;
+        let edge = doc.model.add_edge(limit - DVec3::X, limit).unwrap();
+        if context {
+            let group = doc
+                .model
+                .make_object(&BTreeSet::from([edge]), false, "Limit")
+                .unwrap();
+            assert!(doc.model.enter_object(group));
+        }
+        let before = doc.model.clone();
+        for (a, b) in [
+            (limit, limit + DVec3::X),
+            (-limit - DVec3::X, -limit),
+            (DVec3::ZERO, DVec3::splat(f64::MAX)),
+            (DVec3::INFINITY, DVec3::ZERO),
+        ] {
+            assert!(doc.model.add_edge(a, b).is_err(), "accepted {a:?} to {b:?}");
+            assert_eq!(doc.model, before);
+        }
+        Document::from_json(&serde_json::to_string(&doc).unwrap()).unwrap();
+    }
+}
+
+#[test]
 fn midpoint_attachment_splits_edge_and_reuses_vertex() {
     let mut m = Model::default();
     m.add_edge(DVec3::ZERO, DVec3::X * 2.).unwrap();
@@ -191,6 +218,39 @@ fn pan_translates_view_without_rotating_and_zoom_keeps_anchor() {
 }
 
 #[test]
+fn orbit_around_model_center_preserves_framing_and_radius() {
+    let size = DVec2::new(1000., 700.);
+    let pivot = DVec3::new(3., 4., 2.);
+    for pitch in [-1.49, 0.62, 1.49] {
+        let mut camera = Camera {
+            target: pivot,
+            pitch,
+            ..Camera::default()
+        };
+        camera.pan(DVec2::new(140., -80.), size.y);
+        camera.zoom(180., size * 0.7, size);
+        let before = camera.clone();
+        let screen = camera.project(pivot, size).unwrap();
+        let radius = camera.eye().distance(pivot);
+        assert!(screen.distance(size * 0.5) > 1.);
+        camera.orbit_around(DVec2::ZERO, pivot);
+        close(camera.eye(), before.eye());
+        close(camera.target, before.target);
+        for delta in [
+            DVec2::new(0.01, 0.),
+            DVec2::new(40., -100.),
+            DVec2::new(-70., 500.),
+        ] {
+            camera.orbit_around(delta, pivot);
+            assert!(camera.project(pivot, size).unwrap().distance(screen) < 1e-6);
+            assert!((camera.eye().distance(pivot) - radius).abs() < 1e-6);
+            assert_eq!(camera.distance, before.distance);
+            assert!(camera.valid());
+        }
+    }
+}
+
+#[test]
 fn crossing_and_window_selection_differ() {
     let size = DVec2::new(1000., 700.);
     let c = Camera::default();
@@ -235,7 +295,7 @@ fn document_round_trip_and_corruption_validation() {
     let restored = Document::from_json(&json).unwrap();
     assert_eq!(restored.model, doc.model);
     assert!(Document::from_json("{}").is_err());
-    doc.version = 2;
+    doc.version = 99;
     assert!(Document::from_json(&serde_json::to_string(&doc).unwrap()).is_err());
     doc.version = 1;
     doc.model.vertices.clear();

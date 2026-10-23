@@ -1,0 +1,205 @@
+name: Build desktop
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  VPK_VERSION: '1.2.161'
+
+jobs:
+  validate:
+    name: Validate release version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Validate tag and packaging helpers
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          python scripts/desktop_release.py version --tag "$TAG_NAME"
+          python -m unittest discover -s scripts -p 'test_desktop_release.py'
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            executable: ketchup-app.exe
+          - platform: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+            executable: ketchup-app
+          - platform: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            executable: ketchup-app
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      TAG_NAME: ${{ github.ref_name }}
+      KETCHUP_REQUIRE_SIGNING: ${{ vars.KETCHUP_REQUIRE_SIGNING }}
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+      WINDOWS_AZURE_SIGNING: ${{ secrets.WINDOWS_AZURE_SIGNING }}
+      MACOS_SIGN_APP_IDENTITY: ${{ secrets.MACOS_SIGN_APP_IDENTITY }}
+      MACOS_SIGN_INSTALL_IDENTITY: ${{ secrets.MACOS_SIGN_INSTALL_IDENTITY }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential pkg-config libx11-dev libxcb1-dev \
+            libxkbcommon-dev libwayland-dev libegl1-mesa-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install packaging SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install pinned Velopack tool
+        run: dotnet tool install --global vpk --version "$VPK_VERSION"
+
+      - name: Authenticate Windows signing
+        if: runner.os == 'Windows' && env.AZURE_CREDENTIALS != ''
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Configure macOS signing
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERTIFICATES_P12: ${{ secrets.MACOS_CERTIFICATES_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: python scripts/configure_macos_signing.py
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.target }}
+
+      - name: Build release executable
+        run: cargo build -p ketchup-app --bin ketchup-app --release --locked --target "${{ matrix.target }}"
+
+      - name: Test update and restart behavior
+        run: |
+          cargo test -p ketchup-app --lib --release --locked --target "${{ matrix.target }}" updates::
+
+      - name: Stage distribution
+        run: |
+          mkdir -p dist package/licenses/skp
+          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" package/
+          cp LICENSE README.md package/
+          cp crates/ketchup-app/vendor/skp/LICENSE* package/licenses/skp/
+          cp crates/ketchup-app/vendor/skp/native/miniz/LICENSE package/licenses/skp/LICENSE-miniz
+
+      - name: Create installer and update feed
+        run: python scripts/desktop_release.py package --tag "$TAG_NAME" --platform "${{ matrix.platform }}"
+
+      - name: Remove temporary macOS keychain
+        if: always() && runner.os == 'macOS'
+        run: |
+          if [ -f "$RUNNER_TEMP/ketchup-signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/ketchup-signing.keychain-db"
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ketchup-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Download desktop packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ketchup-*
+          path: dist
+          merge-multiple: true
+
+      - name: Validate all platforms and checksum release files
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: python scripts/desktop_release.py validate --tag "$TAG_NAME"
+
+      - name: Publish release with desktop packages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG_NAME" > /dev/null 2>&1; then
+            is_draft=$(gh release view "$TAG_NAME" --json isDraft --jq '.isDraft')
+            if [ "$is_draft" != true ]; then
+              echo "This version is already published. Bump Cargo.toml and publish a new tag."
+              exit 1
+            fi
+          else
+            gh release create "$TAG_NAME" --verify-tag --draft \
+              --title "$TAG_NAME" --generate-notes
+          fi
+
+          gh release upload "$TAG_NAME" dist/* --clobber
+          gh release edit "$TAG_NAME" --draft=false --latest

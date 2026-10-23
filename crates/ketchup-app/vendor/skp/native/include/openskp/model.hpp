@@ -1,0 +1,559 @@
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <deque>
+#include <filesystem>
+#include <map>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include <openskp/export.hpp>
+#include <openskp/observability.hpp>
+
+namespace openskp {
+
+using EntityId = std::int64_t;
+using ByteBuffer = std::vector<std::uint8_t>;
+using Vec3 = std::array<double, 3>;
+using Color3 = std::array<std::uint8_t, 3>;
+using Color4 = std::array<std::uint8_t, 4>;
+
+/// One attribute-dictionary value, matching Python's
+/// `_decode_vff_attr_value` / `_read_attr_named`: `None`, `str`, `int`,
+/// `float`, a 3-tuple for Point3d/Vector3d, or a nested list - plus the two
+/// SketchUp types the writer can also emit, so they survive a read:
+/// `Boolean` (VFF `AA38`, legacy type 7) and `Length` (VFF `AF38`, legacy
+/// type 12; `A938` / type 6 stay `Float`). Both stringify exactly as the
+/// integer / float they used to decode to, so every stringified view
+/// (`properties`, scene, JSON, IFC) is unchanged. Scene / JSON / IFC stringify
+/// every named dictionary; the model keeps types.
+/// `Instance::properties` stays a `map<string,string>` view of a
+/// dictionary named `dynamic_attributes` when that name is present
+/// (existing OpenSKP API).
+struct ParsedAttribute {
+  enum class Kind : std::uint8_t { Null, String, Integer, Float, Vec, Array, Boolean, Length };
+  Kind kind = Kind::Null;
+  std::string text;
+  std::int64_t integer = 0;
+  double number = 0;
+  Vec3 vec{};
+  std::vector<ParsedAttribute> array;
+
+  static ParsedAttribute null() { return {}; }
+
+  static ParsedAttribute from_string(std::string s) {
+    ParsedAttribute v;
+    v.kind = Kind::String;
+    v.text = std::move(s);
+    return v;
+  }
+
+  static ParsedAttribute from_integer(std::int64_t n) {
+    ParsedAttribute v;
+    v.kind = Kind::Integer;
+    v.integer = n;
+    return v;
+  }
+
+  static ParsedAttribute from_float(double n) {
+    ParsedAttribute v;
+    v.kind = Kind::Float;
+    v.number = n;
+    return v;
+  }
+
+  /// SketchUp `true`/`false`; `integer` holds 1/0.
+  static ParsedAttribute from_boolean(bool b) {
+    ParsedAttribute v;
+    v.kind = Kind::Boolean;
+    v.integer = b ? 1 : 0;
+    return v;
+  }
+
+  /// SketchUp `Length` (inches); `number` holds the value.
+  static ParsedAttribute from_length(double inches) {
+    ParsedAttribute v;
+    v.kind = Kind::Length;
+    v.number = inches;
+    return v;
+  }
+
+  static ParsedAttribute from_vec(Vec3 p) {
+    ParsedAttribute v;
+    v.kind = Kind::Vec;
+    v.vec = p;
+    return v;
+  }
+
+  static ParsedAttribute from_array(std::vector<ParsedAttribute> items) {
+    ParsedAttribute v;
+    v.kind = Kind::Array;
+    v.array = std::move(items);
+    return v;
+  }
+
+  /// Same formatting as Python's `_stringify_vff_attr_value`.
+  std::string to_string() const;
+  bool operator==(const ParsedAttribute& o) const;
+
+  bool operator!=(const ParsedAttribute& o) const { return !(*this == o); }
+};
+
+inline bool operator==(const ParsedAttribute& a, const std::string& s) {
+  return a.kind == ParsedAttribute::Kind::String && a.text == s;
+}
+
+inline bool operator==(const std::string& s, const ParsedAttribute& a) { return a == s; }
+
+inline bool operator==(const ParsedAttribute& a, const char* s) {
+  return s != nullptr && a == std::string(s);
+}
+
+inline bool operator==(const char* s, const ParsedAttribute& a) { return a == s; }
+
+inline bool operator!=(const ParsedAttribute& a, const std::string& s) { return !(a == s); }
+
+inline bool operator!=(const std::string& s, const ParsedAttribute& a) { return !(a == s); }
+
+inline bool operator!=(const ParsedAttribute& a, const char* s) { return !(a == s); }
+
+inline bool operator!=(const char* s, const ParsedAttribute& a) { return !(a == s); }
+
+using ParsedAttrDict = std::map<std::string, ParsedAttribute>;
+using ParsedAttrDictionaries = std::map<std::string, ParsedAttrDict>;
+
+std::map<std::string, std::string> stringify_attr_dict(const ParsedAttrDict& src);
+std::map<std::string, std::map<std::string, std::string>> stringify_attr_dictionaries(
+    const ParsedAttrDictionaries& src);
+
+// 1 metre = 39.37007874015748 inches (SketchUp native unit). Shared by
+// every exporter that takes a coordinate scale factor (dxf_export.hpp,
+// ifc_export.hpp, ...) - defined once here rather than duplicated per
+// header, since two same-named constexprs in the same namespace collide
+// as a redefinition error in any translation unit that includes both.
+constexpr double METRES_TO_INCHES = 39.37007874015748;
+
+/// 3D point coordinate in raw SketchUp space.
+struct Vertex {
+  /// Unique TLV entity ID.
+  EntityId id{};
+  /// X coordinate in raw model space (Z-up, inches).
+  double x{};
+  /// Y coordinate in raw model space (Z-up, inches).
+  double y{};
+  /// Z coordinate in raw model space (Z-up, inches).
+  double z{};
+};
+
+/// Straight line segment connecting two vertices.
+struct Edge {
+  /// Unique TLV entity ID.
+  EntityId id{};
+  /// Start vertex ID.
+  EntityId v1_id{};
+  /// End vertex ID.
+  EntityId v2_id{};
+  /// Soft edge flag (suppresses edge rendering across coplanar faces).
+  bool soft{};
+  /// Smooth edge flag (enables vertex normal interpolation).
+  bool smooth{};
+  /// Hidden edge flag (explicit "Hide" bit on this edge).
+  bool hidden{};
+};
+
+/// Oriented edge reference within a face loop.
+struct CoEdge {
+  /// Target edge ID.
+  EntityId edge_id{};
+  /// Orientation relative to edge (+1 = same direction, -1 = reversed).
+  std::int64_t orientation{};
+};
+
+/// Planar polygon bounded by outer and inner (hole) edge loops.
+struct Face {
+  /// Unique TLV entity ID.
+  EntityId id{};
+  /// Polygonal loops (loops[0] = outer boundary, loops[1..N] = holes).
+  std::vector<std::vector<CoEdge>> loops;
+  /// Unit surface normal vector [nx, ny, nz].
+  std::optional<Vec3> normal;
+  /// Front-face material ID (references SkpModel::materials).
+  std::optional<EntityId> material_id;
+  /// Back-face material ID (references SkpModel::materials).
+  std::optional<EntityId> back_material_id;
+  /// Front-face 3x3 row-major UV transform matrix.
+  std::optional<std::array<double, 9>> uv_transform;
+  /// Back-face 3x3 row-major UV transform matrix.
+  std::optional<std::array<double, 9>> uv_transform_back;
+  /// The texture is PROJECTED (e.g. the Add Location terrain drape): its
+  /// UVs run in the projection plane's frame, not the face frame.
+  bool uv_projected{};
+  /// Same for the face's back side.
+  bool uv_projected_back{};
+  /// Whether the face is hidden (SketchUp's "Hide" on this specific face,
+  /// not a layer/tag visibility toggle).
+  bool hidden{};
+  /// Name of the layer (tag) the face is assigned to. "" for faces on the
+  /// default layer (Layer0), which VFF files don't record per face, and for
+  /// every face in legacy (pre-2021 MFC) files.
+  std::string layer;
+};
+
+/// Organization layer (tag) for model elements.
+struct Layer {
+  /// Layer name (e.g. "Layer0", "Walls").
+  std::string name;
+  /// Display color RGB [0..255].
+  Color3 color{200, 200, 200};
+  /// Whether the layer's visibility is switched off. Only populated for
+  /// legacy (pre-2021 MFC) files, where the byte is read directly from the
+  /// layer record - modern (VFF) files derive layers from
+  /// Layer_<name>-prefixed materials, which carry no visibility data, so
+  /// this is always false there.
+  bool hidden{};
+  /// Named `CAttributeNamed` dictionaries on this `CLayer` (legacy). Empty on VFF,
+  /// which has no equivalent slot. Callers own the dictionary names; the reader
+  /// does not special-case any of them.
+  std::map<std::string, std::map<std::string, std::string>> attribute_dictionaries;
+};
+
+/// Embedded texture image data and metadata.
+struct Texture {
+  /// Original image filename inside the SKP ZIP archive.
+  std::string filename;
+  /// Horizontal scale factor.
+  double width{};
+  /// Vertical scale factor.
+  double height{};
+  /// Raw image file bytes (PNG/JPG/BMP).
+  std::optional<ByteBuffer> data;
+  /// Save texture image bytes to disk.
+  OPENSKP_EXPORT void save(const std::filesystem::path& path) const;
+};
+
+/// Surface material properties (color, transparency, texture).
+struct Material {
+  /// Material name (e.g. "FrontColor", "Layer_Layer0").
+  std::string name;
+  /// Color channels RGBA [0..255].
+  Color4 color{200, 200, 200, 255};
+  /// Opacity factor [0.0 = fully transparent, 1.0 = fully opaque].
+  double transparency{1.0};
+  /// Unique TLV entity ID.
+  std::optional<EntityId> id;
+  /// Embedded texture reference.
+  std::optional<Texture> texture;
+  /// Whether material uses colorization.
+  bool colorized{};
+  /// Colorize mode enum identifier.
+  std::int32_t colorize_type{};
+};
+
+/// One `<sty:item>` of a style.xml: the raw `<t:variant>` of a style setting.
+struct StyleItem {
+  /// Variant type attribute: 1 bool, 3/4 int32, 5 ABGR color in older files
+  /// (current SketchUp writes colors as type 4), 6 float, 7 double, 13 nested
+  /// XML such as the watermark list.
+  int type{};
+  /// Variant text, trimmed; nested XML is kept verbatim.
+  std::string value;
+};
+
+/// One watermark of a style (style.xml item 5001, a `<screenimage>`), in
+/// file order. The "<MODEL SPACE>" separator entry is not included.
+struct StyleWatermark {
+  /// Watermark name.
+  std::string name;
+  /// Raw `<screenimage>` attributes, entity-decoded: e.g. `position`,
+  /// `scale`, `alphaScale` (blend), `tiled`, `stretched`, `maintainAR`,
+  /// `background`.
+  std::map<std::string, std::string> attributes;
+  /// Image path as the style names it: relative to the style's folder
+  /// ("./2.jpg") or, for the current style, from the ZIP root
+  /// ("watermarks/Watermark1.jpg").
+  std::string image_path;
+  /// Original image file name.
+  std::string file_name;
+  /// Raw image file bytes, when the ZIP has the entry.
+  std::optional<ByteBuffer> image;
+};
+
+/// Bundled rendering style settings.
+struct Style {
+  /// Style name.
+  std::string name;
+  /// Style description (`desc` attribute).
+  std::string description;
+  /// Default front face color (item 2002).
+  std::optional<Color3> front_color;
+  /// Default back face color (item 2003).
+  std::optional<Color3> back_color;
+  /// Every item of the style.xml, keyed by item id (e.g. 1007 profile
+  /// width, 2008 X-ray opacity). Ids are SketchUp's own and undocumented;
+  /// callers map the ones they understand.
+  std::map<int, StyleItem> items;
+  /// Watermarks parsed from item 5001, with their image bytes.
+  std::vector<StyleWatermark> watermarks;
+  /// Folder of this style in the SKP ZIP ("styles/<folder>/style.xml").
+  std::string folder;
+  /// The model's current style in its list of styles (SketchUp's
+  /// `Styles#active_style`).
+  bool active{};
+  /// Working copy of the current style, folder "<folder>_1": the settings the
+  /// model displays, including edits not yet updated into the style. It is
+  /// not a style of its own in SketchUp's list.
+  bool working_copy{};
+  /// On the current style: edited in SketchUp without updating the style, so
+  /// the working copy differs from it.
+  bool modified{};
+};
+
+/// Component or group placement instance within a definition.
+struct Instance {
+  /// Instance name.
+  std::string name;
+  /// Reference index to the target definition.
+  std::optional<EntityId> ref_idx;
+  /// GUID string of target definition.
+  std::string guid;
+  /// 4x4 column-major affine transformation matrix (16 floats).
+  std::vector<double> matrix;
+  /// This instance's own explicit layer override, or "" when it has
+  /// none. An instance without an explicit override inherits its
+  /// *placement's* layer, which can only be resolved once the scene
+  /// graph is flattened - see build_scene()'s InstanceNode::layer for
+  /// that resolved value.
+  std::string layer;
+  /// Arbitrary key/value dynamic attributes attached directly to this
+  /// instance (SketchUp's Dynamic Components) - a backward-compatible
+  /// view of attribute_dictionaries["dynamic_attributes"].
+  std::map<std::string, std::string> properties;
+  /// Every custom attribute dictionary attached to this instance, keyed
+  /// by the dictionary's own declared name - not just the one
+  /// SketchUp's own Dynamic Components extension uses. A real instance
+  /// routinely carries several at once (a plugin's own dictionary
+  /// alongside SketchUp's, or several of the plugin's own).
+  /// Unlike `properties`, values keep their real type (`String` /
+  /// `Integer` / `Float` / `Null` / a 3-vector / a possibly-nested
+  /// `Array`) rather than being stringified - matching Python's
+  /// `Instance.attribute_dictionaries`.
+  ParsedAttrDictionaries attribute_dictionaries;
+  /// Instance material override ID.
+  std::optional<EntityId> material_id;
+  /// Whether the instance itself is hidden (SketchUp's "Hide" on this
+  /// specific component/group placement, not a layer/tag visibility
+  /// toggle).
+  bool hidden{};
+  /// Unique TLV entity ID of the placement itself (the ID SketchUp persists
+  /// across sessions, `Sketchup::Entity#persistent_id`). Populated for
+  /// modern (VFF) files; unset for legacy (pre-2021 MFC) files.
+  std::optional<EntityId> id;
+};
+
+/// Section plane entity.
+struct SectionPlane {
+  std::array<double, 4> plane{0.0, 0.0, 1.0, 0.0};
+  std::string name;
+  std::string label;
+  bool hidden{false};
+};
+
+/// Text annotation entity.
+struct TextEntity {
+  std::string text;
+  bool hidden{false};
+};
+
+/// A linear dimension (SketchUp's Dimension tool).
+///
+/// The legacy (pre-2021) reader recovers only `text`/`hidden`. The VFF
+/// reader (2021+) recovers the full geometry - see `SkpModel::dimensions`
+/// for the model-level, world-space list.
+struct Dimension {
+  /// The displayed text. Empty when the dimension shows its auto-computed
+  /// measured value (the caller formats |b - a|).
+  std::string text;
+  bool hidden{false};
+  /// First measured point (x, y, z) in inches (world space), or unset when
+  /// only the text was recovered.
+  std::optional<Vec3> a;
+  /// Second measured point.
+  std::optional<Vec3> b;
+  /// Offset distance (inches) - how far the dimension line sits from the
+  /// a-b segment, along the in-plane perpendicular.
+  double offset{};
+  /// The dimension plane's x-axis, or unset.
+  std::optional<Vec3> plane_x;
+  /// The dimension plane's normal, or unset.
+  std::optional<Vec3> normal;
+};
+
+/// A construction/guide line (SketchUp's Construction Line tool).
+/// Legacy `CConstructionLine` and VFF list `9113` → entity `6942` /
+/// leaf `6A42` (same 8 doubles).
+///
+/// Stored internally (and here, unchanged) as a point + normalized
+/// direction + two signed distance parameters along that direction
+/// marking where the visible segment starts/ends - the same shape
+/// `Sketchup::ConstructionLine`'s own `start`/`end`/`direction`
+/// properties expose. A parameter magnitude of `1e30` means unbounded
+/// in that direction (SketchUp draws this as an infinite guide line
+/// through `point`) - `start`/`end` come back unset in that case,
+/// matching the real API returning `nil`.
+struct ConstructionLine {
+  /// A point on the line, in inches (world space) - matches the bounded
+  /// case's own `start`, or the anchor point given for an infinite line.
+  Vec3 point{0.0, 0.0, 0.0};
+  /// The line's normalized direction vector.
+  Vec3 direction{1.0, 0.0, 0.0};
+  /// The bounded segment's start point, or unset if unbounded in this
+  /// direction.
+  std::optional<Vec3> start;
+  /// The bounded segment's end point, or unset if unbounded.
+  std::optional<Vec3> end;
+};
+
+/// A construction/guide point (SketchUp's Construction Point tool).
+/// Legacy `CConstructionPoint` and VFF list `9213` → entity `6C42` /
+/// leaf `6D42` (3 doubles).
+struct ConstructionPoint {
+  /// The point's position, in inches (world space).
+  Vec3 position{0.0, 0.0, 0.0};
+};
+
+/// A saved scene (SketchUp's "Scenes" tabs; "pages" in the SDK).
+struct Page {
+  /// Scene name as shown on its tab.
+  std::string name;
+  /// Camera position (x, y, z) in inches, or unset.
+  std::optional<Vec3> eye;
+  /// Point the camera looks at, in inches.
+  std::optional<Vec3> target;
+  /// Camera up vector.
+  std::optional<Vec3> up;
+  /// Field of view in degrees (SketchUp default 35).
+  double fov{35.0};
+  /// True when the scene uses parallel (orthographic) projection; `fov`
+  /// still holds the stored perspective angle.
+  bool parallel{};
+  /// Visible height in inches when `parallel`.
+  double ortho_height{};
+  /// Names of the layers this scene hides.
+  std::vector<std::string> hidden_layers;
+  /// The scene selected when the model was saved (at most one).
+  bool selected{};
+};
+
+/// A view camera (VFF `34BC` record), as scenes and the model's current view
+/// store it.
+struct ViewCamera {
+  /// Camera position, in inches.
+  Vec3 eye{0.0, 0.0, 1.0};
+  /// Point the camera looks at, in inches.
+  Vec3 target{0.0, 0.0, 0.0};
+  /// Camera up vector.
+  Vec3 up{0.0, 0.0, 1.0};
+  /// Field of view in degrees (SketchUp default 35).
+  double fov{35.0};
+  /// True for parallel (orthographic) projection.
+  bool parallel{};
+  /// Visible height in inches when `parallel`.
+  double ortho_height{};
+};
+
+/// Reusable geometry container (component definition or group).
+struct Definition {
+  /// Unique TLV entity ID.
+  EntityId id{};
+  /// GUID string identifier.
+  std::string guid;
+  /// Definition name.
+  std::string name;
+  /// Vertices in local definition space.
+  std::map<EntityId, Vertex> vertices;
+  /// Edges in local definition space.
+  std::map<EntityId, Edge> edges;
+  /// Faces in local definition space.
+  std::map<EntityId, Face> faces;
+  /// Child component/group instances placed inside this definition.
+  std::vector<Instance> instances;
+  /// Section planes placed inside this definition.
+  std::vector<SectionPlane> section_planes;
+  /// Text annotations placed inside this definition.
+  std::vector<TextEntity> texts;
+  /// Dimensions placed inside this definition.
+  std::vector<Dimension> dimensions;
+  /// Construction/guide lines placed inside this definition.
+  std::vector<ConstructionLine> construction_lines;
+  /// Construction/guide points placed inside this definition.
+  std::vector<ConstructionPoint> construction_points;
+  /// Always faces camera behavior flag.
+  bool always_faces_camera{};
+  /// Shadows face sun behavior flag.
+  bool shadows_face_sun{};
+  /// Image entity flag.
+  bool is_image{};
+};
+
+/// Top-level model container holding all definitions, layers, materials, and styles.
+class OPENSKP_EXPORT SkpModel {
+ public:
+  /// SketchUp version string (e.g. "{25.0.575}").
+  std::string version{"unknown"};
+  /// The model's unit-system string (e.g. "Millimeter"), read from
+  /// meta/meta.dat in modern (VFF) files. Unset for legacy (pre-2021 MFC)
+  /// files, which carry no equivalent container, or when the tag isn't
+  /// found.
+  std::optional<std::string> units;
+  /// Geometry definitions map keyed by numeric entity ID.
+  std::map<EntityId, Definition> definitions;
+  /// Model layers.
+  std::vector<Layer> layers;
+  /// The file's saved scenes (VFF files; classic pre-2021 files import
+  /// with none).
+  std::vector<Page> pages;
+  /// The view the model was saved with (VFF `FA01` > `34BC`). SketchUp reopens
+  /// the file at this view whichever scene is selected, even when the scene
+  /// was not updated. Unset for classic pre-2021 files.
+  std::optional<ViewCamera> camera;
+  /// Model-level linear dimensions with world-space endpoints (VFF
+  /// files). Legacy files surface text-only dimensions per definition
+  /// instead (`Definition::dimensions`).
+  std::vector<Dimension> dimensions;
+  /// Model materials sequence.
+  std::deque<Material> materials;
+  /// Model rendering styles.
+  std::vector<Style> styles;
+  /// Every attribute dictionary attached to the model itself (Ruby's
+  /// `Sketchup::Model#attribute_dictionaries`), keyed by the dictionary's
+  /// own declared name - where extensions typically persist model-wide
+  /// settings. Values keep their native types, same as
+  /// `Instance::attribute_dictionaries`. Populated for modern (VFF) files;
+  /// empty for legacy (pre-2021 MFC) files.
+  ParsedAttrDictionaries attribute_dictionaries;
+
+  /// Access the implicit root model definition.
+  Definition& root() noexcept;
+  /// Access the implicit root model definition (const).
+  const Definition& root() const noexcept;
+
+  /// Look up a material by its TLV entity ID.
+  Material* material_by_id(EntityId id) noexcept;
+  /// Look up a material by its TLV entity ID (const).
+  const Material* material_by_id(EntityId id) const noexcept;
+
+  /// Enumerate all materials keyed by their TLV entity ID.
+  std::map<EntityId, Material*> materials_by_id();
+  /// Enumerate all materials keyed by their TLV entity ID (const).
+  std::map<EntityId, const Material*> materials_by_id() const;
+
+ private:
+  Definition root_{0, "ROOT", "ROOT_MODEL"};
+  std::unordered_map<EntityId, std::size_t> material_indices_;
+  friend SkpModel build_model(struct RawParsed&&, const ParseOptions&);
+};
+}  // namespace openskp

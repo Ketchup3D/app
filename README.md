@@ -1,12 +1,13 @@
-# Ketchup
+# KetchUp
 
-A small 3D edge editor written in Rust. The same editor runs as a native Windows, macOS, or Linux application and in a desktop browser through WebAssembly.
+A small 3D edge and face editor written in Rust. The same editor runs as a native Windows, macOS, or Linux application and in a desktop browser through WebAssembly.
 
-The workspace includes Select, Line, Erase, and Orbit, endpoint/midpoint/axis inference, measured lines, directional box selection, undo/redo, and local autosave. It starts with an empty model. Faces, solid modeling, file import/export, mobile, and cloud storage are outside this version.
+The workspace includes Select, Line, Rectangle, Circle, Polygon, Freehand, Push/Pull, Scale, Offset, Move, Paint, Tape Measure, Protractor, Dimensions, a Union flyout, Erase, and Orbit, automatic geometry snapping, filled planar faces, measured lines, directional box selection, groups and components, a right-click object menu, geometry clipboard, undo/redo, local autosave, and portable `.ketchup` project files. It starts with an empty model. File → Import/Export adds SketchUp `.skp` import and Wavefront `.obj` export. Mobile and cloud storage are outside this version.
 
 ## Prerequisites
 
 - Rust 1.95 or newer, installed with rustup; the repository was checked with Rust 1.97.1.
+- A C/C++17 compiler for the native SketchUp reader (GCC/Clang on Linux, Xcode Clang on macOS, or MSVC on Windows). Browser builds do not require it.
 - A GPU/driver supported by wgpu. The browser prefers WebGPU and falls back to WebGL2.
 - On Linux, development libraries for X11/Wayland and xkbcommon. For Debian/Ubuntu: `sudo apt install build-essential pkg-config libx11-dev libxcb1-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev`.
 - On Windows, the MSVC Rust toolchain and Visual Studio C++ build tools.
@@ -17,6 +18,14 @@ The workspace includes Select, Line, Erase, and Orbit, endpoint/midpoint/axis in
 ```sh
 cargo run -p ketchup-app
 ```
+
+On Linux, register the application launcher and icons once after compiling:
+
+```sh
+python3 scripts/install_linux_desktop.py
+```
+
+This installs into your user data directory (`$XDG_DATA_HOME`, or `~/.local/share`) without root access. GNOME on Wayland uses the application's ID and matching desktop entry to find its icon. Restart KetchUp after installing. The launcher points to `target/debug/ketchup-app`, so later development compilations update the same executable. For a release installation, pass its path: `python3 scripts/install_linux_desktop.py target/release/ketchup-app`. Keep that executable in place, or rerun the installer with its new path if you move it.
 
 ## Run in a browser
 
@@ -45,7 +54,119 @@ cargo build -p ketchup-app --release --locked
 
 The executable is `target/release/ketchup-app` (`ketchup-app.exe` on Windows). These commands produce executables, not installers or signed application bundles. Native builds should run on the corresponding OS; this project does not configure cross-linkers or signing identities.
 
-Browser:
+### Automated desktop builds
+
+[Build desktop](.github/workflows/build.yml) runs when a `v*` tag is pushed
+(for example, `git push origin v0.1.0`). The tag must be a stable `vX.Y.Z`
+version matching `[workspace.package].version` in `Cargo.toml`. It builds with
+stable Rust and the committed `Cargo.lock`, runs update regression tests, then
+packages the app with Velopack:
+
+| Artifact | Platform | Install / run |
+|---|---|---|
+| `ketchup-windows-x64` | Windows x64 (MSVC) | `*-win-x64-Setup.exe` (per-user installer) |
+| `ketchup-macos-arm64` | macOS Apple Silicon | `*-osx-arm64-Setup.pkg` or the portable `.app` zip |
+| `ketchup-linux-x64` | Linux x64 (built on Ubuntu 22.04) | `*-linux-x64.AppImage` |
+
+After all three builds succeed, the workflow creates a GitHub Release for the
+pushed tag with generated release notes, installers, portable packages, full
+`.nupkg` updates, one `releases.<platform>.json` feed per OS/architecture, and
+`SHA256SUMS`. It validates the packages against their feed hashes and publishes
+only after every platform succeeds and all assets have uploaded. Reruns can
+replace assets on an unfinished draft; a published version cannot be overwritten.
+To ship another update, bump the workspace version and push a new matching tag.
+
+Download the installer or AppImage from [Releases](https://github.com/Ketchup3D/app/releases).
+Workflow artifacts are also available on the run's summary page for 14 days.
+On Linux, keep the AppImage in a user-writable location, run `chmod +x` on it,
+and launch it. AppImage mounting may require your distro's FUSE 2 compatibility
+package; the GPU/display runtime requirements above still apply. Do not extract
+the AppImage or run a bare executable if you want automatic updates.
+Publishing uses GitHub's automatic token. Signing needs the credentials below.
+
+### Automatic desktop updates
+
+The packaged app checks public GitHub Releases in the background at most once
+every 24 hours, including during long editor sessions. It downloads newer
+versions for its own OS/architecture and verifies package size and checksums.
+Full packages are published initially; delta packages are not required. No
+update server, end-user GitHub login, or embedded GitHub token is needed.
+
+**Help → Check for updates…** bypasses the daily limit and opens the update
+window. That window also controls automatic checking/downloading. Disabling it
+stops future automatic checks; a check already in progress may finish, and an
+already downloaded update will still install on the next launch. Failed checks
+leave the app usable and can be retried manually. The **Update ready** button
+appears after a download completes. Installation happens on the next launch,
+or through **Restart now**. KetchUp does not force a restart during editing.
+
+Restart now offers to save modified work as a `.ketchup` file, or keep it in
+local recovery. It saves the model and its project-file association before
+closing; a save failure prevents restart. Finish drawing/modeling previews
+before restarting. Autosave, update preferences, and restart information stay
+in the existing application data directory outside the installed application.
+`KETCHUP_DATA_DIR` redirects them for testing. Browser builds do not include
+Velopack; development builds and unpackaged executables do not contact the
+update service.
+
+Users of older bare executables must manually install one updater-enabled
+release. Subsequent releases update through Velopack. GitHub's unauthenticated
+API limits apply, so networks with many users behind one IP may need retries;
+the update source can later move to a static HTTPS feed.
+
+### Release signing
+
+Without signing secrets, CI produces **unsigned packages for development**.
+Before public distribution, configure signing and set the repository Actions
+variable `KETCHUP_REQUIRE_SIGNING=true`. This makes packaging fail if Windows or
+macOS signing is missing. Checksums detect damaged downloads; they do not
+replace publisher signatures. Release access and signing credentials should be
+restricted to maintainers. Velopack's [signing guide](https://docs.velopack.io/packaging/signing)
+describes certificate/account setup.
+
+For Windows, configure these repository Actions secrets:
+
+| Secret | Value |
+|---|---|
+| `AZURE_CREDENTIALS` | Azure service-principal credentials JSON for `azure/login`, with permission to sign using the chosen profile |
+| `WINDOWS_AZURE_SIGNING` | JSON with `Endpoint`, `CodeSigningAccountName`, and `CertificateProfileName` for Azure Artifact Signing |
+
+The workflow logs into Azure and passes a temporary configuration file to
+Velopack's Windows signing integration. The account needs the **Artifact Signing
+Certificate Profile Signer** role. Windows SDK signing tools are supplied by
+the Windows build runner.
+
+For macOS, export the Developer ID Application and Developer ID Installer
+certificates **with their private keys** together into a password-protected
+`.p12`, then configure:
+
+| Secret | Value |
+|---|---|
+| `MACOS_CERTIFICATES_P12` | Base64 of the `.p12`, on one line |
+| `MACOS_CERTIFICATE_PASSWORD` | Password protecting the `.p12` |
+| `MACOS_SIGN_APP_IDENTITY` | Exact Developer ID Application signing identity |
+| `MACOS_SIGN_INSTALL_IDENTITY` | Exact Developer ID Installer signing identity |
+| `APPLE_ID` | Apple developer account email |
+| `APPLE_TEAM_ID` | Apple developer team ID |
+| `APPLE_APP_PASSWORD` | App-specific password for notarization |
+
+CI imports the certificates into a temporary keychain, stores a notarytool
+profile, and asks Velopack to sign and notarize the app and installer. It removes
+the `.p12` after importing and deletes the keychain even if packaging fails.
+Partially configured signing fails instead of silently producing unsigned files.
+
+The Rust dependency, `VPK_VERSION` in the workflow, and the version in
+`scripts/desktop_release.py` are pinned together at `1.2.161`. Update them
+together. Only the packaging machine needs .NET 8 for the `vpk` CLI; the Rust
+app does not require users to install .NET.
+
+Before shipping publicly, install one packaged version on each supported OS,
+make a test project, publish a newer version, and verify automatic download,
+restart, restored work/file association, the opt-out preference, and failure
+recovery. Native update tests run in tag CI; package installation and OS trust
+dialogs still need this platform smoke test.
+
+### Browser distribution
 
 ```sh
 trunk build --release --locked
@@ -57,39 +178,108 @@ Serve the resulting `dist/` directory with a static web server. Use HTTPS for We
 
 | Action | Control |
 |---|---|
-| Select | Space; click an edge, Shift-click toggles |
+| New project | File → New project; Ctrl/Command N |
+| Open project | File → Open; Ctrl/Command O |
+| Save project | File → Save; Ctrl/Command S |
+| Save project as | File → Save As; Ctrl/Command Shift S |
+| Import SketchUp geometry | File → Import/Export → Import SketchUp (.skp) |
+| Export OBJ geometry | File → Import/Export → Export Wavefront OBJ (.obj) |
+| Select | Space; click an edge or filled face, Shift-click toggles |
 | Window selection | Drag left to right; selects fully enclosed edges |
 | Crossing selection | Drag right to left; selects intersected edges |
-| Select all edges | Ctrl/Command A, outside text fields |
+| Select all visible entities | Ctrl/Command A, outside text fields |
+| Object actions | Right-click geometry or empty model space |
+| Edit group/component | Double-click; repeat for nested objects |
+| Leave editing level | Escape, double-click outside, or use the editing breadcrumb |
+| Cut / Copy / Paste | Ctrl/Command X / C / V; Paste previews at the pointer, click to place |
+| Paste in place | Ctrl/Command Shift V; retains the copied coordinates |
+| Automatic geometry snapping | Snap checkbox beside Grid; enabled by default and saved with the model |
+| Automatic axis snapping | Snap to axes checkbox beside Snap; enabled by default and saved with the model |
+| Drawing tools | Click the Line item in the left toolbar to choose Line, Rectangle, Circle, Polygon, or Freehand; the item remembers your choice |
 | Line | L; click start and end, then continue drawing |
+| Rectangle | R; click two opposite corners |
+| Circle | C; click the center, then set the radius (48 segments) |
+| Polygon | G; click the center, then a vertex; choose 3–64 sides in the drawing menu |
+| Freehand | D; drag to draw connected edges, then release to finish |
+| Push/Pull | P; click a face, move along its normal, click to confirm or type meters + Enter |
+| Union flyout | Union button in the left toolbar: Flip, Outer Shell, Union, Intersect, Trim, Split |
+| Flip | Choose Flip, then click a colored mirror plane or use Right / Left / Up for X / Y / Z |
+| Scale | S; select geometry, click a reference point, move or type a uniform scale factor + Enter |
+| Offset | Q; click near a face boundary, move inward/outward, click or type meters + Enter |
+| Move / Copy | M; click a base point and destination; tap Ctrl (Option on Mac) to toggle Copy; type meters + Enter for precision |
+| Aligned copies | After placing a Move copy, type `/N` (or `N/`) + Enter to divide the original span into N equal intervals; type `Nx` (or `xN`, `N*`, `*N`) + Enter for N copies at the original spacing |
+| Paint | B; choose a color in the inspector, then click a filled face |
+| Tape Measure | T; click two snapped points to measure distance |
+| Protractor | A; click a center, a baseline point, and an angle point |
+| Dimensions | I; click two endpoints, move the label, and click to place it; Right / Left / Up aligns the dimension with X / Y / Z; repeat or Down unlocks |
 | Precise length | Choose a preview direction, type meters, press Enter |
 | X / Y / Z axis lock | Right / Left / Up arrow; repeat to unlock |
 | Clear axis lock | Down arrow |
 | Cancel preview/gesture | Escape |
 | Erase | E; click or drag across edges |
-| Delete selection | Delete or Backspace |
+| Delete selection | Delete or Backspace; a selected face leaves its outline, a selected boundary edge also removes dependent faces |
 | Orbit | O + left-drag, or middle-drag from any tool |
 | Pan | **Hold Shift while orbiting**, including middle-drag |
 | Zoom | Mouse wheel; anchors at the pointer on the camera target plane |
 | Fit all geometry | F, or the Fit view button |
-| Reset view | House button in the left toolbar |
+| Ground, sky, and horizon colors | Environment menu in the top bar; color pickers, Sky/Ground toggles, and reset colors |
 | Undo | Ctrl/Command Z |
 | Redo | Ctrl/Command Shift Z, or Ctrl Y |
-| Shortcuts | F1 or the question-mark button |
+| Shortcuts | F1, or Help → Keyboard shortcuts |
 
-Shift may be pressed or released during an orbit gesture. Panning changes the camera position and target together without changing camera orientation. Temporary middle-button navigation preserves the active tool and unfinished line.
+Orbiting always uses the combined bounding-box center of all objects, including hidden objects, or the origin in an empty model. Orbiting preserves the current framing and zoom after panning or zooming; the model center stays at its current viewport position. Shift may be pressed or released during an orbit gesture. Panning changes the camera position and target together without changing camera orientation. Temporary middle-button navigation preserves the active tool and unfinished line.
 
-Coordinates use meters and Z-up. Free drawing starts on Z=0, or at a snapped existing point. Subsequent free segments use the horizontal plane through their start; axis inference and locks allow drawing vertically. Hover markers identify endpoints, midpoints, origin, and axes. Connecting to an existing edge's midpoint splits it into connected edges. Arbitrary crossings do not split automatically; closed loops remain wireframes. Line creation uses click-to-click input, not freehand dragging.
+Coordinates use meters and Z-up. Free drawing starts on Z=0, or at a snapped existing point/surface. Subsequent free segments use the horizontal plane through their start; axis inference and locks allow drawing vertically. Snap, checked by default, attracts drawing to visible endpoints, midpoints, arbitrary points on edges, and filled surfaces. Snap to axes, also checked by default, automatically aligns drawing directions with the red X, green Y, and blue Z axes at every point in a connected chain, including short segments. Points can also snap onto the visible model axes. Automatic alignment combines with geometry snapping, allowing perpendicular previews to acquire nearby endpoints, edges, and surfaces; explicit arrow-key locks keep points strictly on the chosen axis. The live endpoint marker and dashed axis guide show the snapped position before clicking; the same position is used when confirming the point. These options are independent; arrow-key axis locks remain available even with automatic axis snapping off. Move also combines intersecting axis guides from visible endpoints and midpoints: a target can align along X with one point and Y with another, or along all three axes. Colored dashed guides and an alignment label show the combined target before confirmation. Snap and Snap to axes must both be enabled to use these references; arrow-key locks remain strict.
+
+Close a flat outline (for example, four lines making a rectangle) to generate a filled face. Concave, vertical, and tilted planar outlines work too. Non-planar or self-crossing outlines remain edges. Snapping a new endpoint onto an existing edge splits it into connected edges; a boundary-to-boundary divider splits a face. Arbitrary crossings without a snapped endpoint do not split automatically. Line creation uses click-to-click input. Rectangle, Circle, and Polygon show a live outline before the second click and create a filled face. These shapes and Freehand stay on the plane of the face under the starting point, or a horizontal plane through that point. Freehand samples the drag into connected edges; returning to its start with Snap enabled closes the outline. Each shape or stroke is one undo step; Escape or switching tools cancels its preview.
+
+Click a face interior to select its fill; click near a visible edge to select the edge instead. Faces and edges can be selected together with Shift or box selection. Deleting a face leaves the boundary edges intact, and unrelated edits do not regenerate the fill. Retrace a boundary edge to heal an erased face. Nested outlines create independently selectable inner faces; deleting an inner fill leaves a real hole. Faces use depth-tested, double-sided rendering, and the inspector shows selected surface area.
+
+Push/Pull extrudes a face with a cap and side walls, including walls around holes. Pulling an existing solid face stretches its adjoining walls. Positive typed distances pull toward the camera-facing side; negative distances push away. Scale applies a positive uniform factor around the selection center (`2` doubles it, `0.5` halves it). Move and Scale also work on groups. Move-copy preserves the original geometry and selects the placed copy. After placing it, `/3` creates copies at one-third, two-thirds, and the end of the original span; `3x` creates three copies at one, two, and three times the original displacement. Counts can be revised repeatedly (1–1000) until the next operation; the whole array is one undo/redo step. Press Escape to end array entry while keeping placed copies. Connected vertices move together, and changes that would bend a planar face or collapse an edge are rejected. Explode grouped geometry before using Push/Pull or Offset on its faces.
+
+Offset adds parallel outlines in the face plane: positive distances inset the outer boundary and expand holes, while negative distances extend the outer boundary and shrink holes. Collapsed or crossing offsets are rejected. Paint offers preset swatches and a custom color picker. The new operations support undo/redo and autosave. Modeling previews leave the saved geometry untouched until confirmation; Escape or switching tools cancels them.
+
+Right-click offers Make Group, Create Component, Ungroup, Explode, Cut, Copy, Paste, Paste in Place, Delete, Hide, and Lock. Right-clicking a selected entity preserves the whole selection; clicking another entity selects it first. Unavailable actions are disabled. Groups and named components select as single objects, support nesting, and isolate their geometry from new lines. Ungroup releases groups; Explode also releases component instances, one level at a time. Move and Scale act on the whole selected object. Double-click a group or component to edit its children; double-click nested objects to continue inward. Selection, drawing, transformations, Push/Pull, Offset, deletion, grouping, and paste act within the current editing level. The breadcrumb shows the open hierarchy; click an ancestor or Model to return, press Escape to close one level, or double-click outside the open object. Escape first cancels any unfinished operation. Locked objects cannot be opened. Component copies retain a shared definition: edits to their children update every linked instance while preserving each instance’s position and scale, including components nested in other definitions. Exploding detaches that instance.
+
+Hide removes geometry from rendering, picking, snapping, and Fit; right-click and choose Unhide All to restore it. Locked entities remain selectable and appear with blue edges; choose Unlock to edit them again. These changes participate in undo/redo and local saving. Clipboard copies preserve faces, holes, intentionally missing fills, colors, nested objects, and original coordinates. Copy writes a KetchUp geometry payload to the system clipboard for keyboard paste into another KetchUp window; the context menu also keeps an in-session copy. Escape cancels paste placement without changing the model.
+
+Tape Measure shows the true 3D distance between two points. Protractor measures the smaller angle (0–180°) between two rays, with a live arc and degree readout. These tools leave geometry unchanged; their results stay visible until you start another measurement, switch tools, or press Escape. Middle-button navigation preserves an unfinished measurement.
+
+Dimensions adds persistent linear annotations with extension lines, endpoint ticks, and a meter label. The third click places the dimension away from the measured geometry. During placement, Right / Left / Up locks the dimension line and its displayed length to X / Y / Z while preserving both picked endpoints; repeat the arrow or press Down to return to the full aligned length. The saved dimension keeps this alignment when the source geometry changes. Snapped endpoints attach to vertices, edges, or surfaces and update when that geometry moves or scales; deleting the source geometry keeps the annotation at its last position. Free points remain in world coordinates. Select a dimension by its line or label to delete, move, copy, group, or hide it. Dimensions support undo/redo, local saving, and component editing.
+
+The toolbar is ordered Select, Line, Erase, Orbit, Push/Pull, Scale, Offset, Move, Paint, Dimensions, and Union. Dimensions groups Dimensions, Tape Measure, and Protractor, with Dimensions selected by default. Every flyout entry has an icon, and each group remembers its last chosen tool.
+
+The **Union** flyout keeps Flip, Outer Shell, Union, Intersect, Trim, and Split together. Flip mirrors the selection through its bounds center using a colored plane, an inspector axis button, or the X/Y/Z arrow shortcuts. Mirrored component instances retain their links and placement when their definition is edited.
+
+Boolean tools work on closed solid groups/components or separate connected loose bodies. Fill missing faces and remove stray/internal edges first. For Union, Outer Shell, Intersect, or Split, either select two bodies before choosing the tool, or click the first and second body. For Trim, click the cutter first and the target second; the cutter stays. Escape cancels the first-body choice.
+
+Union combines volumes while retaining enclosed voids. Outer Shell also removes surfaces around fully enclosed voids; through-holes remain open. Intersect keeps shared volume. Split produces separate groups for the overlap and each body's remainder, omitting empty pieces. Union, Outer Shell, Intersect, and Split replace their two input bodies; Trim replaces only the target. Results are editable groups with planar faces and preserved face colors. Operations support undo/redo, local saving, and scoped group/component editing. Open, locked, or excessively complex bodies and unrepresentable results are rejected without modifying the model.
+
+## Right sidebar
+
+The Model inspector has independent, collapsible Entity Info, Components, Tags, and Display sections. It scrolls when the sections exceed the window height.
+
+Components lists each component definition currently used in the model, including nested components, with its instance count. Search by name, choose **Place instance**, and click in the viewport to place a linked copy. Escape cancels placement. **Make Component…** creates one from the selection.
+
+Tags supports adding, renaming, coloring, assigning, hiding, and deleting tags. Select entities and choose a tag from the assignment dropdown; **Untagged** clears the assignment. A group's or component's tag visibility applies to its descendants. Deleting a tag keeps its geometry. Tag edits support undo and redo.
+
+Display controls axes, inference guides, grid, dimensions, hidden geometry and objects, face styles, X-Ray, color by tag, edge styles, section cuts and fill, face shadows, fog, and environment colors. Sections use a horizontal plane with an adjustable height; shadows use adjustable sun direction, elevation, and darkness rather than geolocation or calendar simulation. Shadows fall only on model faces, including vertical and tilted surfaces, and respect face holes and section cuts. Display settings and tags are saved in `.ketchup` projects and local autosave. **Reset display** restores the defaults.
 
 ## Saved models
 
-The last model name, geometry, and camera are saved locally after activity settles. Geometry edits are also saved immediately in the browser. History holds the last 100 geometry operations and is not persisted. New model is undoable for geometry; naming and camera changes are outside geometry history.
+File → **New project** starts a fresh project. **Open** reads a `.ketchup` file; **Save As** writes a separate project file, including the model name, geometry, camera, and snapping settings. On desktop, **Save** updates the opened or last saved file; a project without a file opens Save As. Saves replace the destination only after writing a complete temporary file. In the browser, Save and Save As download a `.ketchup` file named after the model; the browser controls the download location. Rename the model to choose a different download name. New and Open offer Save, Discard changes, and Cancel when the current project has changes that have not been saved to a project file. Invalid files and cancelled operations leave the current project intact. Opening or creating a project resets geometry history.
+
+File → **Import/Export → Import SketchUp (.skp)** adds geometry to the current editing level at its original location, selects it, and fits the view. Import is one undo step and keeps the current project name and save destination. Nested group/component placements become independent editable groups; face holes, solid material colors, explicit hiding, and inch-to-metre conversion are retained. Textures, transparency, scenes, annotations, and linked component definitions are omitted. The embedded reader handles legacy MFC and modern ZIP/VFF containers, but some SketchUp versions or model features may be unsupported. Files larger than 64 MiB, malformed geometry, and recursive definitions are rejected before changing the document. Cancelled or failed imports leave the project intact. Both desktop and browser imports run locally; no SketchUp installation or upload is needed. Desktop parsing uses a compiled C++ reader on the file-operation thread; browser parsing runs in a dedicated Web Worker so the workspace stays responsive. Face picking reuses cached planes and a spatial index, and the inspector reuses cached surface areas for large imported models.
+
+**Export Wavefront OBJ (.obj)** writes visible edges and triangulated faces, including face holes, using metre coordinates with Z up. OBJ export does not include materials, dimensions, or group/component links. Desktop export uses a save dialog; browser export downloads the file. Export leaves the project destination and unsaved state unchanged.
+
+Local autosave continues independently of project files: editing never automatically overwrites an opened `.ketchup` file. The last model name, geometry (including faces, holes, face colors, and dimensions), camera, and both snapping settings are saved locally after activity settles. Geometry edits are also saved immediately in the browser. History holds the last 100 geometry operations, including fill creation/deletion, and is not persisted. Naming and camera changes are outside geometry history. Version 1 edge-only documents migrate automatically to version 2, filling their existing closed planar outlines; subsequent reloads preserve intentionally deleted faces. The browser storage key is unchanged for compatibility. A restored autosave with model content is treated as unsaved to a project file; use Save As to choose its destination again.
 
 - Desktop: the platform's local application-data directory, resolved by `directories::ProjectDirs`, in `model.json`.
 - Browser: `localStorage["ketchup.document.v1"]`, scoped to the current origin.
 - For isolated desktop sessions/tests, set `KETCHUP_DATA_DIR` to a directory of your choice.
 
-Save failures show an Unsaved indicator with the error in its tooltip. The live model remains editable; File → Save now retries. An unreadable or unsupported document starts a clean workspace with a recovery notice. The existing saved data is not overwritten until you edit or explicitly save.
+Local autosave failures show an Unsaved indicator with the error in its tooltip. The live model remains editable; File → Save locally now retries. Project file errors appear in a dialog and preserve the current project and its destination. An unreadable or unsupported autosave starts a clean workspace with a recovery notice. The existing saved data is not overwritten until you edit or explicitly save.
 
 ## Development and verification
 
@@ -97,6 +287,12 @@ Save failures show an Unsaved indicator with the error in its tooltip. The live 
 cargo check --workspace --locked
 cargo check --workspace --target wasm32-unknown-unknown --locked
 cargo test --workspace --locked
+```
+
+The vendored SketchUp reader and adapter can also be tested without compiling the application:
+
+```sh
+node --test scripts/test_skp_import.cjs
 ```
 
 An optional offscreen GPU test renders the actual UI and custom viewport to PNGs without opening a window:
@@ -107,12 +303,39 @@ cargo test -p ketchup-app gpu_renders_empty_and_modeled_workspace --locked -- --
 
 Snapshots appear in `target/qa/`. This test requires a working native GPU adapter. Normal tests cover document validation, geometry, inference, camera math, selection, undo/redo, and synthetic keyboard/pointer interactions through egui.
 
+Run the repeatable CPU interaction benchmarks explicitly (10/100-face drawing,
+10/100-object Move, a 4,096-face imported model, and axes on/off with 512 groups):
+
+```sh
+cargo test -p ketchup-app --locked --config 'profile.test.package.ketchup-app.opt-level=2' --config 'profile.test.package.ketchup-core.opt-level=2' workload_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+These settings optimize application geometry and rendering code while retaining
+the existing test dependencies. Timings exclude model construction and GPU
+presentation; compare runs on the same machine without other CPU-heavy work.
+The normal suite also exercises all 22 tools through interrupted gestures,
+focus loss, resizing, and document reload, plus display styles and effects.
+
+For a sequential feature audit, including the normally ignored GPU comparisons
+and per-tool CPU workloads, run:
+
+```sh
+python3 scripts/run_feature_audit.py
+```
+
+This uses an isolated temporary autosave directory and writes the feature
+checklist, individual test results, GPU comparisons, timings, command logs, and
+remaining platform checks to `target/qa/feature-audit/report.txt` and
+`report.json`. Every display field has an independent before/after GPU case;
+normal interaction tests click the individual toggles, face-style choices,
+color pickers, paint swatches, and project confirmation buttons.
+
 Verified during implementation: native Linux and browser WASM Cargo checks; core and UI interaction tests; offscreen Vulkan rendering of empty, modeled, and compact workspaces. Windows/macOS execution, browser startup, and runtime WebGPU/WebGL2 fallback still require platform smoke testing. Production builds and hosted deployment were not run.
 
 ## Layout
 
-- `crates/ketchup-core`: double-precision document geometry, inference, picking, camera, tool definitions, and bounded history. It has no GUI or GPU dependencies.
+- `crates/ketchup-core`: double-precision document geometry, planar face discovery/triangulation, inference, picking, camera, tool definitions, and bounded history. It has no GUI or GPU dependencies.
 - `crates/ketchup-app`: egui workspace, gesture routing, local persistence, native/browser launchers, and the wgpu/WGSL edge renderer. Model coordinates remain independent of GPU resources.
 - `index.html` and `Trunk.toml`: static browser host and WASM development configuration.
 
-The viewport uses antialiased triangle strips for consistent edge widths, CPU projection/clipping, and the same shader and editor behavior on every target. Rendering is event-driven rather than a continuous idle loop.
+The viewport uses depth-tested filled triangles and antialiased triangle strips for consistent edge widths, CPU projection/clipping, and the same shader and editor behavior on every target. Rendering is event-driven rather than a continuous idle loop.

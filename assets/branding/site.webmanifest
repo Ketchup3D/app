@@ -1,0 +1,16 @@
+{
+  "id": "../../",
+  "name": "KetchUp — 3D workspace",
+  "short_name": "KetchUp",
+  "description": "A precise little space for your next big idea.",
+  "start_url": "../../",
+  "scope": "../../",
+  "display": "standalone",
+  "background_color": "#f0f1eb",
+  "theme_color": "#d94836",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

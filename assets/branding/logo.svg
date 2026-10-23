@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">KetchUp</title>
+  <rect width="128" height="128" rx="28" fill="#D94836"/>
+  <polygon fill="#FFE0CD" points="28,39 43,30 57,30 42,39"/>
+  <polygon fill="#F2A38B" points="42,39 57,30 57,51 42,60"/>
+  <polygon fill="#FFE0CD" points="62,39 77,30 95,30 80,39"/>
+  <polygon fill="#F2A38B" points="80,39 95,30 70,57 55,66"/>
+  <polygon fill="#FFE0CD" points="55,66 70,57 98,88 83,97"/>
+  <polygon fill="#F2A38B" points="42,73 57,64 57,88 42,97"/>
+  <polygon fill="#FFF9F2" points="28,39 42,39 42,60 62,39 80,39 55,66 83,97 64,97 42,73 42,97 28,97"/>
+</svg>
