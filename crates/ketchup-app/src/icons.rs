@@ -14,11 +14,24 @@ const FACE: Color32 = Color32::from_rgb(211, 225, 238);
 const METAL: Color32 = Color32::from_rgb(226, 231, 233);
 
 pub fn tool(p: &egui::Painter, rect: Rect, tool: Tool) {
+    paint_tool(p, rect, tool, OUTLINE);
+}
+
+pub fn ui_tool(p: &egui::Painter, rect: Rect, tool: Tool) {
+    let outline = if p.ctx().global_style().visuals.dark_mode {
+        Color32::from_rgb(203, 214, 204)
+    } else {
+        OUTLINE
+    };
+    paint_tool(p, rect, tool, outline);
+}
+
+fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
     let c = rect.center();
     let r = rect.width().min(rect.height()) * 0.36;
     let xy = |x: f32, y: f32| c + egui::vec2(x * r, y * r);
     let color = match tool {
-        Tool::Select => OUTLINE,
+        Tool::Select => outline,
         Tool::TapeMeasure | Tool::Protractor => GOLD,
         Tool::Erase
         | Tool::PushPull
@@ -54,7 +67,7 @@ pub fn tool(p: &egui::Painter, rect: Rect, tool: Tool) {
                 Stroke::new(1., PINK_EDGE),
             ));
             p.line_segment([xy(-0.75, 0.75), xy(-0.95, 0.95)], Stroke::new(2., GOLD));
-            p.line_segment([xy(-0.9, 1.), xy(-0.25, 1.)], Stroke::new(1., OUTLINE));
+            p.line_segment([xy(-0.9, 1.), xy(-0.25, 1.)], Stroke::new(1., outline));
         }
         Tool::Rectangle => {
             p.rect_filled(Rect::from_two_pos(xy(-1., -0.7), xy(1., 0.7)), 0, FACE);
@@ -128,7 +141,7 @@ pub fn tool(p: &egui::Painter, rect: Rect, tool: Tool) {
             );
         }
         Tool::Flip => {
-            p.line_segment([xy(0., -1.), xy(0., 1.)], Stroke::new(1.2, OUTLINE));
+            p.line_segment([xy(0., -1.), xy(0., 1.)], Stroke::new(1.2, outline));
             for sign in [-1., 1.] {
                 let (fill, edge) = if sign < 0. { (FACE, BLUE) } else { (PINK, RED) };
                 p.add(egui::Shape::convex_polygon(
@@ -169,7 +182,7 @@ pub fn tool(p: &egui::Painter, rect: Rect, tool: Tool) {
                         xy(-0.3, 0.5),
                         xy(-1., 0.5),
                     ],
-                    Stroke::new(2.3, OUTLINE),
+                    Stroke::new(2.3, outline),
                 ));
             }
             if tool == Tool::Union {
@@ -237,7 +250,7 @@ pub fn tool(p: &egui::Painter, rect: Rect, tool: Tool) {
                         bucket(0.56 * angle.cos(), -0.43 - 0.57 * angle.sin())
                     })
                     .collect(),
-                Stroke::new(1.4, OUTLINE),
+                Stroke::new(1.4, outline),
             ));
             p.add(egui::Shape::convex_polygon(
                 vec![
@@ -287,13 +300,13 @@ pub fn tool(p: &egui::Painter, rect: Rect, tool: Tool) {
                 egui::StrokeKind::Inside,
             );
             p.circle_filled(xy(-0.2, -0.1), r * 0.35, METAL);
-            p.circle_stroke(xy(-0.2, -0.1), r * 0.35, Stroke::new(1.2, OUTLINE));
+            p.circle_stroke(xy(-0.2, -0.1), r * 0.35, Stroke::new(1.2, outline));
             p.add(egui::Shape::line(
                 vec![xy(0.5, 0.3), xy(1., 0.3), xy(1., 0.9), xy(-0.1, 0.9)],
-                Stroke::new(1.65, OUTLINE),
+                Stroke::new(1.65, outline),
             ));
             for x in [0.2, 0.5, 0.8] {
-                p.line_segment([xy(x, 0.9), xy(x, 0.65)], Stroke::new(1.2, OUTLINE));
+                p.line_segment([xy(x, 0.9), xy(x, 0.65)], Stroke::new(1.2, outline));
             }
         }
         Tool::Protractor => {
@@ -317,16 +330,16 @@ pub fn tool(p: &egui::Painter, rect: Rect, tool: Tool) {
                     stroke,
                 );
             }
-            p.circle_filled(xy(0., 0.4), 2., OUTLINE);
+            p.circle_filled(xy(0., 0.4), 2., outline);
         }
         Tool::Dimensions => {
             for x in [-0.8, 0.8] {
-                p.line_segment([xy(x, -0.9), xy(x, 0.9)], Stroke::new(1.2, OUTLINE));
+                p.line_segment([xy(x, -0.9), xy(x, 0.9)], Stroke::new(1.2, outline));
             }
             p.line_segment([xy(-0.8, -0.3), xy(0.8, -0.3)], stroke);
             p.line_segment([xy(-1., 0.), xy(-0.6, -0.6)], stroke);
             p.line_segment([xy(0.6, 0.), xy(1., -0.6)], stroke);
-            p.line_segment([xy(-0.4, 0.6), xy(0.4, 0.6)], Stroke::new(1.65, OUTLINE));
+            p.line_segment([xy(-0.4, 0.6), xy(0.4, 0.6)], Stroke::new(1.65, outline));
             for x in [-0.8, 0.8] {
                 p.circle_filled(xy(x, -0.3), 2., RED);
             }
@@ -410,6 +423,27 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
             ));
             for point in [at(-4., -2.5), at(4., -2.5), at(0., 4.5)] {
                 p.line_segment([at(0., -0.5), point], s);
+            }
+        }
+        "sun" => {
+            p.circle_stroke(c, 3.5, s);
+            for i in 0..8 {
+                let angle = i as f32 * std::f32::consts::TAU / 8.;
+                let direction = egui::vec2(angle.cos(), angle.sin());
+                p.line_segment([c + direction * 6., c + direction * 8.], s);
+            }
+        }
+        "moon" => {
+            // Separate open arcs avoid long miter spikes at the crescent's tips.
+            for width in [7., 4.] {
+                let points = (0..=24)
+                    .map(|i| {
+                        let angle =
+                            std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 24.;
+                        c + egui::vec2(angle.cos() * width, angle.sin() * 7.)
+                    })
+                    .collect();
+                p.add(egui::Shape::line(points, s));
             }
         }
         "panel" => {

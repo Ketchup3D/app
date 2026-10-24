@@ -706,6 +706,72 @@ struct AxisTarget {
     distance: f64,
 }
 
+/// Project onto a world axis through an acquired geometry reference. Optional
+/// line and plane constraints must intersect in world space, not just on screen.
+pub fn infer_reference_axis(
+    camera: &Camera,
+    size: DVec2,
+    cursor: DVec2,
+    reference: DVec3,
+    constraint: Option<(DVec3, Axis)>,
+    plane: Option<(DVec3, DVec3)>,
+) -> Option<(Snap, AxisGuide)> {
+    let view = camera.view(size);
+    let ray = view.ray(cursor);
+    let origin_pixel = view.project(reference)?;
+    [Axis::X, Axis::Y, Axis::Z]
+        .into_iter()
+        .filter_map(|axis| {
+            let direction = axis.vector();
+            let projected_direction = view
+                .project(reference + direction * camera.distance)
+                .or_else(|| view.project(reference - direction * camera.distance))?
+                - origin_pixel;
+            if projected_direction.length_squared() < 1e-8 {
+                return None;
+            }
+            let point = if let Some((start, locked)) = constraint {
+                crate::Ray {
+                    origin: reference,
+                    direction,
+                }
+                .axis(start, locked.vector())
+                .or_else(|| ray.axis(reference, direction))?
+            } else if let Some((origin, normal)) = plane {
+                let denominator = direction.dot(normal);
+                if denominator.abs() > 1e-9 {
+                    reference + direction * (origin - reference).dot(normal) / denominator
+                } else {
+                    ray.axis(reference, direction)?
+                }
+            } else {
+                ray.axis(reference, direction)?
+            };
+            if (point - reference).cross(direction).length() > 1e-6
+                || constraint.is_some_and(|(start, locked)| {
+                    (point - start).cross(locked.vector()).length() > 1e-6
+                })
+                || plane.is_some_and(|(origin, normal)| (point - origin).dot(normal).abs() > 1e-6)
+            {
+                return None;
+            }
+            let distance = view.project(point)?.distance(cursor);
+            (distance <= 10.).then_some((
+                distance,
+                Snap {
+                    point,
+                    kind: Inference::Axis(axis),
+                },
+                AxisGuide {
+                    origin: reference,
+                    axis,
+                },
+            ))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, snap, guide)| (snap, guide))
+}
+
 fn axis_target(
     camera: &Camera,
     view: &CameraView,

@@ -38,10 +38,14 @@ fn dot(ui: &mut egui::Ui, color: Color32) {
 mod app_updates;
 #[path = "display_scene.rs"]
 mod display_scene;
+#[path = "drawing_inference.rs"]
+mod drawing_inference;
 #[path = "measurement_tools.rs"]
 mod measurement_tools;
 #[path = "move_tool.rs"]
 mod move_tool;
+#[path = "precision.rs"]
+mod precision;
 #[path = "projects.rs"]
 mod projects;
 #[path = "sidebar.rs"]
@@ -52,10 +56,11 @@ use move_tool::{CopyArray, MoveCopy};
 
 enum GestureKind {
     Navigate { pivot: Option<DVec3> },
+    DrawingNavigate,
     Select { additive: bool },
     Line,
     Shape,
-    Freehand,
+    Freehand { paused: bool },
     Modeling,
     Solid,
     Measure,
@@ -141,6 +146,9 @@ pub struct KetchupApp {
     hover: Option<u64>,
     line_start: Option<DVec3>,
     snap: Option<Snap>,
+    drawing_reference: Option<drawing_inference::DrawingReference>,
+    drawing_guide: Option<AxisGuide>,
+    drawing_projection: Option<(DVec3, DVec3)>,
     lock: Option<Axis>,
     length_input: String,
     modeling: Option<Modeling>,
@@ -150,6 +158,9 @@ pub struct KetchupApp {
     measurement: Option<measurement_tools::Measurement>,
     paint_color: [u8; 3],
     gesture: Option<Gesture>,
+    drawing_orbit_down: bool,
+    drawing_orbit_pivot: Option<DVec3>,
+    viewport_pointer: Option<Pos2>,
     viewport: Rect,
     inspector: bool,
     component_filter: String,
@@ -178,6 +189,7 @@ pub struct KetchupApp {
 impl KetchupApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply(&cc.egui_ctx);
+        restore_preference(&cc.egui_ctx, cc.storage);
         let (doc, error) = match storage::load() {
             Ok(doc) => (doc.unwrap_or_default(), None),
             Err(e) => (Document::default(), Some(e)),
@@ -232,6 +244,9 @@ impl KetchupApp {
             hover: None,
             line_start: None,
             snap: None,
+            drawing_reference: None,
+            drawing_guide: None,
+            drawing_projection: None,
             lock: None,
             length_input: String::new(),
             modeling: None,
@@ -241,6 +256,9 @@ impl KetchupApp {
             measurement: None,
             paint_color: [195, 96, 67],
             gesture: None,
+            drawing_orbit_down: false,
+            drawing_orbit_pivot: None,
+            viewport_pointer: None,
             viewport: Rect::NOTHING,
             inspector: true,
             component_filter: String::new(),
@@ -281,6 +299,11 @@ impl KetchupApp {
         ctx.request_repaint_after(Duration::from_secs(5));
     }
     fn set_tool(&mut self, tool: Tool) {
+        self.drawing_reference = None;
+        self.drawing_guide = None;
+        self.drawing_projection = None;
+        self.drawing_orbit_down = false;
+        self.drawing_orbit_pivot = None;
         self.hover = None;
         self.solid_first = None;
         self.flip_hover = None;
@@ -360,6 +383,9 @@ impl KetchupApp {
         }
     }
     fn undo(&mut self, ctx: &egui::Context, redo: bool) {
+        self.drawing_reference = None;
+        self.drawing_guide = None;
+        self.drawing_projection = None;
         self.solid_first = None;
         self.flip_hover = None;
         self.last_move_copy = None;
@@ -707,16 +733,16 @@ impl KetchupApp {
         };
         let mut end = snap.point;
         if precise && !self.length_input.trim().is_empty() {
-            match self.length_input.trim().parse::<f64>() {
-                Ok(length) if length.is_finite() && length > 1e-7 && length <= 1e7 => {
+            match precision::positive_length(&self.length_input) {
+                Ok(length) => {
                     let Some(direction) = (end - start).try_normalize() else {
                         self.say(ctx, "Move the pointer to choose a direction first");
                         return;
                     };
                     end = start + direction * length;
                 }
-                _ => {
-                    self.say(ctx, "Enter a positive length in meters, such as 2.5");
+                Err(message) => {
+                    self.say(ctx, message);
                     return;
                 }
             }
@@ -803,6 +829,10 @@ impl KetchupApp {
         })
     }
     fn drawing_points(&self) -> Vec<DVec3> {
+        self.precise_drawing_points()
+            .unwrap_or_else(|_| self.raw_drawing_points())
+    }
+    fn raw_drawing_points(&self) -> Vec<DVec3> {
         let Some(drawing) = &self.drawing else {
             return vec![];
         };
@@ -859,8 +889,23 @@ impl KetchupApp {
         }
     }
     fn commit_drawing(&mut self, ctx: &egui::Context) {
-        let points = self.drawing_points();
+        if self.tool != Tool::Freehand {
+            if let Some(pos) = ctx
+                .input(|i| i.pointer.hover_pos())
+                .filter(|p| self.viewport.contains(*p))
+            {
+                self.update_pointer(pos);
+            }
+        }
+        let points = match self.precise_drawing_points() {
+            Ok(points) => points,
+            Err(message) => {
+                self.say(ctx, message);
+                return;
+            }
+        };
         let flat_rectangle = self.tool == Tool::Rectangle
+            && self.length_input.trim().is_empty()
             && points.windows(2).any(|pair| {
                 self.doc
                     .camera
@@ -897,6 +942,8 @@ impl KetchupApp {
         );
         self.drawing = None;
         self.snap = None;
+        self.gesture = None;
+        self.length_input.clear();
     }
     fn begin_modeling(&mut self, pos: Pos2, ctx: &egui::Context) {
         self.last_move_copy = None;
@@ -1058,12 +1105,7 @@ impl KetchupApp {
             }
             _ => return,
         };
-        let value = self
-            .length_input
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .unwrap_or(edit.value);
+        let value = precision::modeling_value(self.tool, &self.length_input).unwrap_or(edit.value);
         if matches!(self.tool, Tool::PushPull | Tool::Offset)
             && value.abs() < 1e-7
             && self.length_input.trim().is_empty()
@@ -1149,10 +1191,10 @@ impl KetchupApp {
         let value = if self.length_input.trim().is_empty() {
             edit.value
         } else {
-            match self.length_input.trim().parse::<f64>() {
-                Ok(value) if value.is_finite() => value,
-                _ => {
-                    self.say(ctx, "Enter a finite number, such as 2.5");
+            match precision::modeling_value(self.tool, &self.length_input) {
+                Ok(value) => value,
+                Err(message) => {
+                    self.say(ctx, message);
                     return;
                 }
             }
@@ -1226,6 +1268,9 @@ impl KetchupApp {
             }
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.drawing_reference = None;
+            self.drawing_guide = None;
+            self.drawing_projection = None;
             let solid_operation = self.solid_first.take().is_some();
             self.flip_hover = None;
             let measurement_operation = self.measurement.take().is_some();
@@ -1355,6 +1400,14 @@ impl KetchupApp {
                         }
                         continue;
                     }
+                    // Letter and space keys belong to an in-progress dimension,
+                    // including unit suffixes, rather than tool shortcuts.
+                    if self.precision_available()
+                        && !self.length_input.is_empty()
+                        && ((Key::A..=Key::Z).contains(&key) || key == Key::Space)
+                    {
+                        continue;
+                    }
                     match key {
                         Key::Space => self.set_tool(Tool::Select),
                         Key::L => self.set_tool(Tool::Line),
@@ -1375,16 +1428,14 @@ impl KetchupApp {
                         Key::F => self.fit(ctx),
                         Key::Delete => self.erase_selected(ctx),
                         Key::Backspace => {
-                            if (self.tool == Tool::Line && self.line_start.is_some())
-                                || self.modeling.is_some()
-                                || self.last_move_copy.is_some()
-                            {
+                            if self.precision_available() {
                                 self.length_input.pop();
                             } else {
                                 self.erase_selected(ctx);
                             }
                         }
                         Key::Enter if self.tool == Tool::Line => self.commit_line(ctx, true),
+                        Key::Enter if self.drawing.is_some() => self.commit_drawing(ctx),
                         Key::Enter if self.modeling.is_some() => self.commit_modeling(ctx),
                         Key::Enter if self.last_move_copy.is_some() => self.commit_move_array(ctx),
                         Key::ArrowRight | Key::ArrowLeft | Key::ArrowUp
@@ -1419,19 +1470,14 @@ impl KetchupApp {
                         _ => {}
                     }
                 }
-                egui::Event::Text(text)
-                    if (self.tool == Tool::Line && self.line_start.is_some())
-                        || self.modeling.is_some()
-                        || self.last_move_copy.is_some() =>
-                {
+                egui::Event::Text(text) if self.precision_available() => {
                     if text.chars().all(|c| {
-                        c.is_ascii_digit()
-                            || c == '.'
-                            || c == '-'
-                            || c == 'e'
-                            || c == '+'
-                            || (self.last_move_copy.is_some() && matches!(c, '/' | 'x' | 'X' | '*'))
-                    }) && self.length_input.len() + text.len() < 24
+                        c.is_ascii_alphanumeric()
+                            || matches!(
+                                c,
+                                '.' | '-' | '+' | '*' | '/' | '(' | ')' | ',' | '\'' | '"' | ' '
+                            )
+                    }) && self.length_input.len() + text.len() <= precision::MAX_INPUT_LEN
                     {
                         self.length_input.push_str(&text);
                     }
@@ -1464,7 +1510,7 @@ impl KetchupApp {
                 if kind == "close" {
                     ACCENT
                 } else {
-                    Color32::from_white_alpha(20)
+                    ui.visuals().widgets.hovered.weak_bg_fill
                 },
             );
         }
@@ -1549,12 +1595,13 @@ impl KetchupApp {
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let colors = Palette::for_ui(ui);
         let ctx = ui.ctx().clone();
         egui::Panel::top("top_bar")
             .exact_size(64.)
             .frame(
                 egui::Frame::new()
-                    .fill(INK)
+                    .fill(if ui.visuals().dark_mode { colors.paper } else { INK })
                     .inner_margin(egui::Margin::symmetric(18, 12)),
             )
             .show(ui, |ui| {
@@ -1643,7 +1690,7 @@ impl KetchupApp {
                         }
                         ui.add_space(18.);
                         ui.menu_button(RichText::new("File").color(PAPER), |ui| {
-                            ui.visuals_mut().override_text_color = Some(INK);
+                            ui.visuals_mut().override_text_color = Some(colors.ink);
                             for (label, modifiers, key, action) in [
                                 ("New project", egui::Modifiers::COMMAND, Key::N, 0),
                                 ("Open…", egui::Modifiers::COMMAND, Key::O, 1),
@@ -1687,13 +1734,13 @@ impl KetchupApp {
                             }
                         });
                         ui.menu_button(RichText::new("Environment").color(PAPER), |ui| {
-                            ui.visuals_mut().override_text_color = Some(INK);
+                            ui.visuals_mut().override_text_color = Some(colors.ink);
                             if crate::environment::controls(ui, &mut self.doc.display) {
                                 self.changed(&ctx);
                             }
                         });
                         ui.menu_button(RichText::new("Help").color(PAPER), |ui| {
-                            ui.visuals_mut().override_text_color = Some(INK);
+                            ui.visuals_mut().override_text_color = Some(colors.ink);
                             ui.label(format!("KetchUp {}", env!("CARGO_PKG_VERSION")));
                             if ui.button("Keyboard shortcuts").clicked() {
                                 self.help = true;
@@ -1756,22 +1803,26 @@ impl KetchupApp {
             });
     }
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let colors = Palette::for_ui(ui);
         let ctx = ui.ctx().clone();
         egui::Panel::bottom("status")
             .exact_size(42.)
             .frame(
                 egui::Frame::new()
-                    .fill(PAPER)
+                    .fill(colors.paper)
                     .inner_margin(egui::Margin::symmetric(16, 5)),
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     dot(ui, ACCENT);
+                    let drawing_orbit = self.drawing_orbit_modifier(ctx.input(|i| i.modifiers));
                     let navigating = self
                         .gesture
                         .as_ref()
                         .is_some_and(|g| matches!(g.kind, GestureKind::Navigate { .. }));
-                    let message = if navigating {
+                    let message = if drawing_orbit {
+                        "Move the cursor to orbit · Hold Shift to pan · Release Ctrl / ⌘ to resume drawing"
+                    } else if navigating {
                         if ctx.input(|i| i.modifiers.shift) {
                             "Panning · Release Shift to orbit"
                         } else {
@@ -1797,15 +1848,17 @@ impl KetchupApp {
                     } else if self.tool == Tool::Line && self.line_start.is_some() {
                         "Click to finish · Type length + Enter · Esc to stop"
                     } else if self.drawing.is_some() && self.tool == Tool::Rectangle {
-                        "Click the opposite corner · Esc to cancel"
+                        "Click the opposite corner · Type width,height (5m,50mm) + Enter"
                     } else if self.drawing.is_some()
                         && matches!(self.tool, Tool::Circle | Tool::Polygon)
                     {
-                        "Click to set the radius · Esc to cancel"
+                        "Click to set the radius · Type a radius (5cm) + Enter · Esc to cancel"
+                    } else if self.drawing.is_some() && self.tool == Tool::Freehand {
+                        "Release to finish · Type total length + Enter · Esc to cancel"
                     } else {
                         self.tool.instructions()
                     };
-                    ui.label(RichText::new(message).size(12.).color(MUTED));
+                    ui.label(RichText::new(message).size(12.).color(colors.muted));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.tool.is_measuring() {
                             ui.label(
@@ -1822,34 +1875,37 @@ impl KetchupApp {
                                     "Distance"
                                 })
                                 .size(12.)
-                                .color(MUTED),
+                                .color(colors.muted),
                             );
                             return;
                         }
                         ui.label(
-                            RichText::new(if self.last_move_copy.is_some() { "" } else if self.tool == Tool::Scale { "×" } else { "m" })
-                                .color(MUTED),
+                            RichText::new(if self.tool == Tool::Scale { "×" } else { "" })
+                                .color(colors.muted),
                         );
-                        let available = (self.tool == Tool::Line && self.line_start.is_some())
-                            || self.modeling.is_some()
-                            || self.last_move_copy.is_some();
+                        let available = self.precision_available();
                         let hint = if let Some(edit) = &self.modeling {
-                            format!("{:.3}", edit.value)
+                            if self.tool == Tool::Scale { format!("{:.3}", edit.value) } else { format!("{:.3} m", edit.value) }
                         } else if self.last_move_copy.is_some() {
                             "/3 or 3x".into()
+                        } else if self.drawing.is_some() && self.tool == Tool::Rectangle {
+                            "5m,50mm".into()
+                        } else if self.drawing.is_some() {
+                            "5cm".into()
                         } else if let (Some(a), Some(b)) = (self.line_start, self.snap) {
-                            format!("{:.3}", a.distance(b.point))
+                            format!("{:.3} m", a.distance(b.point))
                         } else {
-                            "0.000".into()
+                            "0.000 m".into()
                         };
                         let field = ui.add_enabled(
                             available,
                             egui::TextEdit::singleline(&mut self.length_input)
-                                .desired_width(106.)
+                                .desired_width(if self.tool == Tool::Rectangle { 150. } else { 106. })
                                 .font(egui::TextStyle::Monospace)
                                 .hint_text(hint)
+                                .char_limit(precision::MAX_INPUT_LEN)
                                 .margin(egui::vec2(9., 6.)),
-                        );
+                        ).on_hover_text("Use lengths or formulas: 60cm - 89mm, (1m + 20cm) / 2. Operators: + - * / and parentheses. Plain numbers default to meters; multipliers are unitless. Units: mm, cm, m, km, in, ft, yd. Rectangles accept one formula per dimension, separated by a comma. Scale uses numbers without units.");
                         if (field.has_focus() || field.lost_focus())
                             && ctx.input(|i| i.key_pressed(Key::Enter))
                         {
@@ -1857,6 +1913,8 @@ impl KetchupApp {
                                 self.commit_modeling(&ctx);
                             } else if self.last_move_copy.is_some() {
                                 self.commit_move_array(&ctx);
+                            } else if self.drawing.is_some() {
+                                self.commit_drawing(&ctx);
                             } else {
                                 self.commit_line(&ctx, true);
                             }
@@ -1869,16 +1927,19 @@ impl KetchupApp {
                                 Tool::Offset => "Offset",
                                 Tool::Move if self.last_move_copy.is_some() => "Copies",
                                 Tool::Move => "Distance",
+                                Tool::Rectangle => "Width, height",
+                                Tool::Circle | Tool::Polygon => "Radius",
                                 _ => "Length",
                             })
                             .size(12.)
-                            .color(MUTED),
+                            .color(colors.muted),
                         );
                     });
                 });
             });
     }
     fn tool_menu_item(ui: &mut egui::Ui, tool: Tool, active: bool) -> egui::Response {
+        let colors = Palette::for_ui(ui);
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.), Sense::click());
         response.widget_info(|| {
@@ -1889,14 +1950,14 @@ impl KetchupApp {
                 rect,
                 5,
                 if active {
-                    Color32::from_rgb(248, 229, 218)
+                    colors.selected
                 } else {
-                    Color32::from_rgb(235, 239, 229)
+                    colors.hovered
                 },
             );
         }
-        let color = if active { ACCENT } else { INK };
-        icons::tool(
+        let color = if active { ACCENT } else { colors.ink };
+        icons::ui_tool(
             ui.painter(),
             Rect::from_center_size(
                 egui::pos2(rect.left() + 18., rect.center().y),
@@ -1916,17 +1977,18 @@ impl KetchupApp {
             Align2::RIGHT_CENTER,
             tool.shortcut(),
             FontId::proportional(11.),
-            MUTED,
+            colors.muted,
         );
         response
     }
     fn tool_rail(&mut self, ui: &mut egui::Ui) {
+        let colors = Palette::for_ui(ui);
         egui::Panel::left("tools")
             .exact_size(76.)
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(PAPER)
+                    .fill(colors.paper)
                     .inner_margin(egui::Margin::symmetric(10, 18)),
             )
             .show(ui, |ui| {
@@ -1970,9 +2032,9 @@ impl KetchupApp {
                                     rect.shrink2(egui::vec2(0., 3.)),
                                     8,
                                     if active {
-                                        Color32::from_rgb(248, 229, 218)
+                                        colors.selected
                                     } else {
-                                        Color32::from_rgb(235, 239, 229)
+                                        colors.hovered
                                     },
                                 );
                             }
@@ -1986,8 +2048,8 @@ impl KetchupApp {
                                     ACCENT,
                                 );
                             }
-                            let color = if active { ACCENT } else { INK };
-                            icons::tool(
+                            let color = if active { ACCENT } else { colors.ink };
+                            icons::ui_tool(
                                 ui.painter(),
                                 Rect::from_center_size(
                                     rect.center() - egui::vec2(if nested { 4. } else { 0. }, 8.),
@@ -2068,6 +2130,7 @@ impl KetchupApp {
             });
     }
     fn entity_info_contents(&mut self, ui: &mut egui::Ui) {
+        let colors = Palette::for_ui(ui);
         self.solid_inspector(ui);
         self.measurement_inspector(ui);
         if self.tool == Tool::Paint {
@@ -2104,11 +2167,15 @@ impl KetchupApp {
             ui.add_space(12.);
         }
         if self.selected.is_empty() {
-            ui.label(RichText::new("Nothing selected").strong().color(MUTED));
+            ui.label(
+                RichText::new("Nothing selected")
+                    .strong()
+                    .color(colors.muted),
+            );
             ui.label(
                 RichText::new("Select an entity to see its details.")
                     .small()
-                    .color(MUTED),
+                    .color(colors.muted),
             );
             ui.add_space(4.);
         } else {
@@ -2250,15 +2317,16 @@ impl KetchupApp {
                 ui.horizontal(|ui| {
                     for (label, axis) in [("X", Axis::X), ("Y", Axis::Y), ("Z", Axis::Z)] {
                         dot(ui, axis_color(axis));
-                        ui.label(RichText::new(label).size(11.).color(MUTED));
+                        ui.label(RichText::new(label).size(11.).color(colors.muted));
                         ui.add_space(7.);
                     }
                 });
             });
     }
     fn property(ui: &mut egui::Ui, label: &str, value: &str) {
+        let colors = Palette::for_ui(ui);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(label).size(12.).color(MUTED));
+            ui.label(RichText::new(label).size(12.).color(colors.muted));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new(value).monospace().size(12.));
             });
@@ -2266,6 +2334,7 @@ impl KetchupApp {
         ui.add_space(3.);
     }
     fn inspector_panel(&mut self, ui: &mut egui::Ui) {
+        let colors = Palette::for_ui(ui);
         if !self.inspector {
             return;
         }
@@ -2273,7 +2342,7 @@ impl KetchupApp {
             egui::Panel::right("inspector")
                 .exact_size(300.)
                 .resizable(false)
-                .frame(egui::Frame::new().fill(PAPER))
+                .frame(egui::Frame::new().fill(colors.paper))
                 .show(ui, |ui| {
                     ui.spacing_mut().scroll.bar_outer_margin = 0.;
                     egui::ScrollArea::vertical()
@@ -2432,6 +2501,7 @@ impl KetchupApp {
             if self.drawing.is_some() && self.paste_preview.is_none() {
                 self.snap = self.drawing_snap(pos);
             }
+            self.update_drawing_inference(pos);
         }
         if self.modeling.is_some() {
             self.update_modeling(pos);
@@ -2491,9 +2561,47 @@ impl KetchupApp {
     }
 
     fn navigating(&self) -> bool {
-        self.gesture
-            .as_ref()
-            .is_some_and(|g| matches!(g.kind, GestureKind::Navigate { .. }))
+        self.drawing_orbit_down
+            || self
+                .gesture
+                .as_ref()
+                .is_some_and(|g| matches!(g.kind, GestureKind::Navigate { .. }))
+    }
+
+    fn drawing_orbit_modifier(&self, modifiers: egui::Modifiers) -> bool {
+        self.tool.is_drawing() && (modifiers.ctrl || modifiers.command || modifiers.mac_cmd)
+    }
+
+    fn update_drawing_orbit(&mut self, modifiers: egui::Modifiers) {
+        let down = self.drawing_orbit_modifier(modifiers);
+        if down != self.drawing_orbit_down {
+            self.drawing_orbit_down = down;
+            self.drawing_orbit_pivot = None;
+            if let Some(gesture) = &mut self.gesture {
+                // An interrupted point click must not place geometry on release.
+                if down && matches!(gesture.kind, GestureKind::Line | GestureKind::Shape) {
+                    gesture.kind = GestureKind::DrawingNavigate;
+                }
+                if down && let GestureKind::Freehand { paused } = &mut gesture.kind {
+                    *paused = true;
+                }
+            }
+        }
+        if down {
+            self.hover = None;
+            self.flip_hover = None;
+        }
+    }
+
+    fn navigate(&mut self, ctx: &egui::Context, delta: DVec2, pivot: &mut Option<DVec3>) {
+        if ctx.input(|i| i.modifiers.shift) {
+            self.doc.camera.pan(delta, self.viewport.height() as f64);
+            *pivot = None;
+        } else if delta != DVec2::ZERO {
+            let center = *pivot.get_or_insert_with(|| self.orbit_center());
+            self.doc.camera.orbit_around(delta, center);
+        }
+        self.changed(ctx);
     }
 
     fn viewport_input(&mut self, ctx: &egui::Context, response: &egui::Response) {
@@ -2501,6 +2609,9 @@ impl KetchupApp {
             return;
         }
         if self.help || self.component_name.is_some() {
+            self.drawing_orbit_down = false;
+            self.drawing_orbit_pivot = None;
+            self.viewport_pointer = None;
             if self.tool == Tool::Freehand {
                 self.drawing = None;
             }
@@ -2510,6 +2621,9 @@ impl KetchupApp {
         let events = ctx.input(|i| i.events.clone());
         let focused = ctx.input(|i| i.focused);
         if !focused {
+            self.drawing_orbit_down = false;
+            self.drawing_orbit_pivot = None;
+            self.viewport_pointer = None;
             if self.tool == Tool::Freehand {
                 self.drawing = None;
             }
@@ -2517,15 +2631,9 @@ impl KetchupApp {
             self.hover = None;
             return;
         }
-        if response.hovered()
-            && !events
-                .iter()
-                .any(|event| matches!(event, egui::Event::PointerMoved(_)))
-        {
-            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                self.update_pointer(pos);
-            }
-        }
+        let mut refresh_pointer = !events
+            .iter()
+            .any(|event| matches!(event, egui::Event::PointerMoved(_)));
         // Native mouse input interleaves absolute positions and raw deltas.
         // We do not use raw deltas; discard them before looking ahead so they
         // cannot turn one pending pointer position into hundreds of snap queries.
@@ -2539,7 +2647,7 @@ impl KetchupApp {
             let stroking = self.gesture.as_ref().is_some_and(|gesture| {
                 matches!(
                     gesture.kind,
-                    GestureKind::Freehand | GestureKind::Erase { .. }
+                    GestureKind::Freehand { .. } | GestureKind::Erase { .. }
                 )
             });
             if matches!(event, egui::Event::PointerMoved(_))
@@ -2549,12 +2657,18 @@ impl KetchupApp {
                 continue;
             }
             match event {
+                egui::Event::ModifiersChanged(modifiers) => {
+                    refresh_pointer |=
+                        self.drawing_orbit_down && !self.drawing_orbit_modifier(modifiers);
+                    self.update_drawing_orbit(modifiers);
+                }
                 egui::Event::PointerButton {
                     pos,
                     button,
                     pressed: true,
                     modifiers,
                 } if response.contains_pointer() && self.viewport.contains(pos) => {
+                    self.update_drawing_orbit(modifiers);
                     if button == egui::PointerButton::Secondary {
                         self.solid_first = None;
                         self.flip_hover = None;
@@ -2584,9 +2698,12 @@ impl KetchupApp {
                     {
                         self.hover = None;
                         self.flip_hover = None;
+                        self.drawing_orbit_pivot = None;
                         GestureKind::Navigate { pivot: None }
                     } else if button == egui::PointerButton::Primary {
-                        if self.paste_preview.is_some() {
+                        if self.drawing_orbit_down {
+                            GestureKind::DrawingNavigate
+                        } else if self.paste_preview.is_some() {
                             GestureKind::Paste
                         } else {
                             match self.tool {
@@ -2608,7 +2725,7 @@ impl KetchupApp {
                                 }
                                 Tool::Freehand => {
                                     self.begin_drawing(pos);
-                                    GestureKind::Freehand
+                                    GestureKind::Freehand { paused: false }
                                 }
                                 Tool::PushPull
                                 | Tool::Scale
@@ -2637,23 +2754,35 @@ impl KetchupApp {
                     });
                 }
                 egui::Event::PointerMoved(pos) => {
+                    let in_viewport = self.viewport.contains(pos) && response.contains_pointer();
+                    let mouse_navigation = self.gesture.as_ref().is_some_and(|gesture| {
+                        matches!(gesture.kind, GestureKind::Navigate { .. })
+                    });
+                    // Modifier navigation follows hover motion as well as drags.
+                    // Use the last processed position, not egui's final position
+                    // for this frame, so the first movement after key-down counts.
+                    if self.drawing_orbit_down && in_viewport && !mouse_navigation {
+                        if let Some(previous) = self.viewport_pointer {
+                            let mut pivot = self.drawing_orbit_pivot;
+                            self.navigate(ctx, dv(pos - previous), &mut pivot);
+                            self.drawing_orbit_pivot = pivot;
+                        }
+                    }
+                    self.viewport_pointer = in_viewport.then_some(pos);
                     if let Some(mut gesture) = self.gesture.take() {
                         match &mut gesture.kind {
                             GestureKind::Navigate { pivot } => {
-                                let delta = dv(pos - gesture.last);
-                                if ctx.input(|i| i.modifiers.shift) {
-                                    self.doc.camera.pan(delta, self.viewport.height() as f64);
-                                    *pivot = None;
-                                } else if delta != DVec2::ZERO {
-                                    let center = *pivot.get_or_insert_with(|| self.orbit_center());
-                                    self.doc.camera.orbit_around(delta, center);
-                                }
-                                self.changed(ctx);
+                                self.navigate(ctx, dv(pos - gesture.last), pivot);
                             }
                             GestureKind::Erase { ids } => {
                                 ids.extend(self.sweep_erase(gesture.last, pos));
                             }
-                            GestureKind::Freehand => self.sample_freehand(pos),
+                            GestureKind::Freehand { paused } if !self.drawing_orbit_down => {
+                                if !*paused || pos != gesture.last {
+                                    *paused = false;
+                                    self.sample_freehand(pos);
+                                }
+                            }
                             _ => {}
                         }
                         gesture.last = pos;
@@ -2671,10 +2800,11 @@ impl KetchupApp {
                     pressed: false,
                     modifiers,
                 } => {
+                    self.update_drawing_orbit(modifiers);
                     if self.gesture.as_ref().is_some_and(|g| g.button == button) {
                         let gesture = self.gesture.take().unwrap();
                         match gesture.kind {
-                            GestureKind::Navigate { .. } => {}
+                            GestureKind::Navigate { .. } | GestureKind::DrawingNavigate => {}
                             GestureKind::Select { additive } => {
                                 let dragged = gesture.start.distance(pos) > 4.;
                                 let hits = if dragged {
@@ -2773,8 +2903,8 @@ impl KetchupApp {
                                     self.begin_drawing(pos);
                                 }
                             }
-                            GestureKind::Freehand => {
-                                if self.viewport.contains(pos) {
+                            GestureKind::Freehand { paused } => {
+                                if !paused && self.viewport.contains(pos) {
                                     self.update_pointer(pos);
                                 } else {
                                     self.snap =
@@ -2809,6 +2939,11 @@ impl KetchupApp {
                     }
                 }
                 egui::Event::PointerGone => {
+                    self.drawing_reference = None;
+                    self.drawing_guide = None;
+                    self.drawing_projection = None;
+                    self.viewport_pointer = None;
+                    self.drawing_orbit_pivot = None;
                     if self.tool == Tool::Freehand {
                         self.drawing = None;
                     }
@@ -2816,6 +2951,12 @@ impl KetchupApp {
                     self.hover = None;
                 }
                 _ => {}
+            }
+        }
+        self.update_drawing_orbit(ctx.input(|i| i.modifiers));
+        if response.hovered() && refresh_pointer {
+            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                self.update_pointer(pos);
             }
         }
         if response.hovered() {
@@ -2879,10 +3020,12 @@ impl KetchupApp {
         let size = dv(rect.size());
         let camera = &self.doc.camera;
         let p = ui.painter().with_clip_rect(rect);
-        crate::environment::paint(&p, rect, camera, &self.doc.display);
+        let themed_display =
+            crate::environment::for_theme(&self.doc.display, ui.visuals().dark_mode);
+        let display = &themed_display;
+        crate::environment::paint(&p, rect, camera, display, ui.visuals().dark_mode);
         let mut mesh = renderer::Mesh::cached(camera, size, &mut self.scene_cache);
         mesh.set_pixels_per_point(ui.ctx().pixels_per_point());
-        let display = &self.doc.display;
         mesh.set_display(display);
         let spacing = 10.0_f64.powf((camera.distance / 15.).log10().floor());
         if self.doc.display.grid {
@@ -3126,8 +3269,12 @@ impl KetchupApp {
                 }
             }
         }
-        if let (Some(start), Some(snap)) = (self.line_start, self.snap) {
-            let color = self.preview_alignment().map(axis_color).unwrap_or(INK);
+        if let (Some(start), Some(snap)) = (self.line_start, self.line_preview_snap()) {
+            let color = self
+                .preview_alignment()
+                .or_else(|| self.active_drawing_guide().map(|g| g.axis))
+                .map(axis_color)
+                .unwrap_or(INK);
             mesh.world_line(camera, start, snap.point, 2.2, color);
         }
         for pair in self.drawing_points().windows(2) {
@@ -3216,39 +3363,67 @@ impl KetchupApp {
                 }
             }
         }
-        if self.tool.is_drawing() {
-            if let Some(snap) = self.snap {
-                let guide = match snap.kind {
+        let guide = self
+            .active_drawing_guide()
+            .map(|g| (g.origin, g.axis))
+            .or_else(|| {
+                if !self.tool.is_drawing() {
+                    return None;
+                }
+                match self.line_preview_snap()?.kind {
                     Inference::OnAxis(axis) => Some((DVec3::ZERO, axis)),
                     _ => self
                         .preview_alignment()
                         .zip(self.line_start)
                         .map(|(axis, start)| (start, axis)),
-                };
-                if let Some((origin, axis)) = guide.filter(|_| display.guides) {
-                    let extent = axis.vector() * camera.distance * 5.;
-                    if let Some((a, b)) = camera.segment(origin - extent, origin + extent, size) {
-                        let a = rect.min + pv(a);
-                        let b = rect.min + pv(b);
-                        let length = a.distance(b);
-                        for step in 0..(length / 10.).ceil() as usize {
-                            let from = (step as f32 * 10. / length).min(1.);
-                            let to = ((step as f32 * 10. + 4.) / length).min(1.);
-                            p.line_segment(
-                                [a.lerp(b, from), a.lerp(b, to)],
-                                Stroke::new(1., axis_color(axis).gamma_multiply(0.55)),
-                            );
-                        }
-                    }
+                }
+            });
+        if let Some((origin, axis)) = guide.filter(|_| display.guides) {
+            let extent = axis.vector() * camera.distance * 5.;
+            if let Some((a, b)) = camera.segment(origin - extent, origin + extent, size) {
+                let a = rect.min + pv(a);
+                let b = rect.min + pv(b);
+                let length = a.distance(b);
+                for step in 0..(length / 10.).ceil() as usize {
+                    let from = (step as f32 * 10. / length).min(1.);
+                    let to = ((step as f32 * 10. + 4.) / length).min(1.);
+                    p.line_segment(
+                        [a.lerp(b, from), a.lerp(b, to)],
+                        Stroke::new(1., axis_color(axis).gamma_multiply(0.55)),
+                    );
                 }
             }
+            if self.drawing_guide.is_some() {
+                if let Some(point) = screen(origin) {
+                    p.circle_filled(point, 3., PAPER);
+                    p.circle_stroke(point, 3., Stroke::new(1.5, axis_color(axis)));
+                }
+            }
+        }
+        if let Some((source, target)) = self.active_drawing_projection().filter(|_| display.guides)
+        {
+            let color = self.lock.map(axis_color).unwrap_or(GREEN);
+            if let Some((a, b)) = camera.segment(source, target, size) {
+                p.extend(egui::Shape::dashed_line(
+                    &[rect.min + pv(a), rect.min + pv(b)],
+                    Stroke::new(1.2, color),
+                    4.,
+                    4.,
+                ));
+            }
+            if let Some(point) = screen(source) {
+                p.circle_filled(point, 3., PAPER);
+                p.circle_stroke(point, 3., Stroke::new(1.5, color));
+            }
+        }
+        if self.tool.is_drawing() {
             if let Some(start) = self.line_start.or(self.drawing.as_ref().map(|d| d.origin)) {
                 if let Some(point) = screen(start) {
                     p.circle_filled(point, 3.5, PAPER);
                     p.circle_stroke(point, 3.5, Stroke::new(1.5, INK));
                 }
             }
-            if let Some(snap) = self.snap {
+            if let Some(snap) = self.line_preview_snap() {
                 if let Some(point) = screen(snap.point) {
                     let color = match snap.kind {
                         Inference::Axis(a) | Inference::OnAxis(a) => axis_color(a),
@@ -3343,8 +3518,10 @@ impl KetchupApp {
         }
         if let Some(edit) = &self.modeling {
             let text = edit.error.map(str::to_owned).unwrap_or_else(|| {
+                let value =
+                    precision::modeling_value(self.tool, &self.length_input).unwrap_or(edit.value);
                 if self.tool == Tool::Scale {
-                    format!("{:.3} × · Click to confirm · Esc to cancel", edit.value)
+                    format!("{value:.3} × · Click to confirm · Esc to cancel")
                 } else {
                     let alignment = if edit.guides.len() > 1 && self.length_input.is_empty() {
                         format!(
@@ -3369,7 +3546,7 @@ impl KetchupApp {
                         } else {
                             ""
                         },
-                        format_length(edit.value)
+                        format_length(value)
                     )
                 }
             });
@@ -3446,6 +3623,7 @@ impl KetchupApp {
         }
     }
     fn edit_context_bar(&mut self, ui: &mut egui::Ui) {
+        let colors = Palette::for_ui(ui);
         let path = self.doc.model.edit_path();
         let mut destination = None;
         egui::ScrollArea::horizontal()
@@ -3456,14 +3634,14 @@ impl KetchupApp {
                 ui.horizontal_centered(|ui| {
                     if path.is_empty() {
                         ui.label(RichText::new("Model").size(13.).strong());
-                        ui.label(RichText::new("/").color(BORDER));
-                        ui.label(RichText::new("No group open").size(12.).color(MUTED));
+                        ui.label(RichText::new("/").color(colors.border));
+                        ui.label(RichText::new("No group open").size(12.).color(colors.muted));
                     } else {
                         if ui.small_button("Model").clicked() {
                             destination = Some(None);
                         }
                         for id in &path {
-                            ui.label(RichText::new("›").color(MUTED));
+                            ui.label(RichText::new("›").color(colors.muted));
                             if ui.small_button(&self.doc.model.objects[id].name).clicked() {
                                 destination = Some(Some(*id));
                             }
@@ -3471,7 +3649,10 @@ impl KetchupApp {
                         ui.add_space(10.);
                         if ui.small_button("Close level  (Esc)").clicked() {
                             destination = Some(
-                                self.doc.model.edit_context.and_then(|id| self.doc.model.parent(id)),
+                                self.doc
+                                    .model
+                                    .edit_context
+                                    .and_then(|id| self.doc.model.parent(id)),
                             );
                         }
                     }
@@ -3482,16 +3663,24 @@ impl KetchupApp {
         }
     }
     fn viewport_panel(&mut self, ui: &mut egui::Ui) {
+        let colors = Palette::for_ui(ui);
         let ctx = ui.ctx().clone();
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(self.doc.display.background[0], self.doc.display.background[1], self.doc.display.background[2]))).show(ui,|ui|{
-            egui::Panel::top("view_options").exact_size(47.).frame(egui::Frame::new().fill(PAPER).inner_margin(egui::Margin::symmetric(18,7))).show(ui,|ui|{
+        let [r, g, b] =
+            crate::environment::for_theme(&self.doc.display, ui.visuals().dark_mode).background;
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(r, g, b))).show(ui,|ui|{
+            egui::Panel::top("view_options").exact_size(47.).frame(egui::Frame::new().fill(colors.paper).inner_margin(egui::Margin::symmetric(18,7))).show(ui,|ui|{
                 ui.horizontal_centered(|ui|{
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                        if Self::icon_button(ui,"panel","Toggle model inspector",true,MUTED){self.inspector=!self.inspector;}
-                        if Self::icon_button(ui,"fit","Fit model to view (F)",true,MUTED){self.fit(&ctx);}
+                        if Self::icon_button(ui,"panel","Toggle model inspector",true,colors.muted){self.inspector=!self.inspector;}
+                        let dark = ctx.theme() == egui::Theme::Dark;
+                        if Self::icon_button(ui, if dark { "sun" } else { "moon" }, if dark { "Switch to light mode" } else { "Switch to dark mode" }, true, colors.muted) {
+                            ctx.set_theme(if dark { egui::Theme::Light } else { egui::Theme::Dark });
+                            ctx.request_repaint();
+                        }
+                        if Self::icon_button(ui,"fit","Fit model to view (F)",true,colors.muted){self.fit(&ctx);}
                         ui.separator();
-                        if ui.checkbox(&mut self.doc.snap_to_geometry,RichText::new("Snap").size(12.).color(MUTED)).on_hover_text("Snap drawing to existing endpoints, midpoints, edges, and faces").changed() {self.snap=None;self.changed(&ctx);}
-                        if ui.checkbox(&mut self.doc.snap_to_axes,RichText::new("Snap to axes").size(12.).color(MUTED)).on_hover_text("Automatically align drawing with the red, green, and blue axes. Arrow keys can still lock an axis when this is off.").changed() {self.snap=None;self.changed(&ctx);}
+                        if ui.checkbox(&mut self.doc.snap_to_geometry,RichText::new("Snap").size(12.).color(colors.muted)).on_hover_text("Snap drawing to existing endpoints, midpoints, edges, and faces").changed() {self.snap=None;self.changed(&ctx);}
+                        if ui.checkbox(&mut self.doc.snap_to_axes,RichText::new("Snap to axes").size(12.).color(colors.muted)).on_hover_text("Automatically align drawing with the red, green, and blue axes. Hover an endpoint, midpoint, or edge to acquire axes through that position. Arrow keys can still lock an axis when this is off.").changed() {self.snap=None;self.changed(&ctx);}
                         ui.allocate_ui_with_layout(ui.available_size(),egui::Layout::left_to_right(egui::Align::Center),|ui|{
                             self.edit_context_bar(ui);
                         });
@@ -3511,13 +3700,14 @@ impl KetchupApp {
     fn help_window(&mut self, ctx: &egui::Context) {
         let mut open = self.help;
         egui::Window::new("Make yourself at home").open(&mut open).collapsible(false).resizable(false).vscroll(true).max_height((ctx.content_rect().height()-80.).max(180.)).default_width(440.).anchor(Align2::CENTER_CENTER,Vec2::ZERO).show(ctx,|ui|{
+            let colors = Palette::for_ui(ui);
             ui.add_space(8.);ui.label(RichText::new("Shape your next idea.").size(20.).strong());ui.add_space(8.);
             ui.label("Build linework in three dimensions. Your model is saved automatically on this device.");ui.add_space(16.);
             egui::Grid::new("shortcuts").spacing(egui::vec2(30.,12.)).show(ui,|ui|{
-                for (key,label) in [("Ctrl / ⌘ N","New project"),("Ctrl / ⌘ O","Open .ketchup project"),("Ctrl / ⌘ S","Save project"),("Ctrl / ⌘ Shift S","Save project as"),("Space","Select"),("L","Draw connected lines"),("R","Rectangle"),("C","Circle"),("G","Polygon"),("D","Freehand"),("P","Push/Pull a face"),("Union flyout","Flip, Outer Shell, Union, Intersect, Trim, Split"),("S","Scale geometry"),("Q","Offset a face outline"),("M","Move geometry"),(Self::move_copy_key(ctx),"Toggle Move / Copy while using Move"),("/N or Nx + Enter","After placing a copy: divide the span or repeat at the same spacing"),("B","Paint faces"),("T","Tape Measure"),("A","Protractor"),("I","Dimensions"),("E","Erase edges"),("O","Orbit"),("Shift + orbit drag","Pan the camera"),("Middle mouse drag","Orbit temporarily from any tool"),("Shift + middle drag","Pan temporarily from any tool"),("Scroll","Zoom toward the pointer"),("→ / ← / ↑","Lock X / Y / Z while drawing"),("↓","Clear the axis lock"),("Number + Enter","Set length, offset, or scale factor"),("Escape","Cancel the unfinished operation"),("Shift + click","Toggle entity selection"),("Right click","Object and clipboard actions"),("Double-click object","Edit its children, including nested objects"),("Escape (while editing)","Close the current group/component level"),("Ctrl / ⌘ X / C / V","Cut / Copy / Paste"),("Ctrl / ⌘ Shift V","Paste in place"),("Delete / Backspace","Delete selection"),("Ctrl / ⌘ Z","Undo"),("Ctrl / ⌘ Shift Z","Redo"),("F","Fit model in the viewport")] {
-                    ui.label(RichText::new(key).monospace().size(12.).color(GREEN));ui.label(label);ui.end_row();
+                for (key,label) in [("Ctrl / ⌘ N","New project"),("Ctrl / ⌘ O","Open .ketchup project"),("Ctrl / ⌘ S","Save project"),("Ctrl / ⌘ Shift S","Save project as"),("Space","Select"),("L","Draw connected lines"),("R","Rectangle"),("C","Circle"),("G","Polygon"),("D","Freehand"),("P","Push/Pull a face"),("Union flyout","Flip, Outer Shell, Union, Intersect, Trim, Split"),("S","Scale geometry"),("Q","Offset a face outline"),("M","Move geometry"),(Self::move_copy_key(ctx),"Toggle Move / Copy while using Move"),("/N or Nx + Enter","After placing a copy: divide the span or repeat at the same spacing"),("B","Paint faces"),("T","Tape Measure"),("A","Protractor"),("I","Dimensions"),("E","Erase edges"),("O","Orbit"),("Shift + orbit drag","Pan the camera"),("Hold Ctrl / ⌘ + move cursor","Orbit temporarily while drawing"),("Middle mouse drag","Orbit temporarily from any tool"),("Shift + middle drag","Pan temporarily from any tool"),("Scroll","Zoom toward the pointer"),("Hover geometry","Acquire X/Y/Z reference axes through a point or edge"),("Axis lock + hover","Match the hovered geometry’s coordinate on the locked axis"),("→ / ← / ↑","Lock X / Y / Z while drawing"),("↓","Clear the axis lock"),("Length or formula + Enter","Set length or radius, such as 60cm - 89mm"),("Width,height + Enter","Rectangle dimensions, such as 5m,50mm"),("Escape","Cancel the unfinished operation"),("Shift + click","Toggle entity selection"),("Right click","Object and clipboard actions"),("Double-click object","Edit its children, including nested objects"),("Escape (while editing)","Close the current group/component level"),("Ctrl / ⌘ X / C / V","Cut / Copy / Paste"),("Ctrl / ⌘ Shift V","Paste in place"),("Delete / Backspace","Delete selection"),("Ctrl / ⌘ Z","Undo"),("Ctrl / ⌘ Shift Z","Redo"),("F","Fit model in the viewport")] {
+                    ui.label(RichText::new(key).monospace().size(12.).color(colors.green));ui.label(label);ui.end_row();
                 }
-            });ui.add_space(14.);ui.label(RichText::new("Close a flat outline to fill it. Select its interior to delete only the face; select a boundary edge to delete that edge and its dependent faces. Snap is enabled by default.").small().color(MUTED));
+            });ui.add_space(14.);ui.label(RichText::new("Close a flat outline to fill it. Select its interior to delete only the face; select a boundary edge to delete that edge and its dependent faces. Snap is enabled by default.").small().color(colors.muted));
         });
         self.help = open;
     }
@@ -3536,7 +3726,7 @@ impl KetchupApp {
     }
 }
 impl eframe::App for KetchupApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_project(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
@@ -3556,7 +3746,13 @@ impl eframe::App for KetchupApp {
         self.status_bar(ui);
         self.tool_rail(ui);
         self.inspector_panel(ui);
+        let theme_before = ctx.options(|options| options.theme_preference);
         self.viewport_panel(ui);
+        if theme_before != ctx.options(|options| options.theme_preference)
+            && let Some(storage) = frame.storage_mut()
+        {
+            save_preference(&ctx, storage);
+        }
         self.component_window(&ctx);
         if self.help {
             self.help_window(&ctx);

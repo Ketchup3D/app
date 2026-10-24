@@ -1,10 +1,43 @@
 use eframe::egui::{self, Color32, Rect};
 use ketchup_core::{Camera, DisplaySettings};
 
+/// Adapt the default environment without changing saved or custom project colors.
+pub fn for_theme(display: &DisplaySettings, dark: bool) -> DisplaySettings {
+    let mut themed = display.clone();
+    if dark {
+        let defaults = DisplaySettings::default();
+        for (color, light, dark) in [
+            (&mut themed.sky_color, defaults.sky_color, [34, 46, 61]),
+            (
+                &mut themed.ground_color,
+                defaults.ground_color,
+                [43, 47, 41],
+            ),
+            (
+                &mut themed.horizon_color,
+                defaults.horizon_color,
+                [62, 72, 76],
+            ),
+            (&mut themed.background, defaults.background, [28, 34, 30]),
+        ] {
+            if *color == light {
+                *color = dark;
+            }
+        }
+    }
+    themed
+}
+
 /// A distant backdrop, painted before the depth-tested model. Ground is a
 /// color, so orbiting below Z=0 never hides the user's model.
-pub fn paint(painter: &egui::Painter, rect: Rect, camera: &Camera, display: &DisplaySettings) {
-    painter.add(backdrop(rect, camera, display));
+pub fn paint(
+    painter: &egui::Painter,
+    rect: Rect,
+    camera: &Camera,
+    display: &DisplaySettings,
+    dark: bool,
+) {
+    painter.add(backdrop(rect, camera, display, dark));
     let horizon = horizon_fraction(camera);
     if (display.sky || display.ground) && (0. ..=1.).contains(&horizon) {
         let [r, g, b] = display.horizon_color;
@@ -22,11 +55,16 @@ fn horizon_fraction(camera: &Camera) -> f64 {
     (1. - camera.pitch.tan() / (Camera::FOV * 0.5).tan()) * 0.5
 }
 
-fn backdrop(rect: Rect, camera: &Camera, display: &DisplaySettings) -> egui::Mesh {
+fn backdrop(rect: Rect, camera: &Camera, display: &DisplaySettings, dark: bool) -> egui::Mesh {
     let horizon = horizon_fraction(camera);
     let elevation_span = 2. * camera.pitch.cos() * (Camera::FOV * 0.5).tan();
     // Reach the sky color above the horizon, independently of pan and zoom.
     let blue = horizon - 0.45 / elevation_span;
+    let sky_base = if dark {
+        display.horizon_color
+    } else {
+        [255; 3]
+    };
     let mut rows = vec![0., 1.];
     for y in [horizon, blue] {
         if y > 0. && y < 1. {
@@ -43,9 +81,10 @@ fn backdrop(rect: Rect, camera: &Camera, display: &DisplaySettings) -> egui::Mes
                 display.background
             } else if sky {
                 let amount = ((horizon - y) * elevation_span / 0.45).clamp(0., 1.);
-                display
-                    .sky_color
-                    .map(|channel| (255. + (channel as f64 - 255.) * amount).round() as u8)
+                std::array::from_fn(|i| {
+                    let base = f64::from(sky_base[i]);
+                    (base + (f64::from(display.sky_color[i]) - base) * amount).round() as u8
+                })
             } else {
                 display.ground_color
             };
@@ -63,26 +102,39 @@ fn backdrop(rect: Rect, camera: &Camera, display: &DisplaySettings) -> egui::Mes
 
 pub fn controls(ui: &mut egui::Ui, display: &mut DisplaySettings) -> bool {
     let before = display.clone();
+    let mut themed = for_theme(display, ui.visuals().dark_mode);
     ui.label("Environment");
     ui.separator();
     egui::Grid::new("environment_colors").show(ui, |ui| {
         ui.checkbox(&mut display.sky, "Sky");
         ui.add_enabled_ui(display.sky, |ui| {
-            ui.color_edit_button_srgb(&mut display.sky_color);
+            if ui.color_edit_button_srgb(&mut themed.sky_color).changed() {
+                display.sky_color = themed.sky_color;
+            }
         });
         ui.end_row();
         ui.checkbox(&mut display.ground, "Ground");
         ui.add_enabled_ui(display.ground, |ui| {
-            ui.color_edit_button_srgb(&mut display.ground_color);
+            if ui
+                .color_edit_button_srgb(&mut themed.ground_color)
+                .changed()
+            {
+                display.ground_color = themed.ground_color;
+            }
         });
         ui.end_row();
         ui.label("Horizon");
         ui.add_enabled_ui(display.sky || display.ground, |ui| {
-            ui.color_edit_button_srgb(&mut display.horizon_color);
+            if ui
+                .color_edit_button_srgb(&mut themed.horizon_color)
+                .changed()
+            {
+                display.horizon_color = themed.horizon_color;
+            }
         });
         ui.end_row();
         ui.label("Background");
-        ui.color_edit_button_srgb(&mut display.background);
+        background_control(ui, display);
         ui.end_row();
     });
     if ui.button("Reset environment colors").clicked() {
@@ -93,6 +145,13 @@ pub fn controls(ui: &mut egui::Ui, display: &mut DisplaySettings) -> bool {
         display.background = defaults.background;
     }
     *display != before
+}
+
+pub fn background_control(ui: &mut egui::Ui, display: &mut DisplaySettings) {
+    let mut background = for_theme(display, ui.visuals().dark_mode).background;
+    if ui.color_edit_button_srgb(&mut background).changed() {
+        display.background = background;
+    }
 }
 
 #[cfg(test)]
@@ -108,7 +167,7 @@ mod tests {
                 pitch,
                 ..Default::default()
             };
-            let mesh = backdrop(rect, &camera, &DisplaySettings::default());
+            let mesh = backdrop(rect, &camera, &DisplaySettings::default(), false);
             assert!(mesh.is_valid());
             assert_eq!(mesh.vertices.first().unwrap().pos, rect.left_top());
             assert_eq!(mesh.vertices.last().unwrap().pos, rect.right_bottom());
@@ -140,7 +199,7 @@ mod tests {
             };
             assert_eq!(
                 mesh.vertices,
-                backdrop(rect, &moved, &DisplaySettings::default()).vertices
+                backdrop(rect, &moved, &DisplaySettings::default(), false).vertices
             );
         }
     }
@@ -160,7 +219,7 @@ mod tests {
             };
             let [r, g, b] = display.background;
             let background = Color32::from_rgb(r, g, b);
-            let mesh = backdrop(rect, &camera, &display);
+            let mesh = backdrop(rect, &camera, &display, false);
             for band in mesh.vertices.chunks_exact(4) {
                 let upper = (band[0].pos.y + band[2].pos.y) * 0.5 < rect.center().y;
                 if (upper && !sky) || (!upper && !ground) {

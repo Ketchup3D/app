@@ -1,8 +1,12 @@
 use super::*;
 use eframe::App;
 
+#[path = "drawing_inference_tests.rs"]
+mod drawing_inference;
 #[path = "feature_audit_tests.rs"]
 mod feature_audit;
+#[path = "precision_tests.rs"]
+mod precision_input;
 
 struct Harness {
     ctx: egui::Context,
@@ -62,6 +66,15 @@ impl Harness {
             shift,
             ..Default::default()
         };
+        self.pointer_with_modifiers(pos, button, pressed, modifiers)
+    }
+    fn pointer_with_modifiers(
+        &mut self,
+        pos: Pos2,
+        button: egui::PointerButton,
+        pressed: bool,
+        modifiers: egui::Modifiers,
+    ) -> egui::FullOutput {
         self.frame(
             vec![
                 egui::Event::PointerMoved(pos),
@@ -638,6 +651,274 @@ fn navigation_clears_hover_and_freezes_tool_inference_until_release() {
         );
         assert!(h.app.hover.is_none());
     }
+}
+
+#[test]
+fn drawing_modifier_orbits_without_mouse_buttons_and_preserves_pending_points() {
+    for modifiers in [
+        egui::Modifiers::CTRL,
+        egui::Modifiers::MAC_CMD,
+        egui::Modifiers::COMMAND,
+    ] {
+        for tool in Tool::DRAWING {
+            let mut h = Harness::new();
+            h.app.set_tool(tool);
+            let start = h.at(DVec3::ZERO);
+            if tool != Tool::Freehand {
+                h.click(start);
+            }
+            h.frame(
+                vec![egui::Event::PointerMoved(start)],
+                egui::Modifiers::NONE,
+            );
+            let line_start = h.app.line_start;
+            let points = h.app.drawing_points();
+            let snap = h.app.snap.map(|s| s.point);
+            let before = h.app.doc.camera.clone();
+            h.frame(vec![], modifiers);
+            assert!(h.app.navigating(), "{tool:?}: {modifiers:?}");
+            assert_eq!(h.app.doc.camera, before);
+            let end = start + egui::vec2(12., 8.);
+            h.frame(
+                vec![
+                    egui::Event::PointerMoved(start + egui::vec2(4., 2.)),
+                    egui::Event::MouseMoved(egui::vec2(4., 2.)),
+                    egui::Event::PointerMoved(end),
+                ],
+                modifiers,
+            );
+            let mut expected = before;
+            expected.orbit_around(DVec2::new(12., 8.), DVec3::ZERO);
+            assert_eq!(h.app.doc.camera, expected);
+            assert!(h.app.gesture.is_none());
+            assert_eq!(h.app.snap.map(|s| s.point), snap);
+            assert_eq!(h.app.tool, tool);
+            assert_eq!(h.app.line_start, line_start);
+            assert_eq!(h.app.drawing_points(), points);
+            assert!(h.app.doc.model.edges.is_empty());
+            h.frame(vec![], egui::Modifiers::NONE);
+            assert!(!h.app.navigating());
+            h.frame(
+                vec![egui::Event::PointerMoved(end + egui::vec2(6., 4.))],
+                egui::Modifiers::NONE,
+            );
+            assert_eq!(h.app.doc.camera, expected);
+
+            // The next normal drawing gesture uses the preserved starting point.
+            let target = h.at(DVec3::new(2., 3., 0.));
+            if tool == Tool::Freehand {
+                h.pointer(start, egui::PointerButton::Primary, true, false);
+                h.frame(
+                    vec![egui::Event::PointerMoved(target)],
+                    egui::Modifiers::NONE,
+                );
+                h.pointer(target, egui::PointerButton::Primary, false, false);
+            } else {
+                h.click(target);
+            }
+            assert!(!h.app.doc.model.edges.is_empty(), "{tool:?}: {modifiers:?}");
+            h.app.doc.model.validate().unwrap();
+        }
+    }
+}
+
+#[test]
+fn drawing_modifier_moves_camera_once_with_either_mouse_button_held() {
+    for button in [egui::PointerButton::Primary, egui::PointerButton::Middle] {
+        let mut h = Harness::new();
+        h.key(Key::L);
+        let start = h.app.viewport.center();
+        h.pointer_with_modifiers(start, button, true, egui::Modifiers::CTRL);
+        let before = h.app.doc.camera.clone();
+        let end = start + egui::vec2(12., 8.);
+        h.frame(vec![egui::Event::PointerMoved(end)], egui::Modifiers::CTRL);
+        let mut expected = before;
+        expected.orbit_around(DVec2::new(12., 8.), DVec3::ZERO);
+        assert_eq!(h.app.doc.camera, expected);
+        h.pointer_with_modifiers(end, button, false, egui::Modifiers::CTRL);
+        assert_eq!(h.app.doc.camera, expected);
+        assert!(h.app.doc.model.edges.is_empty());
+    }
+}
+
+#[test]
+fn drawing_modifier_does_not_orbit_over_panels_or_jump_on_reentry() {
+    let mut h = Harness::new();
+    h.key(Key::L);
+    let start = h.app.viewport.center();
+    h.frame(
+        vec![egui::Event::PointerMoved(start)],
+        egui::Modifiers::NONE,
+    );
+    let end = start + egui::vec2(12., 8.);
+    h.frame(vec![egui::Event::PointerMoved(end)], egui::Modifiers::CTRL);
+    let before = h.app.doc.camera.clone();
+    let panel = egui::pos2(490., 32.);
+    h.frame(
+        vec![egui::Event::PointerMoved(panel)],
+        egui::Modifiers::CTRL,
+    );
+    assert_eq!(h.app.doc.camera, before);
+    h.frame(
+        vec![egui::Event::PointerMoved(start)],
+        egui::Modifiers::CTRL,
+    );
+    assert_eq!(h.app.doc.camera, before);
+    h.frame(vec![egui::Event::PointerMoved(end)], egui::Modifiers::CTRL);
+    let mut expected = before;
+    expected.orbit_around(DVec2::new(12., 8.), DVec3::ZERO);
+    assert_eq!(h.app.doc.camera, expected);
+    h.frame(vec![egui::Event::PointerGone], egui::Modifiers::CTRL);
+    h.frame(
+        vec![egui::Event::PointerMoved(start)],
+        egui::Modifiers::CTRL,
+    );
+    assert_eq!(h.app.doc.camera, expected);
+}
+
+#[test]
+fn drawing_modifier_release_stops_orbit_without_placing_a_point() {
+    for modifiers in [egui::Modifiers::CTRL, egui::Modifiers::MAC_CMD] {
+        let mut h = Harness::new();
+        h.key(Key::L);
+        h.click(h.at(DVec3::ZERO));
+        h.key(Key::ArrowUp);
+        h.app.length_input = "2.5".into();
+        let start = h.app.viewport.center();
+        h.pointer_with_modifiers(start, egui::PointerButton::Primary, true, modifiers);
+        let end = start + egui::vec2(2., 1.);
+        h.frame(vec![egui::Event::PointerMoved(end)], modifiers);
+        let camera = h.app.doc.camera.clone();
+        h.frame(vec![], egui::Modifiers::NONE);
+        assert!(!h.app.navigating());
+        let release = end + egui::vec2(1., 0.);
+        h.frame(
+            vec![egui::Event::PointerMoved(release)],
+            egui::Modifiers::NONE,
+        );
+        h.pointer(release, egui::PointerButton::Primary, false, false);
+        assert_eq!(h.app.doc.camera, camera);
+        assert!(h.app.doc.model.edges.is_empty());
+        assert_eq!(h.app.line_start, Some(DVec3::ZERO));
+        assert_eq!(h.app.lock, Some(Axis::Z));
+        assert_eq!(h.app.length_input, "2.5");
+    }
+}
+
+#[test]
+fn pressing_drawing_modifier_during_a_point_click_cancels_placement() {
+    for tool in [Tool::Line, Tool::Rectangle, Tool::Circle, Tool::Polygon] {
+        for modifiers in [egui::Modifiers::CTRL, egui::Modifiers::MAC_CMD] {
+            let mut h = Harness::new();
+            h.app.set_tool(tool);
+            h.click(h.at(DVec3::ZERO));
+            let start = h.at(DVec3::new(2., 3., 0.));
+            h.pointer(start, egui::PointerButton::Primary, true, false);
+            let before = h.app.doc.camera.clone();
+            let end = start + egui::vec2(2., 1.);
+            h.frame(vec![egui::Event::PointerMoved(end)], modifiers);
+            assert_ne!(h.app.doc.camera, before);
+            h.frame(vec![], egui::Modifiers::NONE);
+            h.pointer(end, egui::PointerButton::Primary, false, false);
+            assert!(h.app.doc.model.edges.is_empty());
+            assert!(h.app.line_start.is_some() || h.app.drawing.is_some());
+        }
+    }
+}
+
+#[test]
+fn drawing_modifier_pauses_freehand_sampling_and_resumes_on_release() {
+    for modifiers in [egui::Modifiers::CTRL, egui::Modifiers::MAC_CMD] {
+        let mut h = Harness::new();
+        h.key(Key::D);
+        h.pointer(h.at(DVec3::ZERO), egui::PointerButton::Primary, true, false);
+        let start = h.at(DVec3::X);
+        h.frame(
+            vec![egui::Event::PointerMoved(start)],
+            egui::Modifiers::NONE,
+        );
+        let points = h.app.drawing.as_ref().unwrap().points.clone();
+        let snap = h.app.snap.map(|s| s.point);
+        let before = h.app.doc.camera.clone();
+        let end = start + egui::vec2(12., 8.);
+        h.frame(vec![egui::Event::PointerMoved(end)], modifiers);
+        assert_ne!(h.app.doc.camera, before);
+        assert_eq!(h.app.drawing.as_ref().unwrap().points, points);
+        assert_eq!(h.app.snap.map(|s| s.point), snap);
+        assert!(h.app.doc.model.edges.is_empty());
+        h.frame(vec![], egui::Modifiers::NONE);
+        let camera = h.app.doc.camera.clone();
+        let target = h.at(DVec3::new(2., 3., 0.));
+        h.frame(
+            vec![egui::Event::PointerMoved(target)],
+            egui::Modifiers::NONE,
+        );
+        assert!(h.app.drawing.as_ref().unwrap().points.len() > points.len());
+        assert_eq!(h.app.doc.camera, camera);
+        h.pointer(target, egui::PointerButton::Primary, false, false);
+        assert!(!h.app.doc.model.edges.is_empty());
+        h.app.doc.model.validate().unwrap();
+    }
+}
+
+#[test]
+fn finishing_freehand_after_orbit_does_not_add_the_orbit_endpoint() {
+    for release_modifier_first in [false, true] {
+        let mut h = Harness::new();
+        h.key(Key::D);
+        h.pointer(h.at(DVec3::ZERO), egui::PointerButton::Primary, true, false);
+        let start = h.at(DVec3::X);
+        h.frame(
+            vec![egui::Event::PointerMoved(start)],
+            egui::Modifiers::NONE,
+        );
+        let points = h.app.drawing.as_ref().unwrap().points.clone();
+        assert_eq!(points.len(), 2);
+        let end = start + egui::vec2(60., 30.);
+        h.frame(vec![egui::Event::PointerMoved(end)], egui::Modifiers::CTRL);
+        let modifiers = if release_modifier_first {
+            h.frame(vec![], egui::Modifiers::NONE);
+            egui::Modifiers::NONE
+        } else {
+            egui::Modifiers::CTRL
+        };
+        h.pointer_with_modifiers(end, egui::PointerButton::Primary, false, modifiers);
+        assert_eq!(h.app.doc.model.edges.len(), 1);
+        let edge = h.app.doc.model.edges.values().next().unwrap();
+        let (a, b) = h.app.doc.model.points(edge);
+        assert!(a.distance(points[0]) < 1e-6);
+        assert!(b.distance(points[1]) < 1e-6);
+    }
+}
+
+#[test]
+fn drawing_modifier_shift_pans_and_middle_navigation_still_works() {
+    let mut h = Harness::new();
+    h.key(Key::L);
+    h.click(h.at(DVec3::ZERO));
+    let before = h.app.doc.camera.clone();
+    let start = h.app.viewport.center();
+    let modifiers = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+    h.frame(
+        vec![egui::Event::PointerMoved(start)],
+        egui::Modifiers::NONE,
+    );
+    h.frame(vec![], modifiers);
+    let end = start + egui::vec2(60., 30.);
+    h.frame(vec![egui::Event::PointerMoved(end)], modifiers);
+    assert_eq!(h.app.doc.camera.yaw, before.yaw);
+    assert_eq!(h.app.doc.camera.pitch, before.pitch);
+    assert_ne!(h.app.doc.camera.target, before.target);
+    assert!(h.app.gesture.is_none());
+    h.frame(vec![], egui::Modifiers::NONE);
+    h.pointer(end, egui::PointerButton::Middle, true, false);
+    let before = h.app.doc.camera.clone();
+    let end = end + egui::vec2(12., 8.);
+    h.frame(vec![egui::Event::PointerMoved(end)], egui::Modifiers::NONE);
+    assert_ne!(h.app.doc.camera.yaw, before.yaw);
+    h.pointer(end, egui::PointerButton::Middle, false, false);
+    assert_eq!(h.app.line_start, Some(DVec3::ZERO));
+    assert!(h.app.doc.model.edges.is_empty());
 }
 
 #[test]

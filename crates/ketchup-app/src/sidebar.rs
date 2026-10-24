@@ -10,10 +10,11 @@ fn inspector_section<R>(
     primary: bool,
     contents: impl FnOnce(&mut egui::Ui) -> R,
 ) {
+    let colors = Palette::for_ui(ui);
     let body_style = ui.style().as_ref().clone();
     egui::Frame::new()
-        .fill(Color32::WHITE)
-        .stroke(Stroke::new(1., BORDER))
+        .fill(colors.surface)
+        .stroke(Stroke::new(1., colors.border))
         .corner_radius(if primary { 8 } else { 5 })
         .inner_margin(1)
         .shadow(if primary {
@@ -42,13 +43,14 @@ fn inspector_section<R>(
                     widget.bg_stroke = Stroke::NONE;
                     widget.expansion = 0.;
                 }
-                visuals.widgets.inactive.weak_bg_fill = if primary { CANVAS } else { PAPER };
-                visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(226, 234, 221);
-                visuals.widgets.active.weak_bg_fill = Color32::from_rgb(216, 227, 210);
+                visuals.widgets.inactive.weak_bg_fill =
+                    if primary { colors.canvas } else { colors.paper };
+                visuals.widgets.hovered.weak_bg_fill = colors.hovered;
+                visuals.widgets.active.weak_bg_fill = colors.selected;
                 let response = egui::CollapsingHeader::new(RichText::new(title).strong())
                     .id_salt(id)
                     .default_open(primary)
-                    .icon(|ui, openness, response| {
+                    .icon(move |ui, openness, response| {
                         let center = response.rect.center();
                         let rotation =
                             egui::emath::Rot2::from_angle(openness * std::f32::consts::FRAC_PI_2);
@@ -60,7 +62,14 @@ fn inspector_section<R>(
                         .map(|point| center + rotation * point);
                         ui.painter().add(egui::Shape::line(
                             points.to_vec(),
-                            Stroke::new(1.6, if openness > 0. { GREEN } else { MUTED }),
+                            Stroke::new(
+                                1.6,
+                                if openness > 0. {
+                                    colors.green
+                                } else {
+                                    colors.muted
+                                },
+                            ),
                         ));
                     })
                     .show_unindented(ui, |ui| {
@@ -75,7 +84,7 @@ fn inspector_section<R>(
                             egui::vec2(3., rect.height() - 20.),
                         ),
                         2,
-                        GREEN.linear_multiply(response.openness),
+                        colors.green.linear_multiply(response.openness),
                     );
                 }
             });
@@ -144,7 +153,7 @@ impl KetchupApp {
             }
         }
         if definitions.is_empty() {
-            ui.label(RichText::new("No components yet").color(MUTED));
+            ui.label(RichText::new("No components yet").color(Palette::for_ui(ui).muted));
             ui.label("Select geometry and choose Make Component from the context menu.");
         } else {
             ui.add(
@@ -163,12 +172,12 @@ impl KetchupApp {
                     .then(a.0.cmp(&b.0))
             });
             if rows.is_empty() {
-                ui.label(RichText::new("No matching components").color(MUTED));
+                ui.label(RichText::new("No matching components").color(Palette::for_ui(ui).muted));
             }
             for (id, name, count) in rows {
                 ui.push_id(id, |ui| {
                     egui::Frame::new()
-                        .fill(CANVAS)
+                        .fill(Palette::for_ui(ui).canvas)
                         .inner_margin(8)
                         .corner_radius(4)
                         .show(ui, |ui| {
@@ -181,7 +190,7 @@ impl KetchupApp {
                                         if count == 1 { "" } else { "s" }
                                     ))
                                     .small()
-                                    .color(MUTED),
+                                    .color(Palette::for_ui(ui).muted),
                                 );
                                 if ui.small_button("Place instance").clicked() {
                                     self.begin_component_placement(id, ui.ctx());
@@ -231,7 +240,7 @@ impl KetchupApp {
         ui.label(
             RichText::new("Visibility · Color · Name")
                 .small()
-                .color(MUTED),
+                .color(Palette::for_ui(ui).muted),
         );
         ui.label("Untagged");
         let tags: Vec<_> = self.doc.model.tags.values().cloned().collect();
@@ -307,7 +316,7 @@ impl KetchupApp {
             ui.label(
                 RichText::new("Select entities to assign a tag.")
                     .small()
-                    .color(MUTED),
+                    .color(Palette::for_ui(ui).muted),
             );
         } else {
             let first = self
@@ -435,7 +444,7 @@ impl KetchupApp {
             ui.label(
                 RichText::new("Horizontal section: keeps geometry below the plane.")
                     .small()
-                    .color(MUTED),
+                    .color(Palette::for_ui(ui).muted),
             );
         });
         inspector_section(ui, "Shadows", "shadows", false, |ui| {
@@ -482,7 +491,7 @@ impl KetchupApp {
             crate::environment::controls(ui, d);
         });
         ui.horizontal(|ui| {
-            ui.color_edit_button_srgb(&mut d.background);
+            crate::environment::background_control(ui, d);
             ui.label("Background / fog color");
         });
         if ui.button("Reset display").clicked() {

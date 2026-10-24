@@ -10,6 +10,11 @@ pub(super) struct Measurement {
 }
 
 impl KetchupApp {
+    pub(super) fn measurement_plane(&self) -> Option<(DVec3, DVec3)> {
+        let m = self.measurement.as_ref()?;
+        (self.tool == Tool::Protractor && m.points.len() == 2).then(|| (m.points[0], m.normal))
+    }
+
     pub(super) fn update_measurement(&mut self, pos: Pos2) {
         self.prepare_picking();
         let points = self
@@ -57,6 +62,7 @@ impl KetchupApp {
                     delta - direction * delta.dot(direction);
             }
         }
+        self.update_drawing_inference(pos);
     }
 
     pub(super) fn measurement_click(&mut self, pos: Pos2, ctx: &egui::Context) {
@@ -204,12 +210,17 @@ impl KetchupApp {
         }
         ui.heading(self.tool.label());
         if let Some(value) = self.measurement_value() {
-            ui.label(RichText::new(value).monospace().size(22.).color(GREEN));
+            ui.label(
+                RichText::new(value)
+                    .monospace()
+                    .size(22.)
+                    .color(Palette::for_ui(ui).green),
+            );
         }
         ui.label(
             RichText::new(self.measurement_status())
                 .small()
-                .color(MUTED),
+                .color(Palette::for_ui(ui).muted),
         );
         ui.add_space(12.);
     }

@@ -199,28 +199,30 @@ Serve the resulting `dist/` directory with a static web server. Use HTTPS for We
 | Automatic axis snapping | Snap to axes checkbox beside Snap; enabled by default and saved with the model |
 | Drawing tools | Click the Line item in the left toolbar to choose Line, Rectangle, Circle, Polygon, or Freehand; the item remembers your choice |
 | Line | L; click start and end, then continue drawing |
-| Rectangle | R; click two opposite corners |
-| Circle | C; click the center, then set the radius (48 segments) |
-| Polygon | G; click the center, then a vertex; choose 3–64 sides in the drawing menu |
-| Freehand | D; drag to draw connected edges, then release to finish |
-| Push/Pull | P; click a face, move along its normal, click to confirm or type meters + Enter |
+| Rectangle | R; click the first corner, then click the opposite corner or type width,height + Enter (for example, `5m,50mm`) |
+| Circle | C; click the center, then set the radius by pointer or type a length + Enter (48 segments) |
+| Polygon | G; click the center, then a vertex or type a radius + Enter; choose 3–64 sides in the drawing menu |
+| Freehand | D; drag to draw connected edges; release to finish, or type a total stroke length + Enter |
+| Push/Pull | P; click a face, move along its normal, click to confirm or type a length + Enter |
 | Union flyout | Union button in the left toolbar: Flip, Outer Shell, Union, Intersect, Trim, Split |
 | Flip | Choose Flip, then click a colored mirror plane or use Right / Left / Up for X / Y / Z |
 | Scale | S; select geometry, click a reference point, move or type a uniform scale factor + Enter |
-| Offset | Q; click near a face boundary, move inward/outward, click or type meters + Enter |
-| Move / Copy | M; click a base point and destination; tap Ctrl (Option on Mac) to toggle Copy; type meters + Enter for precision |
+| Offset | Q; click near a face boundary, move inward/outward, click or type a length + Enter |
+| Move / Copy | M; click a base point and destination; tap Ctrl (Option on Mac) to toggle Copy; type a length + Enter for precision |
 | Aligned copies | After placing a Move copy, type `/N` (or `N/`) + Enter to divide the original span into N equal intervals; type `Nx` (or `xN`, `N*`, `*N`) + Enter for N copies at the original spacing |
 | Paint | B; choose a color in the inspector, then click a filled face |
 | Tape Measure | T; click two snapped points to measure distance |
 | Protractor | A; click a center, a baseline point, and an angle point |
 | Dimensions | I; click two endpoints, move the label, and click to place it; Right / Left / Up aligns the dimension with X / Y / Z; repeat or Down unlocks |
-| Precise length | Choose a preview direction, type meters, press Enter |
+| Precise length | Choose a preview direction, type a length such as `5`, `5cm`, or `50mm`, press Enter; plain numbers use meters |
+| Reference axis snapping | Hover an endpoint, midpoint, or edge to acquire X/Y/Z references; with an axis locked, hover geometry to match its coordinate directly, including grouped/component geometry; Snap and Snap to axes must both be enabled |
 | X / Y / Z axis lock | Right / Left / Up arrow; repeat to unlock |
 | Clear axis lock | Down arrow |
 | Cancel preview/gesture | Escape |
 | Erase | E; click or drag across edges |
 | Delete selection | Delete or Backspace; a selected face leaves its outline, a selected boundary edge also removes dependent faces |
 | Orbit | O + left-drag, or middle-drag from any tool |
+| Orbit while drawing | Hold Ctrl/Command and move the cursor; release Ctrl/Command to resume drawing |
 | Pan | **Hold Shift while orbiting**, including middle-drag |
 | Zoom | Mouse wheel; anchors at the pointer on the camera target plane |
 | Fit all geometry | F, or the Fit view button |
@@ -229,7 +231,13 @@ Serve the resulting `dist/` directory with a static web server. Use HTTPS for We
 | Redo | Ctrl/Command Shift Z, or Ctrl Y |
 | Shortcuts | F1, or Help → Keyboard shortcuts |
 
-Orbiting always uses the combined bounding-box center of all objects, including hidden objects, or the origin in an empty model. Orbiting preserves the current framing and zoom after panning or zooming; the model center stays at its current viewport position. Shift may be pressed or released during an orbit gesture. Panning changes the camera position and target together without changing camera orientation. Temporary middle-button navigation preserves the active tool and unfinished line.
+Orbiting always uses the combined bounding-box center of all objects, including hidden objects, or the origin in an empty model. Orbiting preserves the current framing and zoom after panning or zooming; the model center stays at its current viewport position. Shift may be pressed or released during an orbit gesture. Panning changes the camera position and target together without changing camera orientation. Temporary middle-button navigation preserves the active tool and unfinished line. While using Line, Rectangle, Circle, Polygon, or Freehand, holding Ctrl or Command makes cursor movement orbit without holding a mouse button. Releasing the modifier restores drawing without placing a point; unfinished geometry, axis locks, and typed lengths are preserved. Holding Shift also pans during this temporary orbit.
+
+Typed lengths accept `mm`, `cm`, `m`, `km`, `in`, `ft`, and `yd` (or `"` for inches and `'` for feet), with optional spaces before the unit. Unit names are case-insensitive. A number without a suffix still means meters. Rectangles take two independent lengths separated by a comma: `5m,50mm` creates a 5 m by 0.05 m rectangle, while `5,0.05` creates the same size. Choose a first corner and move toward the desired quadrant before entering dimensions. Circles and polygons use the typed length as a radius; Freehand scales the stroke uniformly around its start to the typed total path length. Move, Push/Pull, and Offset share the same length syntax, including signed distances. Scale continues to use a unitless factor. Enter confirms the typed dimensions; invalid input keeps the operation available for correction.
+
+Dimension inputs also accept formulas with `+`, `-`, `*`, `/`, and parentheses. Units are converted before evaluating: `60cm - 89mm` is `0.511m` (511 mm), `(60cm - 89mm) / 2` is `0.2555m`, and `2 * 5cm` is `0.1m`. Multiplication and division take precedence over addition and subtraction. Plain numbers default to meters when added to lengths and act as unitless multipliers or divisors in products. A unit can follow a parenthesized numeric expression, such as `(60 - 8.9)cm`. Rectangles accept a formula for each dimension, for example `6m - 100cm,60mm - 10mm`. Formulas work for drawing lengths, radii, total freehand length, Move, Push/Pull, and Offset; Scale accepts formulas containing only numbers. Invalid formulas, division by zero, and area or volume results leave the operation available for correction.
+
+Hovering an existing endpoint, midpoint, or position on an edge acquires that position as an axis reference. As the pointer moves away, it snaps near the red X, green Y, or blue Z axis through that reference. A colored dashed line and a marker at the reference show the active alignment. This works before the first drawing point, while drawing lines or shapes, and while placing measurement points. Direct geometry snaps keep priority. With an arrow-key axis lock active, hovering the reference directly sets the endpoint coordinate on that axis; the cursor can stay over the reference edge even when the endpoint is far away on screen. For example, with Y locked, the endpoint takes the hovered point’s Y coordinate while keeping the start’s X and Z coordinates. Visible geometry inside groups, nested groups, and components can supply this reference, including geometry outside the group currently being edited. A dashed connection shows the projection from the hovered geometry to the endpoint. Drawing planes and snapped surfaces are preserved. Turning off Snap or Snap to axes releases the reference, as does hiding or deleting its source geometry. Hover another point or edge to replace the reference.
 
 Coordinates use meters and Z-up. Free drawing starts on Z=0, or at a snapped existing point/surface. Subsequent free segments use the horizontal plane through their start; axis inference and locks allow drawing vertically. Snap, checked by default, attracts drawing to visible endpoints, midpoints, arbitrary points on edges, and filled surfaces. Snap to axes, also checked by default, automatically aligns drawing directions with the red X, green Y, and blue Z axes at every point in a connected chain, including short segments. Points can also snap onto the visible model axes. Automatic alignment combines with geometry snapping, allowing perpendicular previews to acquire nearby endpoints, edges, and surfaces; explicit arrow-key locks keep points strictly on the chosen axis. The live endpoint marker and dashed axis guide show the snapped position before clicking; the same position is used when confirming the point. These options are independent; arrow-key axis locks remain available even with automatic axis snapping off. Move also combines intersecting axis guides from visible endpoints and midpoints: a target can align along X with one point and Y with another, or along all three axes. Colored dashed guides and an alignment label show the combined target before confirmation. Snap and Snap to axes must both be enabled to use these references; arrow-key locks remain strict.
 

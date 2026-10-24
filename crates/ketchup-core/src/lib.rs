@@ -37,6 +37,8 @@ mod move_inference_tests;
 #[cfg(test)]
 mod object_tests;
 #[cfg(test)]
+mod reference_inference_tests;
+#[cfg(test)]
 mod solid_tests;
 #[cfg(test)]
 mod surface_tests;

@@ -135,7 +135,11 @@ impl KetchupApp {
             return;
         }
         ui.heading(self.tool.label());
-        ui.label(RichText::new(self.solid_status()).small().color(MUTED));
+        ui.label(
+            RichText::new(self.solid_status())
+                .small()
+                .color(Palette::for_ui(ui).muted),
+        );
         if self.tool == Tool::Flip {
             ui.add_space(8.);
             ui.label("Mirror around the selection center:");
