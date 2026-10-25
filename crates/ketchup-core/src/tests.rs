@@ -250,23 +250,135 @@ fn orbit_around_model_center_preserves_framing_and_radius() {
     }
 }
 
+fn assert_box_selection(model: &Model, lo: DVec2, hi: DVec2, expected: BTreeSet<u64>) {
+    for (start, end) in [
+        (lo, hi),
+        (hi, lo),
+        (DVec2::new(hi.x, lo.y), DVec2::new(lo.x, hi.y)),
+        (DVec2::new(lo.x, hi.y), DVec2::new(hi.x, lo.y)),
+    ] {
+        assert_eq!(
+            selection::box_select(
+                model,
+                &Camera::default(),
+                DVec2::new(1000., 700.),
+                start,
+                end,
+            ),
+            expected,
+            "drag from {start:?} to {end:?}"
+        );
+    }
+}
+
 #[test]
-fn crossing_and_window_selection_differ() {
+fn box_selection_requires_complete_edges_in_every_drag_direction() {
     let size = DVec2::new(1000., 700.);
     let c = Camera::default();
     let mut m = Model::default();
-    m.add_edge(-DVec3::X * 3., DVec3::X * 3.).unwrap();
+    let edge = m.add_edge(-DVec3::X * 3., DVec3::X * 3.).unwrap();
     let center = c.project(DVec3::ZERO, size).unwrap();
     let a = center - DVec2::splat(10.);
     let b = center + DVec2::splat(10.);
-    assert!(selection::box_select(&m, &c, size, a, b).is_empty());
-    assert_eq!(
-        selection::box_select(&m, &c, size, DVec2::new(b.x, a.y), DVec2::new(a.x, b.y)).len(),
-        1
+    assert_box_selection(&m, a, b, BTreeSet::new());
+    let a = c.project(-DVec3::X * 3., size).unwrap();
+    let b = c.project(DVec3::X * 3., size).unwrap();
+    assert_box_selection(&m, a.min(b), a.max(b), BTreeSet::from([edge]));
+    assert_box_selection(
+        &m,
+        center.min(a) - DVec2::splat(1.),
+        center.max(a) + DVec2::splat(1.),
+        BTreeSet::new(),
     );
     assert_eq!(
         selection::pick(&m, &c, size, center, 8.),
         m.edges.keys().next().copied()
+    );
+}
+
+#[test]
+fn box_selection_requires_complete_faces_in_every_drag_direction() {
+    let mut model = Model::default();
+    let points = [-DVec3::X, -DVec3::Y, DVec3::X, DVec3::Y];
+    for i in 0..4 {
+        model.add_edge(points[i], points[(i + 1) % 4]).unwrap();
+    }
+    assert_eq!(model.faces.len(), 1);
+    let center = DVec2::new(500., 350.);
+    assert_box_selection(
+        &model,
+        center - DVec2::splat(5.),
+        center + DVec2::splat(5.),
+        BTreeSet::new(),
+    );
+    assert_box_selection(
+        &model,
+        DVec2::ZERO,
+        DVec2::new(1000., 700.),
+        model.selectable_entities(),
+    );
+}
+
+#[test]
+fn box_selection_requires_all_visible_descendants_of_groups_and_components() {
+    for component in [false, true] {
+        let mut model = Model::default();
+        let near = model.add_edge(-DVec3::X, DVec3::X).unwrap();
+        let far = model
+            .add_edge(DVec3::Y * 5., DVec3::Y * 5. + DVec3::X)
+            .unwrap();
+        let inner = model
+            .make_object(&BTreeSet::from([near, far]), component, "Inner")
+            .unwrap();
+        let outer = model
+            .make_object(&BTreeSet::from([inner]), false, "Outer")
+            .unwrap();
+        // Grouping copies geometry and assigns new IDs at each level.
+        let inner = *model.objects[&outer].entities.first().unwrap();
+        let far = model
+            .edges
+            .values()
+            .find(|edge| model.points(edge).0.y > 4.)
+            .unwrap()
+            .id;
+        let lo = DVec2::new(440., 320.);
+        let hi = DVec2::new(560., 380.);
+        assert_box_selection(&model, lo, hi, BTreeSet::new());
+        assert_box_selection(
+            &model,
+            DVec2::ZERO,
+            DVec2::new(1000., 700.),
+            BTreeSet::from([outer]),
+        );
+        model.hidden.insert(far);
+        assert_box_selection(&model, lo, hi, BTreeSet::from([outer]));
+        assert!(model.enter_object(outer));
+        assert_box_selection(&model, lo, hi, BTreeSet::from([inner]));
+        model.hidden.remove(&far);
+        assert_box_selection(&model, lo, hi, BTreeSet::new());
+    }
+}
+
+#[test]
+fn box_selection_requires_complete_dimensions_in_every_drag_direction() {
+    let mut model = Model::default();
+    let dimension = model
+        .add_dimension(-DVec3::X * 3., DVec3::X * 3., DVec3::Y)
+        .unwrap();
+    let center = Camera::default()
+        .project(DVec3::Y, DVec2::new(1000., 700.))
+        .unwrap();
+    assert_box_selection(
+        &model,
+        center - DVec2::splat(5.),
+        center + DVec2::splat(5.),
+        BTreeSet::new(),
+    );
+    assert_box_selection(
+        &model,
+        DVec2::ZERO,
+        DVec2::new(1000., 700.),
+        BTreeSet::from([dimension]),
     );
 }
 

@@ -205,6 +205,14 @@ impl Node {
         polygons: Vec<Polygon>,
         budget: &mut Budget,
     ) -> Result<Vec<Polygon>, &'static str> {
+        self.clipped_with_boundary(polygons, budget, false)
+    }
+    fn clipped_with_boundary(
+        &self,
+        polygons: Vec<Polygon>,
+        budget: &mut Budget,
+        keep_boundary: bool,
+    ) -> Result<Vec<Polygon>, &'static str> {
         let Some(plane) = self.plane else {
             return Ok(polygons);
         };
@@ -213,14 +221,18 @@ impl Node {
             let (same, opposite, f, b) = plane.split(polygon, budget)?;
             front.extend(same);
             front.extend(f);
-            back.extend(opposite);
+            if keep_boundary {
+                front.extend(opposite);
+            } else {
+                back.extend(opposite);
+            }
             back.extend(b);
         }
         if let Some(node) = &self.front {
-            front = node.clipped(front, budget)?;
+            front = node.clipped_with_boundary(front, budget, keep_boundary)?;
         }
         back = if let Some(node) = &self.back {
-            node.clipped(back, budget)?
+            node.clipped_with_boundary(back, budget, keep_boundary)?
         } else {
             vec![]
         };
@@ -253,6 +265,22 @@ pub(crate) enum Boolean {
     Union,
     Intersect,
     Difference,
+}
+/// Clip an open surface against a closed volume, including coplanar boundary
+/// fragments regardless of the surface's winding.
+pub(crate) fn intersect_surface(
+    surfaces: Vec<Polygon>,
+    solid: Vec<Polygon>,
+    epsilon: f64,
+) -> Result<Vec<Polygon>, &'static str> {
+    let mut budget = Budget {
+        left: 2_000_000,
+        epsilon,
+    };
+    let mut node = Node::default();
+    node.build(solid, &mut budget, 0)?;
+    node.invert();
+    node.clipped_with_boundary(surfaces, &mut budget, true)
 }
 pub(crate) fn apply(
     a: Vec<Polygon>,

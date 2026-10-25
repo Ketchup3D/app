@@ -1,10 +1,14 @@
 use super::*;
 use eframe::App;
 
+#[path = "context_menu_tests.rs"]
+mod context_menus;
 #[path = "drawing_inference_tests.rs"]
 mod drawing_inference;
 #[path = "feature_audit_tests.rs"]
 mod feature_audit;
+#[path = "outliner_drag_tests.rs"]
+mod outliner_drag;
 #[path = "precision_tests.rs"]
 mod precision_input;
 
@@ -1291,11 +1295,11 @@ fn snap_checkbox_starts_checked_and_disables_geometry_magnet() {
     let mut h = Harness::new();
     assert!(h.app.doc.snap_to_geometry);
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    let checkbox = text_position(&output, "Snap");
+    let checkbox = text_position(&output, "Snap to objects");
     h.click(checkbox);
     assert!(
         !h.app.doc.snap_to_geometry,
-        "Snap checkbox should toggle off at {checkbox:?}"
+        "Snap to objects checkbox should toggle off at {checkbox:?}"
     );
     h.app
         .doc
@@ -1639,10 +1643,13 @@ fn render_snapshots(state: eframe::egui_wgpu::RenderState, audit: bool) {
         }
         if snapshot == "component-dialog" {
             egui::Popup::close_all(&ctx);
-            app.component_name = Some("House component".into());
+            app.object_creation = Some(ObjectCreation {
+                component: true,
+                name: "House component".into(),
+            });
         }
         if snapshot == "paste-preview" {
-            app.component_name = None;
+            app.object_creation = None;
             app.context_action(&ctx, ContextAction::Copy);
             app.context_action(&ctx, ContextAction::Paste);
         }
@@ -2259,6 +2266,61 @@ fn open_context_menu(h: &mut Harness, point: Pos2) -> egui::FullOutput {
 }
 
 #[test]
+fn menus_block_background_hover_and_restore_it_after_closing() {
+    for context_menu in [true, false] {
+        let mut h = Harness::new();
+        let menu = if context_menu {
+            let point = h.app.viewport.center();
+            open_context_menu(&mut h, point)
+        } else {
+            h.click(egui::pos2(38., 169.));
+            h.frame(vec![], egui::Modifiers::NONE)
+        };
+        let target = if context_menu {
+            text_position(&menu, "Delete")
+        } else {
+            menu_text_position(&menu, Tool::Circle.label())
+        };
+        assert!(h.app.viewport.contains(target));
+        let point = h
+            .app
+            .doc
+            .camera
+            .ray(dv(target - h.app.viewport.min), dv(h.app.viewport.size()))
+            .plane_z(0.)
+            .unwrap();
+        let edge = h
+            .app
+            .doc
+            .model
+            .add_edge(point - DVec3::X, point + DVec3::X)
+            .unwrap();
+        h.app.picking_preparations = 0;
+        h.frame(
+            vec![egui::Event::PointerMoved(target)],
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(h.app.hover, None);
+        assert_eq!(h.app.picking_preparations, 0);
+
+        // Covering an existing highlight must also clear it without mouse motion.
+        h.app.hover = Some(edge);
+        h.app.flip_hover = Some(Axis::X);
+        h.frame(vec![], egui::Modifiers::NONE);
+        assert_eq!(h.app.hover, None);
+        assert_eq!(h.app.flip_hover, None);
+
+        h.key(Key::Escape);
+        h.frame(vec![], egui::Modifiers::NONE);
+        h.frame(
+            vec![egui::Event::PointerMoved(target)],
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(h.app.hover, Some(edge));
+    }
+}
+
+#[test]
 fn context_menu_preserves_multiselection_groups_and_ungroups_through_pointer_input() {
     let mut h = Harness::new();
     let a = h
@@ -2278,7 +2340,7 @@ fn context_menu_preserves_multiselection_groups_and_ungroups_through_pointer_inp
     let menu = open_context_menu(&mut h, point);
     assert_eq!(h.app.selected, BTreeSet::from([a, b]));
     for label in [
-        "Make Group",
+        "Make Group…",
         "Create Component…",
         "Ungroup",
         "Explode",
@@ -2292,10 +2354,22 @@ fn context_menu_preserves_multiselection_groups_and_ungroups_through_pointer_inp
     ] {
         text_position(&menu, label);
     }
-    h.click(text_position(&menu, "Make Group"));
+    h.click(text_position(&menu, "Make Group…"));
+    assert!(h.app.doc.model.objects.is_empty());
+    assert_eq!(h.app.selected, BTreeSet::from([a, b]));
+    let creation = h.app.object_creation.as_mut().unwrap();
+    assert!(!creation.component);
+    h.frame(
+        vec![egui::Event::Text("Assembly".into())],
+        egui::Modifiers::NONE,
+    );
+    let dialog = h.frame(vec![], egui::Modifiers::NONE);
+    text_position(&dialog, "Make Group");
+    h.click(text_position(&dialog, "Create"));
     assert_eq!(h.app.doc.model.objects.len(), 1);
     let group = *h.app.selected.first().unwrap();
     assert_eq!(h.app.doc.model.objects[&group].entities.len(), 2);
+    assert_eq!(h.app.doc.model.objects[&group].name, "Assembly");
     let menu = open_context_menu(&mut h, point);
     h.click(text_position(&menu, "Ungroup"));
     assert!(h.app.doc.model.objects.is_empty());
@@ -2314,9 +2388,12 @@ fn context_menu_creates_named_component_and_explodes_it() {
     let point = h.at(DVec3::X);
     let menu = open_context_menu(&mut h, point);
     h.click(text_position(&menu, "Create Component…"));
-    assert!(h.app.component_name.is_some());
-    h.app.component_name = Some("Beam".into());
-    h.frame(vec![], egui::Modifiers::NONE);
+    assert!(h.app.object_creation.is_some());
+    assert!(h.app.doc.model.objects.is_empty());
+    h.frame(
+        vec![egui::Event::Text("Beam".into())],
+        egui::Modifiers::NONE,
+    );
     let dialog = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&dialog, "Create"));
     let id = *h.app.selected.first().unwrap();
@@ -2379,7 +2456,7 @@ fn clipboard_events_support_in_place_paste_click_placement_cut_cancel_and_undo()
 }
 
 #[test]
-fn context_menu_lock_protects_delete_and_hide_can_be_reversed_from_empty_space() {
+fn context_menu_lock_protects_delete_and_hide_can_be_reversed_from_outliner() {
     let mut h = Harness::new();
     let id = h
         .app
@@ -2401,8 +2478,13 @@ fn context_menu_lock_protects_delete_and_hide_can_be_reversed_from_empty_space()
     h.click(text_position(&menu, "Hide"));
     assert!(h.app.selected.is_empty());
     assert!(h.app.doc.model.hidden.contains(&id));
-    let menu = open_context_menu(&mut h, point);
-    h.click(text_position(&menu, "Unhide All"));
+    let tree = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&tree, "Geometry (1)"));
+    h.frame(vec![], egui::Modifiers::NONE);
+    let tree = h.frame(vec![], egui::Modifiers::NONE);
+    let row = text_position(&tree, &format!("Edge #{id} · Hidden"));
+    let menu = open_context_menu(&mut h, row);
+    h.click(text_position(&menu, "Unhide"));
     assert!(h.app.doc.model.hidden.is_empty());
     h.click(point);
     assert_eq!(h.app.selected, BTreeSet::from([id]));
@@ -3758,6 +3840,59 @@ fn split_and_intersection_keep_the_expected_editable_bodies() {
     }
 }
 #[test]
+fn intersect_accepts_a_preselected_face_and_group_or_a_face_as_the_first_click() {
+    for preselect_both in [false, true] {
+        let mut h = Harness::new();
+        let object = ui_solid_box(&mut h.app.doc.model, DVec3::ZERO, DVec3::splat(2.));
+        let mut sheet = Model::default();
+        let points = [
+            DVec3::new(-1., -1., 1.),
+            DVec3::new(3., -1., 1.),
+            DVec3::new(3., 3., 1.),
+            DVec3::new(-1., 3., 1.),
+        ];
+        for i in 0..4 {
+            sheet.add_edge(points[i], points[(i + 1) % 4]).unwrap();
+        }
+        let ids = h.app.doc.model.paste_entities(&sheet, DVec3::ZERO);
+        let face = *ids
+            .iter()
+            .find(|id| h.app.doc.model.faces.contains_key(id))
+            .unwrap();
+        let before = h.app.doc.model.clone();
+        if preselect_both {
+            h.app.selected = BTreeSet::from([object, face]);
+            h.app.start_solid_tool(Tool::Intersect, &h.ctx);
+        } else {
+            h.app.start_solid_tool(Tool::Intersect, &h.ctx);
+            // Look straight down so the exposed sheet and solid are unambiguous.
+            h.app.doc.camera.pitch = 1.55;
+            h.app.doc.camera.target = DVec3::new(1., 1., 0.);
+            h.click(h.at(DVec3::new(-0.5, 1., 1.)));
+            assert_eq!(h.app.solid_first, Some(face));
+            assert_eq!(h.app.doc.model, before);
+            h.click(h.at(DVec3::new(1., 1., 2.)));
+        }
+        assert!(h.app.solid_first.is_none());
+        assert_eq!(h.app.history.undo_label(), Some("Intersect"));
+        let result = h.app.doc.model.copy_entities(&h.app.selected);
+        assert_eq!(result.faces.len(), 1);
+        assert!(
+            (result
+                .faces
+                .values()
+                .map(|f| result.face_area(f))
+                .sum::<f64>()
+                - 4.)
+                .abs()
+                < 1e-6
+        );
+        h.app.doc.model.validate().unwrap();
+        h.app.undo(&h.ctx, false);
+        assert_eq!(h.app.doc.model, before);
+    }
+}
+#[test]
 fn flip_uses_keyboard_inspector_and_clickable_planes_without_detaching_objects() {
     let mut h = Harness::new();
     let (a, _) = ui_solid_pair(&mut h);
@@ -4042,6 +4177,141 @@ fn sidebar_sections_collapse_and_display_controls_change_saved_settings() {
     text_position(&output, "No components yet");
     let saved = Document::from_json(&serde_json::to_string(&h.app.doc).unwrap()).unwrap();
     assert!(!saved.display.axes);
+}
+
+#[test]
+fn sidebar_headers_reorder_in_memory_and_keep_their_disclosure_state() {
+    use sidebar::InspectorSection;
+
+    let mut h = Harness::new();
+    h.ctx.style_mut_of(h.ctx.theme(), |s| s.animation_time = 0.);
+    h.size.y = 2000.;
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "Components"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let from = text_position(&output, "Components");
+    let to = text_position(&output, "Outliner") - egui::vec2(0., 8.);
+    h.pointer(from, egui::PointerButton::Primary, true, false);
+    h.frame(vec![egui::Event::PointerMoved(to)], egui::Modifiers::NONE);
+    h.pointer(to, egui::PointerButton::Primary, false, false);
+    assert_eq!(h.app.inspector_order[0], InspectorSection::Components);
+    assert!(!h.app.project.modified);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    assert!(text_position(&output, "Components").y < text_position(&output, "Outliner").y);
+    // The moved section is still collapsed; expanding it still works normally.
+    assert!(text_position(&output, "Outliner").y - text_position(&output, "Components").y < 80.);
+    h.click(text_position(&output, "Components"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    text_position(&output, "No components yet");
+
+    let from = text_position(&output, "Components");
+    let to = text_position(&output, "Tags") + egui::vec2(0., 8.);
+    h.pointer(from, egui::PointerButton::Primary, true, false);
+    h.frame(vec![egui::Event::PointerMoved(to)], egui::Modifiers::NONE);
+    h.pointer(to, egui::PointerButton::Primary, false, false);
+    assert_eq!(
+        h.app.inspector_order,
+        [
+            InspectorSection::Outliner,
+            InspectorSection::EntityInfo,
+            InspectorSection::Tags,
+            InspectorSection::Components,
+            InspectorSection::Display,
+        ]
+    );
+    let order = h.app.inspector_order;
+    h.app.inspector = false;
+    h.frame(vec![], egui::Modifiers::NONE);
+    h.app.inspector = true;
+    h.app.new_model(&h.ctx);
+    h.frame(vec![], egui::Modifiers::NONE);
+    assert_eq!(h.app.inspector_order, order);
+    let fresh = KetchupApp::with_document(Document::default(), None, true);
+    assert_eq!(fresh.inspector_order, InspectorSection::ALL);
+}
+
+#[test]
+fn sidebar_drag_moves_the_entire_panel_and_animates_its_neighbors_and_drop() {
+    let mut h = Harness::new();
+    h.size.y = 2000.;
+    h.ctx
+        .style_mut_of(h.ctx.theme(), |s| s.animation_time = 0.2);
+    for _ in 0..30 {
+        h.frame(vec![], egui::Modifiers::NONE);
+    }
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let from = text_position(&output, "Components");
+    let body_offset = text_position(&output, "No components yet") - from;
+    let neighbor_start = text_position(&output, "Outliner").y;
+    let to = text_position(&output, "Outliner") + egui::vec2(12., -8.);
+    let viewport = h.app.viewport;
+    let order = h.app.inspector_order;
+    h.pointer(from, egui::PointerButton::Primary, true, false);
+    h.frame(vec![egui::Event::PointerMoved(to)], egui::Modifiers::NONE);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    assert!(text_position(&output, "Components").distance(to) < 1.);
+    assert!((text_position(&output, "No components yet") - to - body_offset).length() < 1.);
+    let neighbor_first = text_position(&output, "Outliner").y;
+    for _ in 0..8 {
+        h.frame(vec![], egui::Modifiers::NONE);
+    }
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let neighbor_middle = text_position(&output, "Outliner").y;
+    for _ in 0..25 {
+        h.frame(vec![], egui::Modifiers::NONE);
+    }
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let neighbor_end = text_position(&output, "Outliner").y;
+    assert!(neighbor_first >= neighbor_start);
+    assert!(neighbor_middle > neighbor_first + 1.);
+    assert!(neighbor_end > neighbor_middle + 1.);
+    assert!(text_position(&output, "Components").distance(to) < 1.);
+    assert_eq!(h.app.inspector_order, order);
+    assert_eq!(h.app.viewport, viewport);
+    h.pointer(to, egui::PointerButton::Primary, false, false);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let dropping = text_position(&output, "Components");
+    for _ in 0..30 {
+        h.frame(vec![], egui::Modifiers::NONE);
+    }
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let dropped = text_position(&output, "Components");
+    assert!(dropping.distance(dropped) > 1.);
+    assert!(dropped.y < text_position(&output, "Outliner").y);
+    assert!((dropped.x - from.x).abs() < 1.);
+    assert!(!h.app.project.modified);
+}
+
+#[test]
+fn sidebar_header_drag_cancels_on_escape_or_release_outside_the_inspector() {
+    let mut h = Harness::new();
+    h.size.y = 2000.;
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let from = text_position(&output, "Components");
+    let to = text_position(&output, "Outliner") - egui::vec2(0., 8.);
+    let order = h.app.inspector_order;
+    h.pointer(from, egui::PointerButton::Primary, true, false);
+    h.frame(vec![egui::Event::PointerMoved(to)], egui::Modifiers::NONE);
+    h.key(Key::Escape);
+    h.pointer(to, egui::PointerButton::Primary, false, false);
+    assert_eq!(h.app.inspector_order, order);
+
+    for _ in 0..30 {
+        h.frame(vec![], egui::Modifiers::NONE);
+    }
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let from = text_position(&output, "Components");
+    let outside = h.app.viewport.center();
+    h.pointer(from, egui::PointerButton::Primary, true, false);
+    h.frame(
+        vec![egui::Event::PointerMoved(outside)],
+        egui::Modifiers::NONE,
+    );
+    assert!(egui::DragAndDrop::has_payload_of_type::<
+        sidebar::InspectorSection,
+    >(&h.ctx));
+    h.pointer(outside, egui::PointerButton::Primary, false, false);
+    assert_eq!(h.app.inspector_order, order);
 }
 
 #[test]

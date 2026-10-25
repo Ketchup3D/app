@@ -36,6 +36,8 @@ fn dot(ui: &mut egui::Ui, color: Color32) {
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "app_updates.rs"]
 mod app_updates;
+#[path = "context_menu.rs"]
+mod context_menu;
 #[path = "display_scene.rs"]
 mod display_scene;
 #[path = "drawing_inference.rs"]
@@ -54,6 +56,7 @@ mod shortcuts;
 mod sidebar;
 #[path = "solid_tools.rs"]
 mod solid_tools;
+use context_menu::ContextAction;
 use move_tool::{CopyArray, MoveCopy};
 
 enum GestureKind {
@@ -78,24 +81,6 @@ struct GeometryClipboard {
 struct PastePreview {
     clipboard: GeometryClipboard,
     point: DVec3,
-}
-#[derive(Clone, Copy)]
-enum ContextAction {
-    EditObject,
-    CloseContext,
-    Group,
-    Component,
-    Ungroup,
-    Explode,
-    Cut,
-    Copy,
-    Paste,
-    PasteInPlace,
-    Delete,
-    Hide,
-    Lock,
-    Unlock,
-    UnhideAll,
 }
 struct Gesture {
     button: egui::PointerButton,
@@ -191,6 +176,11 @@ impl Drawing {
     }
 }
 
+struct ObjectCreation {
+    component: bool,
+    name: String,
+}
+
 pub struct KetchupApp {
     #[cfg(not(target_arch = "wasm32"))]
     updates: crate::updates::Updater,
@@ -206,7 +196,10 @@ pub struct KetchupApp {
     drawing: Option<Drawing>,
     polygon_sides: usize,
     selected: BTreeSet<u64>,
+    group_emphasis: bool,
     hover: Option<u64>,
+    outliner_hover: BTreeSet<u64>,
+    outliner_anchor: Option<u64>,
     line_start: Option<DVec3>,
     snap: Option<Snap>,
     drawing_reference: Option<drawing_inference::DrawingReference>,
@@ -226,6 +219,10 @@ pub struct KetchupApp {
     viewport_pointer: Option<Pos2>,
     viewport: Rect,
     inspector: bool,
+    inspector_width: f32,
+    inspector_preferences: sidebar::InspectorPreferences,
+    inspector_order: [sidebar::InspectorSection; 5],
+    inspector_layout: sidebar::InspectorLayout,
     component_filter: String,
     new_tag_name: String,
     tag_rename: Option<(u64, String)>,
@@ -248,7 +245,8 @@ pub struct KetchupApp {
     clipboard: Option<GeometryClipboard>,
     paste_preview: Option<PastePreview>,
     context_position: Option<Pos2>,
-    component_name: Option<String>,
+    object_creation: Option<ObjectCreation>,
+    object_rename: Option<(u64, String)>,
 }
 
 impl KetchupApp {
@@ -259,7 +257,8 @@ impl KetchupApp {
             Ok(doc) => (doc.unwrap_or_default(), None),
             Err(e) => (Document::default(), Some(e)),
         };
-        let app = Self::with_document(doc, error, renderer::install(cc));
+        let mut app = Self::with_document(doc, error, renderer::install(cc));
+        app.restore_inspector_preferences(&cc.egui_ctx, cc.storage);
         #[cfg(not(target_arch = "wasm32"))]
         let app = {
             let mut app = app;
@@ -306,7 +305,10 @@ impl KetchupApp {
             drawing: None,
             polygon_sides: 6,
             selected: BTreeSet::new(),
+            group_emphasis: true,
             hover: None,
+            outliner_hover: BTreeSet::new(),
+            outliner_anchor: None,
             line_start: None,
             snap: None,
             drawing_reference: None,
@@ -326,6 +328,10 @@ impl KetchupApp {
             viewport_pointer: None,
             viewport: Rect::NOTHING,
             inspector: true,
+            inspector_width: 300.,
+            inspector_preferences: sidebar::InspectorPreferences::default(),
+            inspector_order: sidebar::InspectorSection::ALL,
+            inspector_layout: sidebar::InspectorLayout::default(),
             component_filter: String::new(),
             new_tag_name: String::new(),
             tag_rename: None,
@@ -353,7 +359,8 @@ impl KetchupApp {
             clipboard: None,
             paste_preview: None,
             context_position: None,
-            component_name: None,
+            object_creation: None,
+            object_rename: None,
         }
     }
     fn changed(&mut self, ctx: &egui::Context) {
@@ -401,6 +408,7 @@ impl KetchupApp {
     }
     fn enter_object(&mut self, id: u64, ctx: &egui::Context) {
         if self.doc.model.enter_object(id) {
+            self.outliner_anchor = None;
             self.set_tool(Tool::Select);
             self.selected.clear();
             self.hover = None;
@@ -411,6 +419,7 @@ impl KetchupApp {
         }
     }
     fn navigate_context(&mut self, context: Option<u64>, ctx: &egui::Context) {
+        self.outliner_anchor = None;
         self.doc.model.edit_context = context;
         self.set_tool(Tool::Select);
         self.selected.clear();
@@ -471,6 +480,7 @@ impl KetchupApp {
             self.history.undo(&mut self.doc.model)
         };
         if did {
+            self.outliner_anchor = None;
             self.doc.model.edit_context = path.into_iter().rev().find(|id| {
                 self.doc.model.objects.contains_key(id)
                     && !self.doc.model.is_locked(*id)
@@ -531,255 +541,87 @@ impl KetchupApp {
         self.selected = selected;
         self.finish_edit("Paste", before, ctx);
     }
-    fn context_action(&mut self, ctx: &egui::Context, action: ContextAction) {
-        use ContextAction::*;
-        let locked = self.doc.model.selection_protected(&self.selected);
-        if !matches!(action, ContextAction::Copy) {
-            self.last_move_copy = None;
-            self.length_input.clear();
-            self.measurement = None;
-            self.drawing = None;
-            self.modeling = None;
-            self.gesture = None;
-            self.line_start = None;
-            self.snap = None;
-        }
-        match action {
-            EditObject => {
-                if self.selected.len() == 1 {
-                    self.enter_object(*self.selected.first().unwrap(), ctx);
-                }
-            }
-            CloseContext => self.close_edit_context(ctx),
-            Copy => self.copy_selection(ctx),
-            Cut if !locked => {
-                self.copy_selection(ctx);
-                self.erase_selected(ctx);
-            }
-            Delete if !locked => self.erase_selected(ctx),
-            Group if !locked => self.create_object(ctx, false, "Group"),
-            Component if !locked && !self.selected.is_empty() => {
-                self.component_name = Some("Component".into());
-                self.gesture = None;
-            }
-            Paste | PasteInPlace => {
-                let Some(clipboard) = self.clipboard.clone() else {
-                    return;
-                };
-                self.set_tool(Tool::Select);
-                if matches!(action, PasteInPlace) {
-                    self.paste_at(ctx, &clipboard, DVec3::ZERO);
-                } else {
-                    let pos = self
-                        .context_position
-                        .take()
-                        .or_else(|| ctx.input(|i| i.pointer.hover_pos()))
-                        .filter(|p| self.viewport.contains(*p))
-                        .unwrap_or(self.viewport.center());
-                    self.prepare_picking();
-                    let point = self
-                        .infer_snap(pos, None, None, self.doc.snap_to_axes)
-                        .map(|s| s.point)
-                        .unwrap_or(clipboard.anchor);
-                    self.paste_preview = Some(PastePreview { clipboard, point });
-                    self.say(ctx, "Click to place the copy · Escape to cancel");
-                }
-            }
-            Ungroup | Explode if !locked => {
-                let before = self.doc.model.clone();
-                self.selected = self
-                    .doc
-                    .model
-                    .dissolve_objects(&self.selected, matches!(action, Ungroup));
-                self.finish_edit(
-                    if matches!(action, Ungroup) {
-                        "Ungroup"
-                    } else {
-                        "Explode"
-                    },
-                    before,
-                    ctx,
-                );
-            }
-            Hide | Lock
-                if !locked
-                    || (matches!(action, Lock)
-                        && !self.doc.model.selection_locked(&self.selected)) =>
-            {
-                let before = self.doc.model.clone();
-                if matches!(action, Hide) {
-                    self.doc.model.hidden.extend(&self.selected);
-                    self.selected.clear();
-                } else {
-                    self.doc.model.locked.extend(&self.selected);
-                }
-                self.finish_context_state_edit(
-                    if matches!(action, Hide) {
-                        "Hide"
-                    } else {
-                        "Lock"
-                    },
-                    before,
-                    ctx,
-                );
-            }
-            Unlock => {
-                let before = self.doc.model.clone();
-                let ids = self.doc.model.expand_entities(&self.selected);
-                self.doc.model.locked.retain(|id| !ids.contains(id));
-                self.finish_context_state_edit("Unlock", before, ctx);
-            }
-            UnhideAll => {
-                let before = self.doc.model.clone();
-                if let Some(context) = self.doc.model.edit_context {
-                    let ids = self
-                        .doc
-                        .model
-                        .expand_entities(&self.doc.model.objects[&context].entities);
-                    self.doc.model.hidden.retain(|id| !ids.contains(id));
-                } else {
-                    self.doc.model.hidden.clear();
-                }
-                self.finish_context_state_edit("Unhide all", before, ctx);
-            }
-            _ => {}
-        }
+    fn request_name_input_focus(ctx: &egui::Context, id: egui::Id) {
+        ctx.data_mut(|data| data.insert_temp(id.with("focus_name"), true));
     }
-    fn context_menu(&mut self, response: &egui::Response) {
-        let mut action = None;
-        response.context_menu(|ui| {
-            ui.set_min_width(230.);
-            ui.spacing_mut().item_spacing.y = 2.;
-            ui.spacing_mut().interact_size.y = 24.;
-            ui.spacing_mut().button_padding = egui::vec2(8., 3.);
-            let selected = !self.selected.is_empty();
-            let editable = selected && !self.doc.model.selection_protected(&self.selected);
-            let objects = self
-                .selected
-                .iter()
-                .any(|id| self.doc.model.objects.contains_key(id));
-            let groups = self.selected.iter().any(|id| {
-                self.doc
-                    .model
-                    .objects
-                    .get(id)
-                    .is_some_and(|o| o.kind == ObjectKind::Group)
-            });
-            let mut item = |ui: &mut egui::Ui, label: &str, enabled, command| {
-                let shortcut = match command {
-                    ContextAction::Cut => Some((egui::Modifiers::COMMAND, Key::X)),
-                    ContextAction::Copy => Some((egui::Modifiers::COMMAND, Key::C)),
-                    ContextAction::Paste => Some((egui::Modifiers::COMMAND, Key::V)),
-                    ContextAction::PasteInPlace => {
-                        Some((egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::V))
-                    }
-                    ContextAction::Delete => Some((egui::Modifiers::NONE, Key::Delete)),
-                    _ => None,
-                };
-                let mut button = egui::Button::new(label);
-                if let Some((modifiers, key)) = shortcut {
-                    button = button.shortcut_text(
-                        ui.ctx()
-                            .format_shortcut(&egui::KeyboardShortcut::new(modifiers, key)),
-                    );
-                }
-                if ui.add_enabled(enabled, button).clicked() {
-                    action = Some(command);
-                    ui.close();
-                }
-            };
-            if self.selected.len() == 1 && objects {
-                let object = &self.doc.model.objects[self.selected.first().unwrap()];
-                let label = if object.kind == ObjectKind::Group {
-                    "Edit Group"
-                } else {
-                    "Edit Component"
-                };
-                item(
-                    ui,
-                    label,
-                    !self.doc.model.is_locked(object.id),
-                    ContextAction::EditObject,
-                );
-                ui.separator();
-            }
-            if self.doc.model.edit_context.is_some() {
-                item(
-                    ui,
-                    "Close Editing Context",
-                    true,
-                    ContextAction::CloseContext,
-                );
-                ui.separator();
-            }
-            item(ui, "Make Group", editable, ContextAction::Group);
-            item(ui, "Create Component…", editable, ContextAction::Component);
-            item(ui, "Ungroup", editable && groups, ContextAction::Ungroup);
-            item(ui, "Explode", editable && objects, ContextAction::Explode);
-            ui.separator();
-            item(ui, "Cut", editable, ContextAction::Cut);
-            item(ui, "Copy", selected, ContextAction::Copy);
-            item(ui, "Paste", self.clipboard.is_some(), ContextAction::Paste);
-            item(
-                ui,
-                "Paste in Place",
-                self.clipboard.is_some(),
-                ContextAction::PasteInPlace,
-            );
-            item(ui, "Delete", editable, ContextAction::Delete);
-            ui.separator();
-            item(ui, "Hide", editable, ContextAction::Hide);
-            if self.doc.model.selection_locked(&self.selected) {
-                item(ui, "Unlock", selected, ContextAction::Unlock);
-            } else {
-                item(ui, "Lock", selected, ContextAction::Lock);
-            }
-            item(
-                ui,
-                "Unhide All",
-                !self.doc.model.hidden.is_empty(),
-                ContextAction::UnhideAll,
-            );
+    fn name_input(ui: &mut egui::Ui, name: &mut String, id: egui::Id) -> egui::Response {
+        // A new window first runs an invisible sizing pass. Wait until the field
+        // is visible so that pass cannot discard the initial keyboard focus.
+        if ui.is_visible()
+            && ui.ctx().data_mut(|data| {
+                data.remove_temp::<bool>(id.with("focus_name"))
+                    .unwrap_or(false)
+            })
+        {
+            let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::select_all_str(name)));
+            state.store(ui.ctx(), id);
+            ui.memory_mut(|memory| memory.request_focus(id));
+        }
+        ui.add(egui::TextEdit::singleline(name).id(id))
+    }
+    fn begin_object_creation(&mut self, ctx: &egui::Context, component: bool) {
+        if self.selected.is_empty() || self.doc.model.selection_protected(&self.selected) {
+            return;
+        }
+        let name = if component { "Component" } else { "Group" };
+        self.object_creation = Some(ObjectCreation {
+            component,
+            name: name.into(),
         });
-        if let Some(action) = action {
-            self.context_action(&response.ctx, action);
-            self.context_position = None;
-        }
+        self.gesture = None;
+        Self::request_name_input_focus(ctx, egui::Id::unique("create_object_name"));
     }
-    fn component_window(&mut self, ctx: &egui::Context) {
-        let Some(mut name) = self.component_name.take() else {
+    fn object_creation_window(&mut self, ctx: &egui::Context) {
+        let Some(ObjectCreation {
+            component,
+            mut name,
+        }) = self.object_creation.take()
+        else {
             return;
         };
         let mut open = true;
         let mut create = false;
         let mut cancel = false;
-        egui::Window::new("Create Component")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.label("Name");
-                ui.text_edit_singleline(&mut name);
-                if name.len() > 256 {
-                    name.truncate(name.floor_char_boundary(256));
-                }
-                ui.add_space(10.);
-                ui.horizontal(|ui| {
-                    create = ui
-                        .add_enabled(!name.trim().is_empty(), egui::Button::new("Create"))
-                        .clicked();
-                    cancel = ui.button("Cancel").clicked();
-                });
+        egui::Window::new(if component {
+            "Create Component"
+        } else {
+            "Make Group"
+        })
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label("Name");
+            let input = Self::name_input(ui, &mut name, egui::Id::unique("create_object_name"));
+            let enter = input.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            if name.len() > 256 {
+                name.truncate(name.floor_char_boundary(256));
+            }
+            ui.add_space(10.);
+            ui.horizontal(|ui| {
+                create = ui
+                    .add_enabled(!name.trim().is_empty(), egui::Button::new("Create"))
+                    .clicked()
+                    || (enter && !name.trim().is_empty());
+                cancel = ui.button("Cancel").clicked();
             });
+        });
         if create {
-            self.create_object(ctx, true, &name);
+            self.create_object(ctx, component, &name);
         } else if open && !cancel {
-            self.component_name = Some(name);
+            self.object_creation = Some(ObjectCreation { component, name });
         }
     }
     fn new_model(&mut self, ctx: &egui::Context) {
-        self.replace_project(Document::default(), None, ctx);
+        let doc = Document {
+            display: self.doc.display.clone(),
+            ..Document::default()
+        };
+        self.replace_project(doc, None, ctx);
         self.say(ctx, "New project ready");
     }
     fn fit(&mut self, ctx: &egui::Context) {
@@ -1399,7 +1241,8 @@ impl KetchupApp {
                 || self.gesture.is_some()
                 || self.line_start.is_some()
                 || self.paste_preview.is_some()
-                || self.component_name.is_some()
+                || self.object_creation.is_some()
+                || self.object_rename.is_some()
                 || self.help
                 || ctx.egui_wants_keyboard_input();
             if !editing_operation && self.doc.model.edit_context.is_some() {
@@ -1417,14 +1260,19 @@ impl KetchupApp {
             self.notice = None;
             self.help = false;
             self.paste_preview = None;
-            self.component_name = None;
+            self.object_creation = None;
+            self.object_rename = None;
             ctx.memory_mut(|m| {
                 if let Some(id) = m.focused() {
                     m.surrender_focus(id);
                 }
             });
         }
-        if ctx.egui_wants_keyboard_input() || self.help || self.component_name.is_some() {
+        if ctx.egui_wants_keyboard_input()
+            || self.help
+            || self.object_creation.is_some()
+            || self.object_rename.is_some()
+        {
             let modifiers = ctx.input(|i| i.modifiers);
             self.move_modifier_down = if ctx.os() == egui::os::OperatingSystem::Mac {
                 modifiers.alt
@@ -1432,6 +1280,36 @@ impl KetchupApp {
                 modifiers.ctrl
             };
             return;
+        }
+        let emphasis_tab = ctx.input_mut(|i| {
+            let mut consumed = false;
+            if i.focused {
+                i.events.retain(|event| {
+                    if let egui::Event::Key {
+                        key: Key::Tab,
+                        pressed: true,
+                        repeat,
+                        modifiers,
+                        ..
+                    } = event
+                        && !modifiers.any()
+                    {
+                        consumed = true;
+                        if !repeat {
+                            self.group_emphasis = !self.group_emphasis;
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            consumed
+        });
+        if emphasis_tab {
+            // egui schedules Tab focus traversal before application shortcuts run.
+            ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+            ctx.request_repaint();
         }
         let events = ctx.input(|i| i.events.clone());
         let copy_event = events.iter().any(|e| matches!(e, egui::Event::Copy));
@@ -1911,8 +1789,7 @@ impl KetchupApp {
                     .inner_margin(egui::Margin::symmetric(16, 5)),
             )
             .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    dot(ui, ACCENT);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let drawing_orbit = self.drawing_orbit_modifier(ctx.input(|i| i.modifiers));
                     let navigating = self
                         .gesture
@@ -1956,7 +1833,7 @@ impl KetchupApp {
                     } else {
                         self.tool.instructions()
                     };
-                    ui.label(RichText::new(message).size(12.).color(colors.muted));
+                    // Reserve the precision controls before fitting the status message.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.tool.is_measuring() {
                             ui.label(
@@ -1977,10 +1854,9 @@ impl KetchupApp {
                             );
                             return;
                         }
-                        ui.label(
-                            RichText::new(if self.tool == Tool::Scale { "×" } else { "" })
-                                .color(colors.muted),
-                        );
+                        if self.tool == Tool::Scale {
+                            ui.label(RichText::new("×").color(colors.muted));
+                        }
                         let available = self.precision_available();
                         let hint = if let Some(edit) = &self.modeling {
                             if self.tool == Tool::Scale { format!("{:.3}", edit.value) } else { format!("{:.3} m", edit.value) }
@@ -2033,8 +1909,32 @@ impl KetchupApp {
                             .color(colors.muted),
                         );
                     });
+                    ui.allocate_ui_with_layout(
+                        ui.available_size(),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            dot(ui, ACCENT);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(message).size(12.).color(colors.muted),
+                                )
+                                .truncate(),
+                            );
+                        },
+                    );
                 });
             });
+    }
+    fn tool_tooltip(response: egui::Response, tool: Tool) -> egui::Response {
+        response.on_hover_ui(|ui| {
+            let title = if tool.shortcut().is_empty() {
+                tool.label().to_owned()
+            } else {
+                format!("{} ({})", tool.label(), tool.shortcut())
+            };
+            ui.strong(title);
+            ui.label(tool.instructions());
+        })
     }
     fn tool_menu_item(ui: &mut egui::Ui, tool: Tool, active: bool) -> egui::Response {
         let colors = Palette::for_ui(ui);
@@ -2077,7 +1977,7 @@ impl KetchupApp {
             FontId::proportional(11.),
             colors.muted,
         );
-        response
+        Self::tool_tooltip(response, tool)
     }
     fn tool_rail(&mut self, ui: &mut egui::Ui) {
         let colors = Palette::for_ui(ui);
@@ -2219,7 +2119,7 @@ impl KetchupApp {
                                         }
                                     });
                             }
-                            if response.on_hover_text(tooltip).clicked() && !nested {
+                            if Self::tool_tooltip(response, tool).clicked() && !nested {
                                 self.set_tool(tool);
                             }
                             ui.add_space(5.);
@@ -2399,8 +2299,10 @@ impl KetchupApp {
             }
             ui.add_space(22.);
         }
-        egui::CollapsingHeader::new("This model")
+        let open = sidebar::restored_header_open(ui, "model_summary", false);
+        let summary = egui::CollapsingHeader::new("This model")
             .id_salt("model_summary")
+            .open(open)
             .show(ui, |ui| {
                 Self::property(ui, "Edges", &self.doc.model.edges.len().to_string());
                 Self::property(ui, "Faces", &self.doc.model.faces.len().to_string());
@@ -2420,6 +2322,7 @@ impl KetchupApp {
                     }
                 });
             });
+        sidebar::remember_section(ui.ctx(), summary.header_response.id, "model_summary");
     }
     fn property(ui: &mut egui::Ui, label: &str, value: &str) {
         let colors = Palette::for_ui(ui);
@@ -2437,8 +2340,8 @@ impl KetchupApp {
             return;
         }
         if ui.available_width() >= 900. {
-            egui::Panel::right("inspector")
-                .default_size(300.)
+            let panel = egui::Panel::right("inspector")
+                .default_size(self.inspector_width)
                 .size_range(260. ..=ui.available_width() * 0.5)
                 .resizable(true)
                 .frame(egui::Frame::new().fill(colors.paper))
@@ -2449,6 +2352,7 @@ impl KetchupApp {
                         .auto_shrink([false, false])
                         .show(ui, |ui| self.inspector_contents(ui));
                 });
+            self.inspector_width = panel.response.rect.width();
         } else {
             let mut open = true;
             egui::Window::new("Inspector")
@@ -2740,7 +2644,8 @@ impl KetchupApp {
         if self.project.blocked() {
             return;
         }
-        if self.help || self.about || self.component_name.is_some() {
+        if self.help || self.about || self.object_creation.is_some() || self.object_rename.is_some()
+        {
             self.drawing_orbit_down = false;
             self.drawing_orbit_pivot = None;
             self.viewport_pointer = None;
@@ -2817,9 +2722,7 @@ impl KetchupApp {
                             dv(self.viewport.size()),
                             true,
                         );
-                        if !hit.is_some_and(|id| self.selected.contains(&id)) {
-                            self.selected = hit.into_iter().collect();
-                        }
+                        self.select_context_target(hit);
                         continue;
                     }
                     if self.gesture.is_some() {
@@ -2920,10 +2823,11 @@ impl KetchupApp {
                         gesture.last = pos;
                         self.gesture = Some(gesture);
                     }
-                    if self.viewport.contains(pos) {
+                    if in_viewport {
                         self.update_pointer(pos);
                     } else {
                         self.hover = None;
+                        self.flip_hover = None;
                     }
                 }
                 egui::Event::PointerButton {
@@ -3086,7 +2990,11 @@ impl KetchupApp {
             }
         }
         self.update_drawing_orbit(ctx.input(|i| i.modifiers));
-        if response.hovered() && refresh_pointer {
+        // Menus and other overlays can cover the viewport without pointer motion.
+        if !response.contains_pointer() {
+            self.hover = None;
+            self.flip_hover = None;
+        } else if response.hovered() && refresh_pointer {
             if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
                 self.update_pointer(pos);
             }
@@ -3122,11 +3030,14 @@ impl KetchupApp {
                 tool => tool,
             }
         };
+        if tool == Tool::Select {
+            ctx.set_cursor_icon(egui::CursorIcon::Default);
+            return;
+        }
         let size = 28.;
-        // Keep the arrow tip and pencil point at the actual interaction position.
+        // Keep the pencil point at the actual interaction position.
         // Symmetric tool icons use their center as the hotspot.
         let hotspot = match tool {
-            Tool::Select => egui::vec2(-0.55, -0.95),
             Tool::Line => egui::vec2(-0.95, 0.95),
             _ => Vec2::ZERO,
         } * (size * 0.36);
@@ -3154,11 +3065,53 @@ impl KetchupApp {
             .unwrap_or(&self.doc.model);
         self.entity_cache.update(model);
         let entities = &self.entity_cache;
+        let selected_entities = if let Some(edit) = self
+            .modeling
+            .as_ref()
+            .filter(|_| self.tool == Tool::PushPull)
+        {
+            let cap = model
+                .faces
+                .keys()
+                .filter(|id| {
+                    !edit.base.faces.contains_key(id) && model.parent(**id) == model.edit_context
+                })
+                .next_back()
+                .copied()
+                .or(edit.face);
+            cap.into_iter().collect()
+        } else if let Some(edit) = self.modeling.as_ref().filter(|edit| edit.copy) {
+            let copies = model
+                .selectable_entities()
+                .into_iter()
+                .filter(|id| !edit.base.contains_entity(id))
+                .collect();
+            model.expand_entities(&copies)
+        } else {
+            model.expand_entities(&self.selected)
+        };
+        let emphasized_entities = if self.group_emphasis
+            && let Some(context) = model.edit_context
+        {
+            model.expand_entities(&BTreeSet::from([context]))
+        } else {
+            BTreeSet::new()
+        };
+        let emphasize_group = !emphasized_entities.is_empty();
         let size = dv(rect.size());
         let camera = &self.doc.camera;
         let p = ui.painter().with_clip_rect(rect);
-        let themed_display =
+        let mut themed_display =
             crate::environment::for_theme(&self.doc.display, ui.visuals().dark_mode);
+        if emphasize_group {
+            // These overrides last only for this frame; the saved style stays intact.
+            if themed_display.face_style == ketchup_core::FaceStyle::Wireframe {
+                themed_display.face_style = ketchup_core::FaceStyle::Shaded;
+            }
+            themed_display.x_ray = false;
+            themed_display.shadows = false;
+            themed_display.section_fill = false;
+        }
         let display = &themed_display;
         crate::environment::paint(&p, rect, camera, display, ui.visuals().dark_mode);
         let mut mesh = renderer::Mesh::cached(camera, size, &mut self.scene_cache);
@@ -3200,31 +3153,6 @@ impl KetchupApp {
             mesh.axis_line(-v, DVec3::ZERO, 0.85, axis_color(axis).gamma_multiply(0.35));
             mesh.axis_line(DVec3::ZERO, v, 1.1, axis_color(axis).gamma_multiply(0.8));
         }
-        let selected_entities = if let Some(edit) = self
-            .modeling
-            .as_ref()
-            .filter(|_| self.tool == Tool::PushPull)
-        {
-            let cap = model
-                .faces
-                .keys()
-                .filter(|id| {
-                    !edit.base.faces.contains_key(id) && model.parent(**id) == model.edit_context
-                })
-                .next_back()
-                .copied()
-                .or(edit.face);
-            cap.into_iter().collect()
-        } else if let Some(edit) = self.modeling.as_ref().filter(|edit| edit.copy) {
-            let copies = model
-                .selectable_entities()
-                .into_iter()
-                .filter(|id| !edit.base.contains_entity(id))
-                .collect();
-            model.expand_entities(&copies)
-        } else {
-            model.expand_entities(&self.selected)
-        };
         self.face_cache.update(model);
         self.shadow_cache
             .update(&self.face_cache, entities, display);
@@ -3232,6 +3160,7 @@ impl KetchupApp {
             .faces
             .values()
             .filter(|f| entities.get(f.id).displayed(display))
+            .filter(|f| !emphasize_group || emphasized_entities.contains(&f.id))
             .collect();
         if display.x_ray {
             visible_faces.sort_by(|a, b| {
@@ -3282,7 +3211,8 @@ impl KetchupApp {
             } else {
                 faces.front
             };
-            let color = if entities.get(face.id).context.is_none() {
+            let outliner_hover = self.outliner_hover.contains(&face.id);
+            let color = if entities.get(face.id).context.is_none() && !outliner_hover {
                 faces.inactive
             } else if erasing.is_some_and(|ids| {
                 entities
@@ -3291,12 +3221,16 @@ impl KetchupApp {
                     .is_some_and(|id| ids.contains(&id))
             }) {
                 Color32::from_rgb(220, 91, 76)
-            } else if self.tool == Tool::Paint && model.face_colors.contains_key(&face.id) {
+            } else if self.tool == Tool::Paint
+                && model.face_colors.contains_key(&face.id)
+                && !outliner_hover
+            {
                 material
             } else if selected_entities.contains(&face.id) {
                 faces.selected
             } else if self.hover.is_some() && self.hover == entities.get(face.id).context
                 || self.hover == Some(face.id)
+                || outliner_hover
             {
                 faces.hovered
             } else {
@@ -3330,7 +3264,7 @@ impl KetchupApp {
             display,
             &faces,
         );
-        let profiles = if display.profiles {
+        let profiles = if display.profiles && !emphasize_group {
             display_scene::profile_edges(model, camera, &self.face_cache, entities, display)
         } else {
             BTreeSet::new()
@@ -3341,10 +3275,14 @@ impl KetchupApp {
             .filter(|e| entities.get(e.id).displayed(display))
         {
             let selected = selected_entities.contains(&e.id);
+            let emphasized = emphasized_entities.contains(&e.id);
             let root = entities.get(e.id).context;
-            let hover = self.hover.is_some() && self.hover == root;
+            let outliner_hover = self.outliner_hover.contains(&e.id);
+            let hover = outliner_hover || self.hover.is_some() && self.hover == root;
             let pending = erasing.is_some_and(|ids| root.is_some_and(|id| ids.contains(&id)));
-            let color = if root.is_none() {
+            let color = if emphasize_group && !emphasized {
+                colors.muted.gamma_multiply(0.55)
+            } else if root.is_none() && !outliner_hover {
                 if ui.visuals().dark_mode {
                     colors.border
                 } else {
@@ -3356,7 +3294,7 @@ impl KetchupApp {
                 Color32::from_rgb(90, 133, 176)
             } else if selected {
                 ACCENT
-            } else if hover && self.tool == Tool::Erase {
+            } else if hover && self.tool == Tool::Erase && !outliner_hover {
                 ACCENT
             } else if hover {
                 colors.green
@@ -3364,22 +3302,25 @@ impl KetchupApp {
                 colors.ink
             };
             let (a, b) = model.points(e);
+            // Emphasis changes the surrounding geometry, preserving interaction feedback.
             let active = selected || hover || pending;
-            let width = if active {
+            let width = if emphasize_group && !emphasized {
+                1.
+            } else if active {
                 3.
             } else if profiles.contains(&e.id) {
                 display.profile_width
             } else {
                 1.8
             };
-            let width = if display.depth_cue && !active {
+            let width = if display.depth_cue && !active && !emphasize_group {
                 width
                     * (camera.distance / ((a + b) * 0.5).distance(camera.eye()).max(0.01))
                         .clamp(0.35, 1.8)
             } else {
                 width
             };
-            let color = if display.color_by_tag && !active {
+            let color = if display.color_by_tag && !active && (!emphasize_group || emphasized) {
                 entities
                     .get(e.id)
                     .tag_color
@@ -3395,6 +3336,7 @@ impl KetchupApp {
                 continue;
             }
             if display.edges
+                || emphasize_group
                 || profiles.contains(&e.id)
                 || active
                 || display.face_style == ketchup_core::FaceStyle::Wireframe
@@ -3665,12 +3607,7 @@ impl KetchupApp {
         {
             if start.distance(*last) > 4. {
                 let r = Rect::from_two_pos(*start, *last);
-                let crossing = start.x > last.x;
-                let color = if crossing {
-                    colors.green
-                } else {
-                    Color32::from_rgb(89, 136, 173)
-                };
+                let color = Color32::from_rgb(89, 136, 173);
                 p.rect_filled(r, 0, color.gamma_multiply(0.1));
                 p.rect_stroke(r, 0, Stroke::new(1., color), egui::StrokeKind::Inside);
             }
@@ -3847,8 +3784,10 @@ impl KetchupApp {
                         }
                         if Self::icon_button(ui,"fit","Fit model to view (F)",true,colors.muted){self.fit(&ctx);}
                         ui.separator();
-                        if ui.checkbox(&mut self.doc.snap_to_geometry,RichText::new("Snap").size(12.).color(colors.muted)).on_hover_text("Snap drawing to existing endpoints, midpoints, edges, and faces").changed() {self.snap=None;self.changed(&ctx);}
+                        if ui.checkbox(&mut self.doc.snap_to_geometry,RichText::new("Snap to objects").size(12.).color(colors.muted)).on_hover_text("Snap drawing to existing endpoints, midpoints, edges, and faces").changed() {self.snap=None;self.changed(&ctx);}
                         if ui.checkbox(&mut self.doc.snap_to_axes,RichText::new("Snap to axes").size(12.).color(colors.muted)).on_hover_text("Automatically align drawing with the red, green, and blue axes. Hover an endpoint, midpoint, or edge to acquire axes through that position. Arrow keys can still lock an axis when this is off.").changed() {self.snap=None;self.changed(&ctx);}
+                        // This row flows right to left, so emphasis appears before the Snap options.
+                        if ui.checkbox(&mut self.group_emphasis,RichText::new("Emphasize group").size(12.).color(colors.muted)).on_hover_text("Emphasize the group/component currently being edited and show everything else in muted wireframe. Toggle with Tab. Has no visual effect outside a group/component.").changed() {ctx.request_repaint();}
                         ui.allocate_ui_with_layout(ui.available_size(),egui::Layout::left_to_right(egui::Align::Center),|ui|{
                             self.edit_context_bar(ui);
                         });
@@ -3925,6 +3864,8 @@ impl KetchupApp {
 impl eframe::App for KetchupApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // Rebuilt by visible Outliner rows; closing the inspector clears the highlight too.
+        self.outliner_hover.clear();
         self.poll_project(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -3944,6 +3885,7 @@ impl eframe::App for KetchupApp {
         self.top_bar(ui);
         self.status_bar(ui);
         self.tool_rail(ui);
+        let inspector_order_before = self.inspector_order;
         self.inspector_panel(ui);
         let theme_before = ctx.options(|options| options.theme_preference);
         self.viewport_panel(ui);
@@ -3952,7 +3894,8 @@ impl eframe::App for KetchupApp {
         {
             save_preference(&ctx, storage);
         }
-        self.component_window(&ctx);
+        self.object_creation_window(&ctx);
+        self.rename_object_window(&ctx);
         if self.help {
             self.help_window(&ctx);
         }
@@ -3964,6 +3907,11 @@ impl eframe::App for KetchupApp {
         self.project_dialogs(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
         Self::window_resize_handles(ui);
+        self.persist_inspector_changes(
+            &ctx,
+            frame.storage_mut(),
+            inspector_order_before != self.inspector_order,
+        );
         if let Some(since) = self.dirty_since {
             let now = ctx.input(|i| i.time);
             if now - since >= 0.5 {
@@ -3974,7 +3922,8 @@ impl eframe::App for KetchupApp {
             }
         }
     }
-    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.save_inspector_preferences(storage);
         if self.dirty_since.is_some() {
             self.persist();
         }

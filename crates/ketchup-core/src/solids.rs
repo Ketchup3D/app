@@ -1,4 +1,4 @@
-//! Closed-solid validation, BSP boolean operations, and editable planar output.
+//! Group/component operands, BSP booleans, surface intersections, and planar output.
 use crate::{
     DVec2, DVec3, Face, Model, Object, ObjectKind, Vertex,
     csg::{self, Boolean, Polygon},
@@ -226,7 +226,7 @@ fn inside(point: DVec3, surfaces: &[Polygon]) -> bool {
     }
     angle.abs() > std::f64::consts::TAU
 }
-fn import(model: &Model, frame: Frame) -> Result<Vec<Polygon>, &'static str> {
+fn import_surfaces(model: &Model, frame: Frame) -> Result<Vec<Polygon>, &'static str> {
     if model.faces.is_empty() {
         return Err("The body needs filled faces to form a closed solid");
     }
@@ -264,6 +264,46 @@ fn import(model: &Model, frame: Frame) -> Result<Vec<Polygon>, &'static str> {
             })
         })
         .collect();
+    if surfaces.is_empty() {
+        return Err("Choose geometry with filled faces");
+    }
+    Ok(surfaces)
+}
+fn import(model: &Model, frame: Frame) -> Result<Vec<Polygon>, &'static str> {
+    // Object boundaries isolate their geometry. Combine child volumes rather
+    // than welding overlapping or touching children into a non-manifold mesh.
+    let roots = model.root_entities();
+    let mut surfaces = vec![];
+    let loose: BTreeSet<_> = roots
+        .iter()
+        .copied()
+        .filter(|id| !model.objects.contains_key(id))
+        .collect();
+    if !loose.is_empty() {
+        surfaces = match import_mesh(&model.copy_entities(&loose), frame) {
+            Ok(surfaces) => surfaces,
+            Err(_) => return import_mesh(model, frame),
+        };
+    }
+    for id in roots.iter().filter(|id| model.objects.contains_key(id)) {
+        let contents = model
+            .object_contents(*id)
+            .ok_or("Missing object contents")?;
+        let child = match import(&contents, frame) {
+            Ok(child) => child,
+            // Some models organize one shell's faces into separate objects.
+            // Preserve support for a shell that closes only as a whole.
+            Err(_) => return import_mesh(model, frame),
+        };
+        surfaces = csg::apply(surfaces, child, Boolean::Union, frame.epsilon)?;
+    }
+    if surfaces.is_empty() {
+        return Err("The body needs filled faces to form a closed solid");
+    }
+    Ok(surfaces)
+}
+fn import_mesh(model: &Model, frame: Frame) -> Result<Vec<Polygon>, &'static str> {
+    let surfaces = import_surfaces(model, frame)?;
     let mut mesh = indexed(
         &surfaces,
         model.vertices.values().map(|v| frame.local(v.position)),
@@ -347,6 +387,56 @@ fn import(model: &Model, frame: Frame) -> Result<Vec<Polygon>, &'static str> {
         }
     }
     Ok(surfaces)
+}
+
+/// Give a planar surface a temporary thickness for bounded BSP clipping. Only
+/// its original plane is emitted, so this never adds thickness to the model.
+fn planar_prism(mut surfaces: Vec<Polygon>, epsilon: f64) -> Result<Vec<Polygon>, &'static str> {
+    let first = surfaces
+        .first()
+        .ok_or("Choose geometry with filled faces")?;
+    let (normal, w) = (first.normal, first.w);
+    if surfaces.iter().any(|p| {
+        p.vertices
+            .iter()
+            .any(|v| (normal.dot(*v) - w).abs() > epsilon)
+    }) {
+        return Err("Open bodies must lie in the same plane to intersect each other");
+    }
+    for p in &mut surfaces {
+        if p.normal.dot(normal) < 0. {
+            p.flip();
+        }
+    }
+    let mesh = indexed(&surfaces, [], epsilon)?;
+    let mut result = vec![];
+    for p in surfaces {
+        let mut bottom = p.clone();
+        bottom.vertices.iter_mut().for_each(|v| *v -= normal);
+        bottom.w -= 1.;
+        bottom.flip();
+        let mut top = p;
+        top.vertices.iter_mut().for_each(|v| *v += normal);
+        top.w += 1.;
+        result.extend([bottom, top]);
+    }
+    for ((a, b), adjacent) in edges(&mesh) {
+        if adjacent.len() == 1 {
+            let (face, forward) = adjacent[0];
+            let (a, b) = if forward { (a, b) } else { (b, a) };
+            let (a, b) = (mesh.points[a], mesh.points[b]);
+            if let Some(side) = Polygon::new(
+                vec![a - normal, b - normal, b + normal, a + normal],
+                mesh.polygons[face].1,
+                epsilon,
+            ) {
+                result.push(side);
+            }
+        } else if adjacent.len() != 2 {
+            return Err("Remove overlapping faces inside the planar body");
+        }
+    }
+    Ok(result)
 }
 
 struct Surface {
@@ -493,13 +583,17 @@ fn output(
     frame: Frame,
     name: &str,
     outer_only: bool,
+    closed: bool,
 ) -> Result<Option<u64>, &'static str> {
-    if surfaces.is_empty() || csg::volume(&surfaces).abs() < 1e-15 {
+    if surfaces.is_empty() || (closed && csg::volume(&surfaces).abs() < 1e-15) {
         return Ok(None);
     }
     let mut mesh = indexed(&surfaces, [], frame.epsilon)?;
-    let groups =
-        components(&mesh).map_err(|_| "The result cannot form a closed solid at this precision")?;
+    let groups = if closed {
+        components(&mesh).map_err(|_| "The result cannot form a closed solid at this precision")?
+    } else {
+        vec![]
+    };
     if outer_only {
         let polys = polygons(&mesh, frame.epsilon)?;
         let shells: Vec<Vec<Polygon>> = groups
@@ -573,6 +667,7 @@ fn output(
         id,
         Object {
             id,
+            outliner_order: None,
             name: name.into(),
             kind: ObjectKind::Group,
             transform: Some(Default::default()),
@@ -584,6 +679,20 @@ fn output(
 }
 
 impl Model {
+    pub fn validate_solid_operand(
+        &self,
+        entity: u64,
+        operation: SolidOperation,
+    ) -> Result<(), &'static str> {
+        let ids = self.solid_entities(entity)?;
+        let copy = self.copy_entities(&ids);
+        let frame = Frame::new(&[&copy])?;
+        if operation == SolidOperation::Intersect {
+            import_surfaces(&copy, frame).map(|_| ())
+        } else {
+            import(&copy, frame).map(|_| ())
+        }
+    }
     /// Resolve an object, or all connected loose geometry, as one operand.
     pub fn solid_entities(&self, entity: u64) -> Result<BTreeSet<u64>, &'static str> {
         let entity = self
@@ -668,7 +777,48 @@ impl Model {
         }
         let (a, b) = (self.copy_entities(&a_ids), self.copy_entities(&b_ids));
         let frame = Frame::new(&[&a, &b])?;
-        let (a, b) = (import(&a, frame)?, import(&b, frame)?);
+        let (a_solid, b_solid) = (import(&a, frame), import(&b, frame));
+        let closed = a_solid.is_ok() && b_solid.is_ok();
+        if operation == SolidOperation::Intersect && !closed {
+            let overlap = match (a_solid, b_solid) {
+                (Ok(solid), Err(_)) => {
+                    csg::intersect_surface(import_surfaces(&b, frame)?, solid, frame.epsilon)?
+                }
+                (Err(_), Ok(solid)) => {
+                    csg::intersect_surface(import_surfaces(&a, frame)?, solid, frame.epsilon)?
+                }
+                (Err(_), Err(_)) => {
+                    let surfaces = import_surfaces(&a, frame)?;
+                    let other = import_surfaces(&b, frame)?;
+                    let plane = surfaces.first().unwrap();
+                    if other.iter().any(|p| {
+                        p.vertices
+                            .iter()
+                            .any(|v| (plane.normal.dot(*v) - plane.w).abs() > frame.epsilon)
+                    }) {
+                        return Err(
+                            "Open bodies must lie in the same plane to intersect each other",
+                        );
+                    }
+                    let prism = planar_prism(other, frame.epsilon)?;
+                    csg::intersect_surface(surfaces, prism, frame.epsilon)?
+                }
+                _ => unreachable!(),
+            };
+            if overlap.is_empty() {
+                return Err("The bodies have no shared surface");
+            }
+            let mut next = self.clone();
+            next.erase(&a_ids.union(&b_ids).copied().collect());
+            let result = output(&mut next, overlap, frame, "Intersection", false, false)?
+                .into_iter()
+                .collect();
+            next.validate()
+                .map_err(|_| "The result cannot be represented as valid planar geometry")?;
+            *self = next;
+            return Ok(result);
+        }
+        let (a, b) = (a_solid?, b_solid?);
         let mut pieces = vec![];
         match operation {
             SolidOperation::OuterShell | SolidOperation::Union => pieces.push((
@@ -720,6 +870,7 @@ impl Model {
                 frame,
                 name,
                 operation == SolidOperation::OuterShell,
+                true,
             )? {
                 result.insert(id);
             }

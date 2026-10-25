@@ -8,6 +8,7 @@ pub mod inference;
 pub mod measurements;
 pub mod modeling;
 pub mod objects;
+mod reparent;
 pub mod selection;
 pub mod solids;
 pub mod tags;
@@ -38,6 +39,8 @@ mod move_inference_tests;
 mod object_tests;
 #[cfg(test)]
 mod reference_inference_tests;
+#[cfg(test)]
+mod reparent_tests;
 #[cfg(test)]
 mod solid_tests;
 #[cfg(test)]
@@ -208,7 +211,7 @@ impl Tool {
             }
             Self::OuterShell => "Click two closed solids to combine their outer surfaces",
             Self::Union => "Click two closed solids to combine their volumes",
-            Self::Intersect => "Click two closed solids to keep their shared volume",
+            Self::Intersect => "Click groups, components, or faces to keep their overlap",
             Self::Trim => "Click the cutter first, then the solid to trim · The cutter stays",
             Self::Split => {
                 "Click two closed solids to keep the overlap and remaining pieces separately"

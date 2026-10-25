@@ -17,6 +17,9 @@ pub enum ObjectKind {
 pub struct Object {
     pub id: u64,
     pub name: String,
+    /// Sibling display position in the Outliner; older models use entity IDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outliner_order: Option<u64>,
     #[serde(default)]
     pub transform: Option<crate::InstanceTransform>,
     pub kind: ObjectKind,
@@ -451,6 +454,7 @@ impl Model {
             id,
             Object {
                 id,
+                outliner_order: None,
                 transform: Some(crate::InstanceTransform::default()),
                 name: if name.trim().is_empty() {
                     if component { "Component" } else { "Group" }.into()

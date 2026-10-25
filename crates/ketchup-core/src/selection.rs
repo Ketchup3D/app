@@ -141,6 +141,7 @@ pub fn intersects_rect(a: DVec2, b: DVec2, lo: DVec2, hi: DVec2) -> bool {
     }
     true
 }
+/// Select entities fully enclosed by the rectangle, regardless of drag direction.
 pub fn box_select(
     model: &Model,
     camera: &Camera,
@@ -150,7 +151,6 @@ pub fn box_select(
 ) -> BTreeSet<u64> {
     let lo = start.min(end);
     let hi = start.max(end);
-    let crossing = start.x > end.x;
     let inside = |p: DVec2| p.cmpge(lo).all() && p.cmple(hi).all();
     let mut selected: BTreeSet<_> = model
         .edges
@@ -158,17 +158,8 @@ pub fn box_select(
         .filter(|e| !model.is_hidden(e.id) && model.entity_in_context(e.id).is_some())
         .filter_map(|e| {
             let (a, b) = model.points(e);
-            let (a, b) = if crossing {
-                camera.segment(a, b, size)?
-            } else {
-                (camera.project(a, size)?, camera.project(b, size)?)
-            };
-            (if crossing {
-                intersects_rect(a, b, lo, hi)
-            } else {
-                inside(a) && inside(b)
-            })
-            .then_some(e.id)
+            let (a, b) = (camera.project(a, size)?, camera.project(b, size)?);
+            (inside(a) && inside(b)).then_some(e.id)
         })
         .collect();
     for face in model
@@ -176,44 +167,20 @@ pub fn box_select(
         .values()
         .filter(|f| !model.is_hidden(f.id) && model.entity_in_context(f.id).is_some())
     {
-        let hit = if crossing {
-            model
-                .face_triangles(face)
-                .into_iter()
-                .flat_map(|tri| camera.triangle_depth(tri, size))
-                .any(|tri| {
-                    let triangle = tri.map(|p| p.truncate());
-                    triangle.iter().any(|&p| inside(p))
-                        || [lo, hi, DVec2::new(lo.x, hi.y), DVec2::new(hi.x, lo.y)]
-                            .iter()
-                            .any(|p| crate::faces::in_polygon(*p, &triangle, true))
-                        || (0..3)
-                            .any(|i| intersects_rect(triangle[i], triangle[(i + 1) % 3], lo, hi))
-                })
-        } else {
-            face.vertices.iter().all(|id| {
-                camera
-                    .project(model.vertices[id].position, size)
-                    .is_some_and(inside)
-            })
-        };
+        let hit = face.vertices.iter().all(|id| {
+            camera
+                .project(model.vertices[id].position, size)
+                .is_some_and(inside)
+        });
         if hit {
             selected.insert(face.id);
         }
     }
     for dimension in model.dimensions.values().filter(|d| !model.is_hidden(d.id)) {
         let points = dimension.layout(model);
-        let hit = if crossing {
-            [(0, 2), (2, 3), (3, 1)].iter().any(|&(a, b)| {
-                camera
-                    .segment(points[a], points[b], size)
-                    .is_some_and(|(a, b)| intersects_rect(a, b, lo, hi))
-            })
-        } else {
-            points
-                .iter()
-                .all(|p| camera.project(*p, size).is_some_and(inside))
-        };
+        let hit = points
+            .iter()
+            .all(|p| camera.project(*p, size).is_some_and(inside));
         if hit {
             selected.insert(dimension.id);
         }
@@ -223,15 +190,13 @@ pub fn box_select(
         .iter()
         .filter_map(|id| model.entity_in_context(*id))
         .collect();
-    if !crossing {
-        selected.retain(|id| {
-            !model.objects.contains_key(id)
-                || model
-                    .expand_entities(&BTreeSet::from([*id]))
-                    .iter()
-                    .filter(|id| !model.objects.contains_key(id) && !model.is_hidden(**id))
-                    .all(|id| hits.contains(id))
-        });
-    }
+    selected.retain(|id| {
+        !model.objects.contains_key(id)
+            || model
+                .expand_entities(&BTreeSet::from([*id]))
+                .iter()
+                .filter(|id| !model.objects.contains_key(id) && !model.is_hidden(**id))
+                .all(|id| hits.contains(id))
+    });
     selected
 }

@@ -4,6 +4,539 @@ use ketchup_core::{DisplaySettings, FaceStyle};
 #[path = "outliner.rs"]
 mod outliner;
 
+const ORDER_PREFERENCE_KEY: &str = "ketchup.inspector-order.v1";
+
+const PREFERENCE_KEY: &str = "ketchup.inspector.v1";
+
+// Persist the whole settings object: new DisplaySettings fields automatically
+// participate, while serde defaults keep older preferences compatible.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(super) struct InspectorPreferences {
+    visible: bool,
+    width: f32,
+    component_filter: String,
+    paint_color: [u8; 3],
+    display: Option<DisplaySettings>,
+    sections: std::collections::BTreeMap<String, bool>,
+}
+
+impl Default for InspectorPreferences {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            width: 300.,
+            component_filter: String::new(),
+            paint_color: [195, 96, 67],
+            display: None,
+            sections: Default::default(),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct SectionMemory(
+    std::collections::BTreeMap<String, bool>,
+    std::collections::BTreeMap<String, egui::Id>,
+);
+
+fn section_memory_id() -> egui::Id {
+    egui::Id::new(PREFERENCE_KEY)
+}
+
+// All inspector disclosures (including future ones) use these helpers, with a
+// stable key independent of their position, title, and docked/floating layout.
+pub(super) fn restore_section(ctx: &egui::Context, id: egui::Id, key: &str, default_open: bool) {
+    let open = ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
+            .0
+            .get(key)
+            .copied()
+    });
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ctx, id, default_open);
+    if let Some(open) = open {
+        state.set_open(open);
+    }
+    state.store(ctx);
+}
+
+// CollapsingHeader owns its internal UI scope. Force the remembered value only
+// when entering a different scope, then let egui handle clicks normally.
+pub(super) fn restored_header_open(ui: &egui::Ui, key: &str, default_open: bool) -> Option<bool> {
+    ui.ctx().data_mut(|data| {
+        let memory = data.get_temp_mut_or_default::<SectionMemory>(section_memory_id());
+        let previous_scope = memory.1.insert(key.to_owned(), ui.scope_id());
+        (previous_scope != Some(ui.scope_id()))
+            .then(|| memory.0.get(key).copied().unwrap_or(default_open))
+    })
+}
+
+pub(super) fn remember_section(ctx: &egui::Context, id: egui::Id, key: &str) {
+    if let Some(state) = egui::collapsing_header::CollapsingState::load(ctx, id) {
+        ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
+                .0
+                .insert(key.to_owned(), state.is_open());
+        });
+    }
+}
+
+impl KetchupApp {
+    pub(super) fn restore_inspector_preferences(
+        &mut self,
+        ctx: &egui::Context,
+        storage: Option<&dyn eframe::Storage>,
+    ) {
+        self.inspector_order = restore_order(storage);
+        let preferences = storage
+            .and_then(|storage| eframe::get_value::<InspectorPreferences>(storage, PREFERENCE_KEY))
+            .unwrap_or_default();
+        self.inspector = preferences.visible;
+        self.inspector_width = if preferences.width.is_finite() {
+            preferences.width.clamp(260., 2000.)
+        } else {
+            300.
+        };
+        self.component_filter = preferences.component_filter.clone();
+        self.paint_color = preferences.paint_color;
+        if let Some(display) = &preferences.display
+            && display.valid()
+        {
+            self.doc.display = display.clone();
+        }
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                section_memory_id(),
+                SectionMemory(preferences.sections.clone(), Default::default()),
+            )
+        });
+        self.inspector_preferences = preferences;
+    }
+
+    fn current_inspector_preferences(&self, ctx: &egui::Context) -> InspectorPreferences {
+        InspectorPreferences {
+            visible: self.inspector,
+            width: self.inspector_width,
+            component_filter: self.component_filter.clone(),
+            paint_color: self.paint_color,
+            display: Some(self.doc.display.clone()),
+            sections: ctx.data_mut(|data| {
+                data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
+                    .0
+                    .clone()
+            }),
+        }
+    }
+
+    pub(super) fn save_inspector_preferences(&self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, PREFERENCE_KEY, &self.inspector_preferences);
+        save_order(&self.inspector_order, storage);
+    }
+
+    pub(super) fn persist_inspector_changes<'storage>(
+        &mut self,
+        ctx: &egui::Context,
+        storage: Option<&mut (dyn eframe::Storage + 'storage)>,
+        order_changed: bool,
+    ) {
+        let preferences = self.current_inspector_preferences(ctx);
+        let changed = preferences != self.inspector_preferences;
+        self.inspector_preferences = preferences;
+        if (changed || order_changed)
+            && let Some(storage) = storage
+        {
+            self.save_inspector_preferences(storage);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum InspectorSection {
+    Outliner,
+    EntityInfo,
+    Components,
+    Tags,
+    Display,
+}
+
+pub(super) fn restore_order(storage: Option<&dyn eframe::Storage>) -> [InspectorSection; 5] {
+    let Some(saved) = storage.and_then(|storage| {
+        eframe::get_value::<Vec<InspectorSection>>(storage, ORDER_PREFERENCE_KEY)
+            // The original preference used a fixed five-element RON tuple.
+            .or_else(|| {
+                eframe::get_value::<[InspectorSection; 5]>(storage, ORDER_PREFERENCE_KEY)
+                    .map(Vec::from)
+            })
+    }) else {
+        return InspectorSection::ALL;
+    };
+    let mut order = Vec::new();
+    for section in saved {
+        if order.contains(&section) {
+            return InspectorSection::ALL;
+        }
+        order.push(section);
+    }
+    for section in InspectorSection::ALL {
+        if !order.contains(&section) {
+            order.push(section);
+        }
+    }
+    order.try_into().unwrap_or(InspectorSection::ALL)
+}
+
+pub(super) fn save_order(order: &[InspectorSection; 5], storage: &mut dyn eframe::Storage) {
+    eframe::set_value(storage, ORDER_PREFERENCE_KEY, &order.to_vec());
+    storage.flush();
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::*;
+    use eframe::Storage;
+
+    #[derive(Default)]
+    struct SavedPreferences {
+        values: std::collections::BTreeMap<String, String>,
+        flushed: bool,
+    }
+
+    impl Storage for SavedPreferences {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.values.get(key).cloned()
+        }
+
+        fn set_string(&mut self, key: &str, value: String) {
+            self.values.insert(key.to_owned(), value);
+        }
+
+        fn remove_string(&mut self, key: &str) {
+            self.values.remove(key);
+        }
+
+        fn flush(&mut self) {
+            self.flushed = true;
+        }
+    }
+
+    #[test]
+    fn saved_order_survives_recreating_the_app() {
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.inspector_order.rotate_left(2);
+        let order = app.inspector_order;
+        eframe::App::save(&mut app, &mut storage);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        drop(app);
+
+        let mut refreshed = KetchupApp::with_document(Document::default(), None, true);
+        refreshed.inspector_order = restore_order(Some(&storage));
+        assert_eq!(refreshed.inspector_order, order);
+    }
+
+    #[test]
+    fn unavailable_or_invalid_saved_order_uses_all_default_sections() {
+        assert_eq!(restore_order(None), InspectorSection::ALL);
+        let mut storage = SavedPreferences::default();
+        assert_eq!(restore_order(Some(&storage)), InspectorSection::ALL);
+        storage.set_string(ORDER_PREFERENCE_KEY, "corrupt preferences".into());
+        assert_eq!(restore_order(Some(&storage)), InspectorSection::ALL);
+        eframe::set_value(
+            &mut storage,
+            ORDER_PREFERENCE_KEY,
+            &[InspectorSection::Tags; 5],
+        );
+        assert_eq!(restore_order(Some(&storage)), InspectorSection::ALL);
+        eframe::set_value(
+            &mut storage,
+            ORDER_PREFERENCE_KEY,
+            &InspectorSection::ALL[..4].to_vec(),
+        );
+        assert_eq!(restore_order(Some(&storage)), InspectorSection::ALL);
+    }
+
+    #[test]
+    fn sidebar_preferences_save_immediately_and_restore_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.inspector = false;
+        app.inspector_width = 420.;
+        app.component_filter = "Cabinet".into();
+        app.paint_color = [12, 34, 56];
+        let mut display = serde_json::to_value(DisplaySettings::default()).unwrap();
+        // Exercise every toggle, including fields added to DisplaySettings later.
+        for value in display.as_object_mut().unwrap().values_mut() {
+            if let Some(enabled) = value.as_bool() {
+                *value = serde_json::Value::Bool(!enabled);
+            }
+        }
+        app.doc.display = serde_json::from_value(display).unwrap();
+        app.doc.display.face_style = FaceStyle::Wireframe;
+        app.doc.display.profile_width = 7.;
+        app.doc.display.sun_angle = 280.;
+        app.doc.display.sky_color = [3, 4, 5];
+        for (key, open) in [
+            ("display", false),
+            ("fog", true),
+            ("outliner_object/42", true),
+        ] {
+            let id = egui::Id::new(key);
+            let mut state =
+                egui::collapsing_header::CollapsingState::load_with_default_open(&ctx, id, false);
+            state.set_open(open);
+            state.store(&ctx);
+            remember_section(&ctx, id, key);
+        }
+        let expected = app.current_inspector_preferences(&ctx);
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        assert!(app.dirty_since.is_none());
+
+        let refreshed_ctx = egui::Context::default();
+        let mut refreshed = KetchupApp::with_document(Document::default(), None, true);
+        refreshed.restore_inspector_preferences(&refreshed_ctx, Some(&storage));
+        assert_eq!(
+            refreshed.current_inspector_preferences(&refreshed_ctx),
+            expected
+        );
+        assert!(!refreshed.project.modified);
+
+        storage.flushed = false;
+        refreshed.persist_inspector_changes(&refreshed_ctx, Some(&mut storage), false);
+        assert!(
+            !storage.flushed,
+            "unchanged preferences must not write every frame"
+        );
+    }
+
+    #[test]
+    fn missing_corrupt_or_invalid_preferences_preserve_document_display() {
+        let ctx = egui::Context::default();
+        let mut doc = Document::default();
+        doc.display.axes = false;
+        let mut app = KetchupApp::with_document(doc.clone(), None, true);
+        app.restore_inspector_preferences(&ctx, None);
+        assert_eq!(app.doc.display, doc.display);
+        let mut storage = SavedPreferences::default();
+        storage.set_string(PREFERENCE_KEY, "corrupt preferences".into());
+        app.restore_inspector_preferences(&ctx, Some(&storage));
+        assert_eq!(app.doc.display, doc.display);
+        assert!(app.inspector);
+        assert_eq!(app.inspector_width, 300.);
+
+        let mut preferences = InspectorPreferences::default();
+        let mut display = DisplaySettings::default();
+        display.fog_end = display.fog_start;
+        preferences.display = Some(display);
+        preferences.width = -20.;
+        eframe::set_value(&mut storage, PREFERENCE_KEY, &preferences);
+        app.restore_inspector_preferences(&ctx, Some(&storage));
+        assert_eq!(app.doc.display, doc.display);
+        assert_eq!(app.inspector_width, 260.);
+
+        let older: InspectorPreferences =
+            serde_json::from_str(r#"{"display":{"axes":false}}"#).unwrap();
+        assert!(older.visible);
+        assert!(older.sections.is_empty());
+        let display = older.display.unwrap();
+        assert!(!display.axes);
+        assert_eq!(display.sky, DisplaySettings::default().sky);
+        assert!(display.valid());
+    }
+
+    #[test]
+    fn original_fixed_array_order_migrates_without_losing_layout() {
+        let mut order = InspectorSection::ALL;
+        order.rotate_left(2);
+        let mut storage = SavedPreferences::default();
+        eframe::set_value(&mut storage, ORDER_PREFERENCE_KEY, &order);
+        assert_eq!(restore_order(Some(&storage)), order);
+        save_order(&order, &mut storage);
+        assert_eq!(restore_order(Some(&storage)), order);
+    }
+
+    #[test]
+    fn older_section_orders_keep_their_layout_and_append_new_sections() {
+        let mut storage = SavedPreferences::default();
+        eframe::set_value(
+            &mut storage,
+            ORDER_PREFERENCE_KEY,
+            &vec![InspectorSection::Tags, InspectorSection::Display],
+        );
+        assert_eq!(
+            restore_order(Some(&storage)),
+            [
+                InspectorSection::Tags,
+                InspectorSection::Display,
+                InspectorSection::Outliner,
+                InspectorSection::EntityInfo,
+                InspectorSection::Components,
+            ]
+        );
+    }
+
+    #[test]
+    fn new_sections_restore_after_click_save_reload_and_layout_change() {
+        fn render(ctx: &egui::Context, events: Vec<egui::Event>, moved: bool) -> (Rect, bool) {
+            let mut rect = Rect::NOTHING;
+            let mut body_visible = false;
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600., 900.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.push_id(if moved { "floating" } else { "docked" }, |ui| {
+                        rect =
+                            inspector_section(ui, "Future option", "future_option", false, |ui| {
+                                body_visible = true;
+                                ui.label("Future controls");
+                            })
+                            .inner
+                            .rect;
+                    });
+                },
+            );
+            (rect, body_visible)
+        }
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.);
+        assert!(!render(&ctx, vec![], false).1);
+        let (rect, _) = render(&ctx, vec![], false);
+        for pressed in [true, false] {
+            render(
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(rect.center()),
+                    egui::Event::PointerButton {
+                        pos: rect.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+            );
+        }
+        assert!(render(&ctx, vec![], false).1);
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        let new_ctx = egui::Context::default();
+        new_ctx.style_mut_of(new_ctx.theme(), |style| style.animation_time = 0.);
+        let mut refreshed = KetchupApp::with_document(Document::default(), None, true);
+        refreshed.restore_inspector_preferences(&new_ctx, Some(&storage));
+        assert!(render(&new_ctx, vec![], true).1);
+    }
+
+    #[test]
+    fn new_projects_keep_preferences_and_opened_projects_use_their_own_display() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.doc.display.axes = false;
+        app.doc.display.fog = true;
+        app.component_filter = "Cabinet".into();
+        app.new_model(&ctx);
+        assert!(!app.doc.display.axes);
+        assert!(app.doc.display.fog);
+        assert_eq!(app.component_filter, "Cabinet");
+        assert!(!app.project.modified);
+        app.replace_project(Document::default(), Some("opened.ketchup".into()), &ctx);
+        assert_eq!(app.doc.display, DisplaySettings::default());
+        assert_eq!(app.component_filter, "Cabinet");
+    }
+}
+
+impl InspectorSection {
+    pub(super) const ALL: [Self; 5] = [
+        Self::Outliner,
+        Self::EntityInfo,
+        Self::Components,
+        Self::Tags,
+        Self::Display,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Outliner => "Outliner",
+            Self::EntityInfo => "Entity Info",
+            Self::Components => "Components",
+            Self::Tags => "Tags",
+            Self::Display => "Display",
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Outliner => "outliner",
+            Self::EntityInfo => "entity_info",
+            Self::Components => "components",
+            Self::Tags => "tags",
+            Self::Display => "display",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Default)]
+pub(super) struct InspectorLayout {
+    heights: [f32; 5],
+    header_heights: [f32; 5],
+    drag: Option<InspectorDrag>,
+    floating: Option<InspectorSection>,
+}
+
+struct InspectorDrag {
+    section: InspectorSection,
+    grab_offset: Vec2,
+    order: [InspectorSection; 5],
+}
+
+impl InspectorLayout {
+    fn preview_order(&mut self, header_top: f32) {
+        let Some(drag) = &mut self.drag else {
+            return;
+        };
+        let center = header_top + self.header_heights[drag.section.index()] * 0.5;
+        let mut from = drag.order.iter().position(|s| *s == drag.section).unwrap();
+        // Compare with target slots, rather than animated positions, so panels
+        // cannot oscillate underneath a stationary pointer.
+        while from > 0 {
+            let neighbor = drag.order[from - 1];
+            let top: f32 = drag.order[..from - 1]
+                .iter()
+                .map(|s| self.heights[s.index()])
+                .sum();
+            if center >= top + self.header_heights[neighbor.index()] * 0.5 {
+                break;
+            }
+            drag.order.swap(from, from - 1);
+            from -= 1;
+        }
+        while from + 1 < drag.order.len() {
+            let neighbor = drag.order[from + 1];
+            let top: f32 = drag.order[..=from]
+                .iter()
+                .map(|s| self.heights[s.index()])
+                .sum();
+            if center <= top + self.header_heights[neighbor.index()] * 0.5 {
+                break;
+            }
+            drag.order.swap(from, from + 1);
+            from += 1;
+        }
+    }
+}
+
 fn face_style_preview(
     painter: &egui::Painter,
     rect: Rect,
@@ -119,18 +652,38 @@ fn face_style_picker(ui: &mut egui::Ui, current: &mut FaceStyle) {
     });
 }
 
+fn inspector_icon_color(ui: &egui::Ui, id: &str) -> Color32 {
+    // Keep each section's hue consistent, with lighter strokes on dark surfaces.
+    let (light, dark) = match id {
+        "outliner" => ([48, 111, 173], [131, 185, 239]),
+        "entity_info" => ([17, 129, 133], [103, 207, 211]),
+        "components" => ([126, 83, 183], [188, 153, 239]),
+        "tags" => ([160, 111, 22], [230, 190, 104]),
+        "display" => ([198, 76, 58], [246, 142, 125]),
+        "edge_style" => ([88, 109, 135], [159, 181, 209]),
+        "sections" => ([176, 67, 113], [237, 142, 181]),
+        "shadows" => ([183, 92, 19], [242, 170, 100]),
+        "fog" => ([117, 105, 155], [181, 169, 219]),
+        "display_environment" => ([67, 131, 68], [143, 205, 144]),
+        _ => return Palette::for_ui(ui).green,
+    };
+    let [r, g, b] = if ui.visuals().dark_mode { dark } else { light };
+    Color32::from_rgb(r, g, b)
+}
+
 // Keep egui's disclosure behavior, animation, and accessibility while giving
 // inspector groups a shared surface and a full-width click target.
 fn inspector_section<R>(
     ui: &mut egui::Ui,
     title: &str,
-    id: &str,
+    id: &'static str,
     primary: bool,
     contents: impl FnOnce(&mut egui::Ui) -> R,
-) {
+) -> egui::InnerResponse<egui::Response> {
     let colors = Palette::for_ui(ui);
+    let icon_color = inspector_icon_color(ui, id);
     let body_style = ui.style().as_ref().clone();
-    egui::Frame::new()
+    let response = egui::Frame::new()
         .fill(colors.surface)
         .stroke(Stroke::new(1., colors.border))
         .corner_radius(if primary { 8 } else { 5 })
@@ -149,7 +702,7 @@ fn inspector_section<R>(
             ui.set_min_width(ui.available_width());
             ui.scope(|ui| {
                 ui.spacing_mut().button_padding = egui::vec2(10., if primary { 10. } else { 7. });
-                ui.spacing_mut().indent = 28.;
+                ui.spacing_mut().indent = 52.;
                 let visuals = ui.visuals_mut();
                 visuals.collapsing_header_frame = true;
                 for widget in [
@@ -165,11 +718,19 @@ fn inspector_section<R>(
                     if primary { colors.canvas } else { colors.paper };
                 visuals.widgets.hovered.weak_bg_fill = colors.hovered;
                 visuals.widgets.active.weak_bg_fill = colors.selected;
-                egui::CollapsingHeader::new(RichText::new(title).strong())
+                let open = restored_header_open(ui, id, primary);
+                let header = egui::CollapsingHeader::new(RichText::new(title).strong())
                     .id_salt(id)
                     .default_open(primary)
+                    .open(open)
                     .icon(move |ui, openness, response| {
-                        let center = response.rect.center();
+                        let center = response.rect.center() - egui::vec2(12., 0.);
+                        icons::line_icon(
+                            ui.painter(),
+                            center + egui::vec2(24., 0.),
+                            id,
+                            icon_color,
+                        );
                         let rotation =
                             egui::emath::Rot2::from_angle(openness * std::f32::consts::FRAC_PI_2);
                         let points = [
@@ -193,27 +754,166 @@ fn inspector_section<R>(
                     .show_unindented(ui, |ui| {
                         *ui.style_mut() = body_style;
                         egui::Frame::new().inner_margin(10).show(ui, contents).inner
-                    });
-            });
+                    })
+                    .header_response;
+                remember_section(ui.ctx(), header.id, id);
+                header
+            })
+            .inner
         });
     ui.add_space(if primary { 4. } else { 1. });
+    response
 }
 
 impl KetchupApp {
     pub(super) fn inspector_contents(&mut self, ui: &mut egui::Ui) {
-        inspector_section(ui, "Outliner", "outliner", true, |ui| {
-            self.outliner_contents(ui)
-        });
-        inspector_section(ui, "Entity Info", "entity_info", true, |ui| {
-            self.entity_info_contents(ui)
-        });
-        inspector_section(ui, "Components", "components", true, |ui| {
-            self.components_contents(ui)
-        });
-        inspector_section(ui, "Tags", "tags", true, |ui| self.tags_contents(ui));
-        inspector_section(ui, "Display", "display", true, |ui| {
-            self.display_contents(ui)
-        });
+        let mut layout = std::mem::take(&mut self.inspector_layout);
+        let origin = ui.cursor().min;
+        let width = ui.available_width();
+        let clip = ui.clip_rect();
+        let drop_rect = Rect::from_min_max(
+            egui::pos2(origin.x, clip.top()),
+            egui::pos2(origin.x + width, clip.bottom()),
+        );
+        let pointer = ui.ctx().pointer_interact_pos();
+        let animation_time = ui.style().animation_time;
+        let spacing = ui.spacing().item_spacing.y;
+        let colors = Palette::for_ui(ui);
+        // egui clears the payload on Escape or release, including a release
+        // while the inspector is hidden. Retain the floating panel as it settles.
+        if !egui::DragAndDrop::has_payload_of_type::<InspectorSection>(ui.ctx()) {
+            layout.drag = None;
+        }
+        if let (Some(drag), Some(pointer)) = (&layout.drag, pointer)
+            && drop_rect.contains(pointer)
+        {
+            let header_top = pointer.y - origin.y - drag.grab_offset.y;
+            layout.preview_order(header_top);
+        }
+        let order = layout
+            .drag
+            .as_ref()
+            .map_or(self.inspector_order, |d| d.order);
+        let mut top = 0.;
+        for section in order {
+            let index = section.index();
+            let id = egui::Id::new(("inspector_section", section.id()));
+            let target = egui::vec2(0., top);
+            let following = layout.drag.as_ref().filter(|d| d.section == section);
+            let mut floating = layout.floating == Some(section);
+            let desired = following
+                .and_then(|drag| pointer.map(|p| p - origin - drag.grab_offset))
+                .unwrap_or(target);
+            let duration = if following.is_some() {
+                0.
+            } else {
+                animation_time
+            };
+            let position = egui::vec2(
+                ui.ctx()
+                    .animate_value_with_time(id.with("x"), desired.x, duration),
+                ui.ctx()
+                    .animate_value_with_time(id.with("y"), desired.y, duration),
+            );
+            if floating && following.is_none() && (position - target).length() < 0.5 {
+                layout.floating = None;
+                floating = false;
+            }
+            // Reserve the complete panel's slot while its real contents follow
+            // the pointer on a foreground layer. Each panel is rendered once.
+            if following.is_some() {
+                let slot = Rect::from_min_size(
+                    origin + target,
+                    egui::vec2(width, (layout.heights[index] - spacing - 4.).max(0.)),
+                );
+                ui.painter().rect(
+                    slot,
+                    8,
+                    colors.canvas,
+                    Stroke::new(1., colors.green),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let pos = origin + position;
+            let mut builder = egui::UiBuilder::new()
+                .scope_id(id)
+                .max_rect(Rect::from_min_max(
+                    pos,
+                    egui::pos2(pos.x + width, f32::INFINITY),
+                ))
+                .layout(egui::Layout::top_down(egui::Align::Min));
+            if floating {
+                builder = builder.layer_id(egui::LayerId::new(egui::Order::Tooltip, id));
+            }
+            let mut panel_ui = ui.new_child(builder);
+            if floating {
+                panel_ui.set_clip_rect(ui.ctx().viewport_rect());
+            }
+            let panel =
+                inspector_section(&mut panel_ui, section.title(), section.id(), true, |ui| {
+                    match section {
+                        InspectorSection::Outliner => self.outliner_contents(ui),
+                        InspectorSection::EntityInfo => self.entity_info_contents(ui),
+                        InspectorSection::Components => self.components_contents(ui),
+                        InspectorSection::Tags => self.tags_contents(ui),
+                        InspectorSection::Display => self.display_contents(ui),
+                    }
+                });
+            let header = panel
+                .inner
+                .interact(egui::Sense::click_and_drag())
+                .on_hover_cursor(egui::CursorIcon::Grab)
+                .on_hover_text("Drag to reorder this section");
+            layout.heights[index] = panel_ui.min_rect().height() + spacing;
+            layout.header_heights[index] = header.rect.height();
+            top += layout.heights[index];
+            if layout.drag.is_none() && header.drag_started_by(egui::PointerButton::Primary) {
+                let press = ui
+                    .input(|i| i.pointer.press_origin())
+                    .unwrap_or(header.rect.center());
+                layout.drag = Some(InspectorDrag {
+                    section,
+                    grab_offset: press - panel.response.rect.min,
+                    order: self.inspector_order,
+                });
+                layout.floating = Some(section);
+                egui::DragAndDrop::set_payload(ui.ctx(), section);
+                ui.ctx().request_repaint();
+            }
+        }
+        // Only the slots affect scroll extent; a floating panel never pushes
+        // other content or changes the sidebar width.
+        ui.allocate_space(egui::vec2(width, (top - spacing).max(0.)));
+        if let (Some(drag), Some(pointer)) = (&layout.drag, pointer) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            if drop_rect.contains(pointer) {
+                let header_top = pointer.y - origin.y - drag.grab_offset.y;
+                layout.preview_order(header_top);
+                if ui.input(|i| i.pointer.primary_down()) {
+                    let edge = 32.;
+                    let speed = ((clip.top() + edge - pointer.y).max(0.)
+                        - (pointer.y - (clip.bottom() - edge)).max(0.))
+                        * 12.;
+                    if speed != 0. {
+                        let dt = ui.input(|i| i.stable_dt.min(0.05));
+                        ui.scroll_with_delta_animation(
+                            egui::vec2(0., speed * dt),
+                            egui::style::ScrollAnimation::none(),
+                        );
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
+            if ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary)) {
+                if drop_rect.contains(pointer) {
+                    self.inspector_order = layout.drag.as_ref().unwrap().order;
+                }
+                layout.drag = None;
+                egui::DragAndDrop::clear_payload(ui.ctx());
+                ui.ctx().request_repaint();
+            }
+        }
+        self.inspector_layout = layout;
     }
 
     pub(super) fn begin_component_placement(&mut self, id: u64, ctx: &egui::Context) {
@@ -317,7 +1017,7 @@ impl KetchupApp {
             )
             .clicked()
         {
-            self.component_name = Some("Component".into());
+            self.context_action(ui.ctx(), ContextAction::Component);
         }
     }
 

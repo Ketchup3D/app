@@ -151,6 +151,9 @@ pub fn save_preference(ctx: &egui::Context, storage: &mut dyn eframe::Storage) {
 fn style(dark: bool) -> egui::Style {
     let colors = Palette::new(dark);
     let mut style = egui::Style::default();
+    style.interaction.tooltip_delay = 1.0;
+    // Each newly hovered tool should wait, even after another tooltip was shown.
+    style.interaction.tooltip_grace_time = 0.0;
     let mut visuals = if dark {
         egui::Visuals::dark()
     } else {

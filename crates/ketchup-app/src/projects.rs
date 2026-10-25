@@ -47,13 +47,16 @@ impl KetchupApp {
             project_files::set_document_name(&mut doc, path);
         }
         self.set_tool(Tool::Select);
+        egui::DragAndDrop::clear_payload(ctx);
         self.doc = doc;
         self.history = History::default();
         self.selected.clear();
+        self.outliner_anchor = None;
+        self.group_emphasis = true;
         self.hover = None;
         self.context_position = None;
-        self.component_name = None;
-        self.component_filter.clear();
+        self.object_creation = None;
+        self.object_rename = None;
         self.new_tag_name.clear();
         self.tag_rename = None;
         self.help = false;

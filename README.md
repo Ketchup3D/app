@@ -2,9 +2,11 @@
 
 ![KetchUp editor screenshot](assets/screenshots/ketchup.png)
 
+[![Try KetchUp in your browser](https://img.shields.io/badge/Try_KetchUp_in_your_browser-d63b32?style=for-the-badge)](https://ketchup3d.github.io/app/play/)
+
 A small 3D edge and face editor written in Rust. The same editor runs as a native Windows, macOS, or Linux application and in a desktop browser through WebAssembly.
 
-The workspace includes Select, Line, Rectangle, Circle, Polygon, Freehand, Push/Pull, Scale, Offset, Move, Paint, Tape Measure, Protractor, Dimensions, a Union flyout, Erase, and Orbit, automatic geometry snapping, filled planar faces, measured lines, directional box selection, groups and components, a right-click object menu, geometry clipboard, undo/redo, local autosave, and portable `.ketchup` project files. It starts with an empty model. File → Import/Export adds SketchUp `.skp` import and Wavefront `.obj` export. Mobile and cloud storage are outside this version.
+The workspace includes Select, Line, Rectangle, Circle, Polygon, Freehand, Push/Pull, Scale, Offset, Move, Paint, Tape Measure, Protractor, Dimensions, a Union flyout, Erase, and Orbit, automatic geometry snapping, filled planar faces, measured lines, full-enclosure box selection, groups and components, a right-click object menu, geometry clipboard, undo/redo, local autosave, and portable `.ketchup` project files. It starts with an empty model. File → Import/Export adds SketchUp `.skp` import and Wavefront `.obj` export. Mobile and cloud storage are outside this version.
 
 ## Prerequisites
 
@@ -189,9 +191,10 @@ To enable publishing for `Ketchup3D/app`:
 1. In the repository, open **Settings → Pages → Build and deployment** and set
    **Source** to **GitHub Actions**. See the
    [GitHub Pages setup guide](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site#publishing-with-a-custom-github-actions-workflow).
-2. Push these files to `main`, or run **Deploy GitHub Pages** from the Actions
-   tab with `main` selected. Subsequent pushes to `main` redeploy both the page
-   and the editor; desktop releases keep their separate tag-based workflow.
+2. Push a `v*` tag (for example, `git push origin v0.1.0`), or run
+   **Deploy GitHub Pages** from the Actions tab with `main` selected. Version
+   tag pushes trigger both Pages deployment and the separate desktop release
+   workflow. Ordinary branch pushes do not trigger either workflow.
 3. After the deployment succeeds, the landing page is at
    <https://ketchup3d.github.io/app/> and its **Try in browser** links open
    <https://ketchup3d.github.io/app/play/>. The workflow's environment link shows
@@ -220,8 +223,7 @@ networks.
 | Import SketchUp geometry | File → Import/Export → Import SketchUp (.skp) |
 | Export OBJ geometry | File → Import/Export → Export Wavefront OBJ (.obj) |
 | Select | Space; click an edge or filled face, Shift-click toggles |
-| Window selection | Drag left to right; selects fully enclosed edges |
-| Crossing selection | Drag right to left; selects intersected edges |
+| Box selection | Drag in any direction; selects only fully enclosed edges, faces, dimensions, and groups/components |
 | Select all visible entities | Ctrl/Command A, outside text fields |
 | Object actions | Right-click geometry or empty model space |
 | Edit group/component | Double-click; repeat for nested objects |
@@ -260,6 +262,7 @@ networks.
 | Pan | **Hold Shift while orbiting**, including middle-drag |
 | Zoom | Mouse wheel; anchors at the pointer on the camera target plane |
 | Fit all geometry | F, or the Fit view button |
+| Emphasize current group/component | Enabled by default. Emphasize group checkbox before the Snap options, or Tab, toggles the group/component currently being edited solid and everything else in muted wireframe, regardless of selection. Has no visual effect outside a group/component |
 | Ground, sky, and horizon colors | Model inspector → Display → Environment; color pickers, Sky/Ground toggles, and reset colors |
 | Undo | Ctrl/Command Z |
 | Redo | Ctrl/Command Shift Z, or Ctrl Y |
@@ -287,7 +290,9 @@ Offset adds parallel outlines in the face plane: positive distances inset the ou
 
 Right-click offers Make Group, Create Component, Ungroup, Explode, Cut, Copy, Paste, Paste in Place, Delete, Hide, and Lock. Right-clicking a selected entity preserves the whole selection; clicking another entity selects it first. Unavailable actions are disabled. Groups and named components select as single objects, support nesting, and isolate their geometry from new lines. Ungroup releases groups; Explode also releases component instances, one level at a time. Move and Scale act on the whole selected object. Double-click a group or component to edit its children; double-click nested objects to continue inward. Selection, drawing, transformations, Push/Pull, Offset, deletion, grouping, and paste act within the current editing level. The breadcrumb shows the open hierarchy; click an ancestor or Model to return, press Escape to close one level, or double-click outside the open object. Escape first cancels any unfinished operation. Locked objects cannot be opened. Component copies retain a shared definition: edits to their children update every linked instance while preserving each instance’s position and scale, including components nested in other definitions. Exploding detaches that instance.
 
-Hide removes geometry from rendering, picking, snapping, and Fit; right-click and choose Unhide All to restore it. Locked entities remain selectable and appear with blue edges; choose Unlock to edit them again. These changes participate in undo/redo and local saving. Clipboard copies preserve faces, holes, intentionally missing fills, colors, nested objects, and original coordinates. Copy writes a KetchUp geometry payload to the system clipboard for keyboard paste into another KetchUp window; the context menu also keeps an in-session copy. Escape cancels paste placement without changing the model.
+Hide removes geometry from rendering, picking, snapping, and Fit; right-click a hidden item in the Outliner and choose Unhide to restore it. Locked entities remain selectable and appear with blue edges; choose Unlock to edit them again. These changes participate in undo/redo and local saving. Clipboard copies preserve faces, holes, intentionally missing fills, colors, nested objects, and original coordinates. Copy writes a KetchUp geometry payload to the system clipboard for keyboard paste into another KetchUp window; the context menu also keeps an in-session copy. Escape cancels paste placement without changing the model.
+
+In the Outliner, drag a group or component onto the middle of a group row to move it inside. Drop near the top or bottom of a row to reorder siblings; an insertion line shows the position. Drop beside a top-level row or in the empty space below the tree to move objects to the model root. Dragging a selected object moves all selected objects together in their displayed order. Groups open after 500 ms of continuous hover. Moves and ordering preserve object placement, support undo/redo, and are saved with the model; Escape cancels the drag. Locked objects and recursive nesting are protected. Changes inside linked components update their other instances.
 
 Tape Measure shows the true 3D distance between two points. Protractor measures the smaller angle (0–180°) between two rays, with a live arc and degree readout. These tools leave geometry unchanged; their results stay visible until you start another measurement, switch tools, or press Escape. Middle-button navigation preserves an unfinished measurement.
 
@@ -295,15 +300,21 @@ Dimensions adds persistent linear annotations with extension lines, endpoint tic
 
 The toolbar is ordered Select, Line, Erase, Orbit, Push/Pull, Scale, Offset, Move, Paint, Dimensions, and Union. Dimensions groups Dimensions, Tape Measure, and Protractor, with Dimensions selected by default. Every flyout entry has an icon, and each group remembers its last chosen tool.
 
+Hover over a toolbar tool or flyout entry for one second to see its name, keyboard shortcut (when available), and usage instructions.
+
 The **Union** flyout keeps Flip, Outer Shell, Union, Intersect, Trim, and Split together. Flip mirrors the selection through its bounds center using a colored plane, an inspector axis button, or the X/Y/Z arrow shortcuts. Mirrored component instances retain their links and placement when their definition is edited.
 
-Boolean tools work on closed solid groups/components or separate connected loose bodies. Fill missing faces and remove stray/internal edges first. For Union, Outer Shell, Intersect, or Split, either select two bodies before choosing the tool, or click the first and second body. For Trim, click the cutter first and the target second; the cutter stays. Escape cancels the first-body choice.
+Boolean tools work on closed solid groups/components or separate connected loose bodies. Nested groups and components are combined as volumes, including overlapping child solids. Fill missing faces and remove stray/internal edges first. For Union, Outer Shell, Intersect, or Split, either select two bodies before choosing the tool, or click the first and second body. For Trim, click the cutter first and the target second; the cutter stays. Escape cancels the first-body choice.
 
-Union combines volumes while retaining enclosed voids. Outer Shell also removes surfaces around fully enclosed voids; through-holes remain open. Intersect keeps shared volume. Split produces separate groups for the overlap and each body's remainder, omitting empty pieces. Union, Outer Shell, Intersect, and Split replace their two input bodies; Trim replaces only the target. Results are editable groups with planar faces and preserved face colors. Operations support undo/redo, local saving, and scoped group/component editing. Open, locked, or excessively complex bodies and unrepresentable results are rejected without modifying the model.
+Intersect also accepts a face or open surface group/component against a closed body, in either order, and keeps the portion of the surface inside or on the body. Two coplanar faces or surface groups/components keep their shared area. These surface intersections replace both inputs with an editable surface group and preserve face colors; they do not require the result to enclose volume.
+
+Union combines volumes while retaining enclosed voids. Outer Shell also removes surfaces around fully enclosed voids; through-holes remain open. Intersect keeps shared volume for two closed bodies. Split produces separate groups for the overlap and each body's remainder, omitting empty pieces. Union, Outer Shell, Intersect, and Split replace their two input bodies; Trim replaces only the target. Results are editable groups with planar faces and preserved face colors. Operations support undo/redo, local saving, and scoped group/component editing. Locked or excessively complex bodies, unsupported open bodies, and unrepresentable results are rejected without modifying the model.
 
 ## Right sidebar
 
-The Model inspector has independent, collapsible Entity Info, Components, Tags, and Display sections. It scrolls when the sections exceed the window height.
+The Model inspector has independent, collapsible Outliner, Entity Info, Components, Tags, and Display sections. It scrolls when the sections exceed the window height.
+
+The sidebar remembers its visibility, width, section order, expanded/collapsed sections (including nested groups and the Outliner tree), component search, paint color, and all Display options across reloads and app restarts. Changes are saved immediately in local application preferences. New projects inherit the current Display options; opening an existing project uses that project's saved display settings. **Reset display** also updates the remembered preferences.
 
 Components lists each component definition currently used in the model, including nested components, with its instance count. Search by name, choose **Place instance**, and click in the viewport to place a linked copy. Escape cancels placement. **Make Component…** creates one from the selection.
 

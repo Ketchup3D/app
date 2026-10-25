@@ -243,10 +243,28 @@ impl Model {
     }
     /// Call after direct state changes (hide/lock), as well as scoped geometry edits.
     pub fn synchronize_edit_context(&mut self) -> Result<(), &'static str> {
+        self.synchronize_object_contexts(self.edit_context)
+    }
+
+    /// Reparenting can change both the source and destination component definitions.
+    pub(crate) fn synchronize_object_contexts(
+        &mut self,
+        contexts: impl IntoIterator<Item = u64>,
+    ) -> Result<(), &'static str> {
         let mut sources = BTreeMap::new();
-        for id in self.edit_path().into_iter().rev() {
-            if let ObjectKind::Component { definition } = self.objects[&id].kind {
-                sources.insert(definition, id);
+        for context in contexts {
+            let mut current = Some(context);
+            while let Some(id) = current {
+                let object = self.objects.get(&id).ok_or("Missing editing context")?;
+                if let ObjectKind::Component { definition } = object.kind {
+                    if sources
+                        .insert(definition, id)
+                        .is_some_and(|source| source != id)
+                    {
+                        return Err("Cannot move objects between instances of the same component");
+                    }
+                }
+                current = self.parent(id);
             }
         }
         let graph = self.definition_dependencies()?;

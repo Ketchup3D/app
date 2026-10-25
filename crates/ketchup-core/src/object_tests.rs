@@ -127,6 +127,7 @@ fn drawing_on_a_hidden_grouped_import_preserves_geometry_and_undo() {
             Object {
                 id,
                 name: "Imported part".into(),
+                outliner_order: None,
                 kind: ObjectKind::Group,
                 entities,
                 transform: None,
@@ -144,6 +145,7 @@ fn drawing_on_a_hidden_grouped_import_preserves_geometry_and_undo() {
         Object {
             id,
             name: "Import".into(),
+            outliner_order: None,
             kind: ObjectKind::Group,
             entities: groups,
             transform: None,

@@ -419,6 +419,115 @@ pub fn logo(p: &egui::Painter, rect: Rect) {
 pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
     let s = Stroke::new(1.5, color);
     match kind {
+        "outliner" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.add(egui::Shape::line(
+                vec![at(-6., -6.), at(-6., 6.), at(-2., 6.)],
+                s,
+            ));
+            p.line_segment([at(-6., 0.), at(-2., 0.)], s);
+            for (x, y) in [(-3., -6.), (3., 0.), (3., 6.)] {
+                p.rect_stroke(
+                    Rect::from_center_size(at(x, y), egui::vec2(7., 4.)),
+                    1,
+                    s,
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        "entity_info" => {
+            p.circle_stroke(c, 7., s);
+            p.circle_filled(c + egui::vec2(0., -3.5), 1., color);
+            p.line_segment([c + egui::vec2(0., -0.5), c + egui::vec2(0., 4.)], s);
+        }
+        "components" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.add(egui::Shape::closed_line(
+                vec![
+                    at(0., -8.),
+                    at(7., -4.),
+                    at(7., 4.),
+                    at(0., 8.),
+                    at(-7., 4.),
+                    at(-7., -4.),
+                ],
+                s,
+            ));
+            for point in [at(-7., -4.), at(7., -4.), at(0., 8.)] {
+                p.line_segment([c, point], s);
+            }
+        }
+        "tags" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.add(egui::Shape::closed_line(
+                vec![
+                    at(-7., -7.),
+                    at(0., -7.),
+                    at(8., 1.),
+                    at(1., 8.),
+                    at(-7., 0.),
+                ],
+                s,
+            ));
+            p.circle_stroke(at(-3., -3.), 1.5, s);
+        }
+        "display" => {
+            p.rect_stroke(
+                Rect::from_center_size(c + egui::vec2(0., -2.), egui::vec2(16., 11.)),
+                2,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            p.line_segment([c + egui::vec2(0., 3.), c + egui::vec2(0., 7.)], s);
+            p.line_segment([c + egui::vec2(-4., 7.), c + egui::vec2(4., 7.)], s);
+        }
+        "edge_style" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.add(egui::Shape::line(
+                vec![at(-7., 6.), at(-7., -6.), at(7., -6.)],
+                s,
+            ));
+            p.line_segment([at(-2., 6.), at(7., -3.)], Stroke::new(2.5, color));
+            for point in [at(-7., 6.), at(-7., -6.), at(7., -6.)] {
+                p.circle_filled(point, 2., color);
+            }
+        }
+        "sections" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.rect_stroke(
+                Rect::from_center_size(c, egui::vec2(12., 14.)),
+                0,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            p.line_segment([at(-9., 0.), at(9., 0.)], Stroke::new(2., color));
+            for x in [-4., 0., 4.] {
+                p.line_segment([at(x, 5.), at(x + 3., 2.)], Stroke::new(1., color));
+            }
+        }
+        "fog" => {
+            for (y, half_width) in [(-6., 5.), (-2., 8.), (2., 6.), (6., 8.)] {
+                p.line_segment(
+                    [
+                        c + egui::vec2(-half_width, y),
+                        c + egui::vec2(half_width, y),
+                    ],
+                    s,
+                );
+            }
+        }
+        "display_environment" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.circle_stroke(at(4., -4.), 2.5, s);
+            p.add(egui::Shape::line(
+                vec![at(-8., 6.), at(-2., -3.), at(3., 6.)],
+                s,
+            ));
+            p.add(egui::Shape::line(
+                vec![at(1., 3.), at(5., -1.), at(9., 6.), at(-8., 6.)],
+                s,
+            ));
+        }
         "minimize" => {
             p.line_segment([c + egui::vec2(-6., 0.), c + egui::vec2(6., 0.)], s);
         }
@@ -477,7 +586,7 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
                 p.line_segment([at(0., -0.5), point], s);
             }
         }
-        "sun" => {
+        "sun" | "shadows" => {
             p.circle_stroke(c, 3.5, s);
             for i in 0..8 {
                 let angle = i as f32 * std::f32::consts::TAU / 8.;

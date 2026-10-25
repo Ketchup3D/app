@@ -30,7 +30,11 @@ impl KetchupApp {
             self.apply_solid(operands[0].0, operands[1].0, ctx);
         } else if operands.len() == 1 {
             let first = operands[0].0;
-            match self.doc.model.solid_volume(first) {
+            match self
+                .doc
+                .model
+                .validate_solid_operand(first, operation(tool).unwrap())
+            {
                 Ok(_) if !self.doc.model.selection_locked(&operands[0].1) => {
                     self.solid_first = Some(first);
                     self.selected = operands.remove(0).1;
@@ -86,10 +90,7 @@ impl KetchupApp {
             dv(pos - self.viewport.min),
             8.,
         ) else {
-            self.say(
-                ctx,
-                "Click a closed solid group, component, or connected body",
-            );
+            self.say(ctx, "Click a group, component, or connected body");
             return;
         };
         let ids = match self.doc.model.solid_entities(hit) {
@@ -110,7 +111,11 @@ impl KetchupApp {
         if let Some(first) = self.solid_first {
             self.apply_solid(first, hit, ctx);
         } else {
-            match self.doc.model.solid_volume(hit) {
+            match self
+                .doc
+                .model
+                .validate_solid_operand(hit, operation(self.tool).unwrap())
+            {
                 Ok(_) => {
                     self.solid_first = Some(hit);
                     self.selected = ids;
@@ -123,8 +128,10 @@ impl KetchupApp {
         if self.solid_first.is_some() {
             if self.tool == Tool::Trim {
                 "Cutter selected · Click the target solid to trim · Esc to cancel"
+            } else if self.tool == Tool::Intersect {
+                "First body selected · Click the second body or face · Esc to cancel"
             } else {
-                "First solid selected · Click the second solid · Esc to cancel"
+                "First body selected · Click the second body · Esc to cancel"
             }
         } else {
             self.tool.instructions()
@@ -173,13 +180,20 @@ impl KetchupApp {
             if let Ok(volume) = self.doc.model.solid_volume(first) {
                 Self::property(ui, "Volume", &format!("{volume:.3} m³"));
             }
-            if ui.button("Choose first solid again").clicked() {
+            if ui.button("Choose first body again").clicked() {
                 self.solid_first = None;
                 self.selected.clear();
             }
         } else {
             ui.add_space(8.);
-            ui.label("Use closed bodies with no stray edges or missing faces. Results are editable groups.");
+            ui.label(
+                "Choose groups, components, or connected bodies. Results are editable groups.",
+            );
+            if self.tool == Tool::Intersect {
+                ui.label("Intersect also keeps the portion of a face inside a closed body.");
+            } else {
+                ui.label("Use closed bodies with no stray edges or missing faces.");
+            }
             if self.tool == Tool::Trim {
                 ui.label("The first click chooses the cutter. It stays in the model.");
             }

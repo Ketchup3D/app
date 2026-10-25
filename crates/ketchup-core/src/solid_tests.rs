@@ -386,3 +386,203 @@ fn outer_shell_removes_solid_islands_inside_an_enclosed_void() {
     assert!((volume(&model, &result) - 64.).abs() < 1e-6);
     assert_eq!(model.faces.len(), 6);
 }
+
+fn add_sheet(model: &mut Model, z: f64) -> u64 {
+    let mut sheet = Model::default();
+    let points = [
+        DVec3::new(-1., -1., z),
+        DVec3::new(3., -1., z),
+        DVec3::new(3., 3., z),
+        DVec3::new(-1., 3., z),
+    ];
+    for i in 0..4 {
+        sheet.add_edge(points[i], points[(i + 1) % 4]).unwrap();
+    }
+    model
+        .paste_entities(&sheet, DVec3::ZERO)
+        .into_iter()
+        .find(|id| model.faces.contains_key(id))
+        .unwrap()
+}
+
+#[test]
+fn all_booleans_accept_groups_with_overlapping_nested_components() {
+    for (operation, expected) in [
+        (SolidOperation::Union, 16.),
+        (SolidOperation::OuterShell, 16.),
+        (SolidOperation::Intersect, 4.),
+        (SolidOperation::Trim, 4.),
+        (SolidOperation::Split, 16.),
+    ] {
+        let (mut model, a, b) = pair();
+        let container = model
+            .make_object(&BTreeSet::from([a, b]), true, "Nested solids")
+            .unwrap();
+        let target = add_box(&mut model, DVec3::new(2., 0., 0.), DVec3::new(4., 2., 2.));
+        assert!((model.solid_volume(container).unwrap() - 12.).abs() < 1e-6);
+        let result = model.boolean_solids(container, target, operation).unwrap();
+        assert!(
+            (volume(&model, &result) - expected).abs() < 1e-6,
+            "{operation:?}"
+        );
+        model.validate().unwrap();
+    }
+}
+
+#[test]
+fn intersect_clips_faces_against_groups_and_components_in_either_order() {
+    for component in [false, true] {
+        for face_first in [false, true] {
+            for z in [0., 1., 2.] {
+                let mut model = Model::default();
+                let mut body = box_model(DVec3::ZERO, DVec3::splat(2.));
+                let object = body
+                    .make_object(&body.root_entities(), component, "Body")
+                    .unwrap();
+                let source = body.copy_entities(&BTreeSet::from([object]));
+                let object = *model.paste_entities(&source, DVec3::ZERO).first().unwrap();
+                let peer = *model
+                    .paste_entities(&source, DVec3::X * 8.)
+                    .first()
+                    .unwrap();
+                let peer_before = model.copy_entities(&BTreeSet::from([peer]));
+                let face = add_sheet(&mut model, z);
+                model.paint_face(face, [40, 120, 180]).unwrap();
+                model
+                    .validate_solid_operand(face, SolidOperation::Intersect)
+                    .unwrap();
+                let before = model.clone();
+                let (a, b) = if face_first {
+                    (face, object)
+                } else {
+                    (object, face)
+                };
+                let result = model
+                    .boolean_solids(a, b, SolidOperation::Intersect)
+                    .unwrap();
+                assert_eq!(result.len(), 1);
+                let peer_after = model.copy_entities(&BTreeSet::from([peer]));
+                assert_eq!(peer_after.objects, peer_before.objects);
+                assert_eq!(peer_after.vertices, peer_before.vertices);
+                assert_eq!(peer_after.edges, peer_before.edges);
+                assert_eq!(peer_after.faces, peer_before.faces);
+                let contents = model.copy_entities(&result);
+                assert_eq!(contents.faces.len(), 1);
+                assert!(
+                    (contents
+                        .faces
+                        .values()
+                        .map(|f| contents.face_area(f))
+                        .sum::<f64>()
+                        - 4.)
+                        .abs()
+                        < 1e-6
+                );
+                assert!(contents.vertices.values().all(|v| v.position.z == z));
+                assert!(contents.face_colors.values().all(|c| *c == [40, 120, 180]));
+                model.validate().unwrap();
+                let mut history = History::default();
+                history.record("Intersect", before.clone(), &model);
+                assert!(history.undo(&mut model));
+                assert_eq!(model, before);
+                assert!(history.redo(&mut model));
+                model.validate().unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn intersect_accepts_planar_groups_and_rejects_disjoint_or_protected_faces_atomically() {
+    let mut model = Model::default();
+    let face = add_sheet(&mut model, 1.);
+    let sheet = model
+        .make_object(&BTreeSet::from([face]), true, "Sheet")
+        .unwrap();
+    let copy = model.copy_entities(&BTreeSet::from([sheet]));
+    let other = *model.paste_entities(&copy, DVec3::X * 2.).first().unwrap();
+    let result = model
+        .boolean_solids(sheet, other, SolidOperation::Intersect)
+        .unwrap();
+    let contents = model.copy_entities(&result);
+    assert!(
+        (contents
+            .faces
+            .values()
+            .map(|f| contents.face_area(f))
+            .sum::<f64>()
+            - 8.)
+            .abs()
+            < 1e-6
+    );
+    model.validate().unwrap();
+    for state in ["disjoint", "locked", "hidden"] {
+        let mut model = Model::default();
+        let object = add_box(&mut model, DVec3::ZERO, DVec3::splat(2.));
+        let face = add_sheet(&mut model, if state == "disjoint" { 3. } else { 1. });
+        match state {
+            "locked" => {
+                model.locked.insert(face);
+            }
+            "hidden" => {
+                model.hidden.insert(face);
+            }
+            _ => {}
+        }
+        let before = model.clone();
+        assert!(
+            model
+                .boolean_solids(object, face, SolidOperation::Intersect)
+                .is_err()
+        );
+        assert_eq!(model, before);
+    }
+}
+
+#[test]
+fn surface_intersections_preserve_holes_and_follow_component_edit_contexts() {
+    let mut model = Model::default();
+    let face = add_sheet(&mut model, 1.);
+    let points = [
+        DVec3::new(0.5, 0.5, 1.),
+        DVec3::new(1.5, 0.5, 1.),
+        DVec3::new(1.5, 1.5, 1.),
+        DVec3::new(0.5, 1.5, 1.),
+    ];
+    for i in 0..4 {
+        model.add_edge(points[i], points[(i + 1) % 4]).unwrap();
+    }
+    let inner = *model.faces.keys().find(|id| **id != face).unwrap();
+    model.erase(&BTreeSet::from([inner]));
+    assert_eq!(model.faces[&face].holes.len(), 1);
+    add_box(&mut model, DVec3::ZERO, DVec3::splat(2.));
+    let container = model
+        .make_object(&model.root_entities(), true, "Assembly")
+        .unwrap();
+    let copy = model.copy_entities(&BTreeSet::from([container]));
+    let peer = *model.paste_entities(&copy, DVec3::X * 8.).first().unwrap();
+    assert!(model.enter_object(container));
+    let children = &model.objects[&container].entities;
+    let face = *children
+        .iter()
+        .find(|id| model.faces.contains_key(id))
+        .unwrap();
+    let object = *children
+        .iter()
+        .find(|id| model.objects.contains_key(id))
+        .unwrap();
+    let result = model
+        .boolean_solids(face, object, SolidOperation::Intersect)
+        .unwrap();
+    assert!(result.iter().all(|id| model.parent(*id) == Some(container)));
+    model.edit_context = None;
+    for instance in [container, peer] {
+        let contents = model.copy_entities(&BTreeSet::from([instance]));
+        assert_eq!(contents.faces.len(), 1);
+        let face = contents.faces.values().next().unwrap();
+        assert_eq!(face.holes.len(), 1);
+        assert!((contents.face_area(face) - 3.).abs() < 1e-6);
+    }
+    assert!(!model.objects.contains_key(&object));
+    model.validate().unwrap();
+}

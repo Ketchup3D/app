@@ -252,11 +252,14 @@ impl KetchupApp {
             .values()
             .filter(|d| self.entity_cache.get(d.id).displayed(&self.doc.display))
         {
-            let color = if model.entity_in_context(dimension.id).is_none() {
+            let outliner_hover = self.outliner_hover.contains(&dimension.id);
+            let color = if model.entity_in_context(dimension.id).is_none() && !outliner_hover {
                 colors.muted
             } else if selected.contains(&dimension.id) {
                 colors.accent
-            } else if self.hover.is_some() && self.hover == model.entity_in_context(dimension.id) {
+            } else if outliner_hover
+                || self.hover.is_some() && self.hover == model.entity_in_context(dimension.id)
+            {
                 colors.green
             } else {
                 colors.ink

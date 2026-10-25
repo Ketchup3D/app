@@ -140,6 +140,7 @@ impl KetchupApp {
                     ("Temporary pan", "Shift + middle drag"),
                     ("Zoom to pointer", "Scroll"),
                     ("Fit model to view", "F"),
+                    ("Toggle emphasis on current group/component", "Tab"),
                 ],
             ),
             section(
