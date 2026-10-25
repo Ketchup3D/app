@@ -43,6 +43,13 @@ impl KetchupApp {
     pub(super) fn update_drawing_inference(&mut self, pos: Pos2) {
         self.drawing_guide = None;
         self.drawing_projection = None;
+        // A dimension lock controls the annotation's alignment. Reference
+        // inference must still acquire the original, unconstrained endpoints.
+        let lock = if self.tool == Tool::Dimensions {
+            None
+        } else {
+            self.lock
+        };
         if !(self.tool.is_drawing() || self.tool.is_measuring())
             || self.paste_preview.is_some()
             || !self.doc.snap_to_geometry
@@ -64,7 +71,7 @@ impl KetchupApp {
         // it can still supply a reference for a later compatible intersection.
         let source = if geometry(base) {
             Some(base)
-        } else if self.lock.is_some() || self.hover.is_some() {
+        } else if lock.is_some() || self.hover.is_some() {
             // Reference geometry is not an editable selection. Query its world
             // position even when it belongs to a different group/component.
             self.infer_snap(pos, None, None, false)
@@ -138,7 +145,7 @@ impl KetchupApp {
             .map(|d| (d.origin, d.normal))
             .or_else(|| self.measurement_plane())
             .or_else(|| surface.map(|(id, _, _)| (base.point, self.face_cache.get(id).normal)));
-        if let Some((start, axis)) = start.zip(self.lock) {
+        if let Some((start, axis)) = start.zip(lock) {
             // The cursor selects the reference, not the inferred endpoint: the
             // endpoint can be far away on screen and still match its coordinate.
             let point = start + axis.vector() * (reference.point - start).dot(axis.vector());
@@ -165,7 +172,7 @@ impl KetchupApp {
                 return;
             }
         }
-        let constraint = start.zip(self.lock.or_else(|| {
+        let constraint = start.zip(lock.or_else(|| {
             let delta = base.point - start?;
             (delta.length() > 1e-7)
                 .then(|| {
@@ -175,7 +182,7 @@ impl KetchupApp {
                 })
                 .flatten()
         }));
-        let infer = |constraint| {
+        let infer = |constraint, plane| {
             ketchup_core::inference::infer_reference_axis(
                 &self.doc.camera,
                 size,
@@ -185,8 +192,15 @@ impl KetchupApp {
                 plane,
             )
         };
-        let result =
-            infer(constraint).or_else(|| (self.lock.is_none()).then(|| infer(None)).flatten());
+        let result = infer(constraint, plane)
+            .or_else(|| (lock.is_none()).then(|| infer(None, plane)).flatten())
+            .or_else(|| {
+                // An unlocked shape can turn its working plane to follow a
+                // reference axis outside its current plane as well.
+                (lock.is_none() && self.drawing.is_some())
+                    .then(|| infer(None, None))
+                    .flatten()
+            });
         if let Some((snap, guide)) = result {
             if surface.is_some_and(|(id, _, _)| {
                 !self

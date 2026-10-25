@@ -88,7 +88,7 @@ impl KetchupApp {
                     ("Polygon", "G"),
                     ("Freehand", "D"),
                     ("Paint faces", "B"),
-                    ("Erase edges", "E"),
+                    ("Erase edges or faces", "E"),
                     ("Tape Measure", "T"),
                     ("Protractor", "A"),
                     ("Dimensions", "I"),

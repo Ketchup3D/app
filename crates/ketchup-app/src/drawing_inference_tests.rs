@@ -243,6 +243,191 @@ fn hover(h: &mut Harness, point: DVec3) {
 }
 
 #[test]
+fn unlocked_shapes_follow_points_and_edges_on_vertical_and_tilted_planes() {
+    for tool in [Tool::Rectangle, Tool::Circle, Tool::Polygon] {
+        for a in [
+            DVec3::new(0., 3., 2.),
+            DVec3::new(3., 0., 2.),
+            DVec3::new(3., 2., 0.),
+            DVec3::new(2., 3., 4.),
+        ] {
+            for fraction in [0., 0.5, 0.25] {
+                let mut h = Harness::new();
+                // Geometry snapping can turn the plane independently of the
+                // preference for automatic directional axis snapping.
+                h.app.doc.snap_to_axes = fraction != 0.5;
+                let direction = if a.x == 0. { DVec3::Y } else { DVec3::X };
+                let b = a + direction * 3.;
+                h.app.doc.model.add_edge(a, b).unwrap();
+                let before = h.app.doc.model.clone();
+                h.app.set_tool(tool);
+                h.click(h.at(DVec3::ZERO));
+                let target = a.lerp(b, fraction);
+                hover(&mut h, target);
+                let snap = h.app.snap.unwrap();
+                assert!(snap.point.distance(target) < 1e-5, "{tool:?}: {snap:?}");
+                assert_eq!(
+                    snap.kind,
+                    if fraction == 0. {
+                        Inference::Endpoint
+                    } else if fraction == 0.5 {
+                        Inference::Midpoint
+                    } else {
+                        Inference::OnEdge
+                    }
+                );
+                assert_eq!(h.app.lock, None);
+                let drawing = h.app.drawing.as_ref().unwrap();
+                let (origin, normal) = (drawing.origin, drawing.normal);
+                assert!((snap.point - origin).dot(normal).abs() < 1e-7);
+                for axis in [Axis::X, Axis::Y, Axis::Z] {
+                    if a.dot(axis.vector()) == 0. {
+                        assert!(normal.cross(axis.vector()).length() < 1e-7);
+                    }
+                }
+                let preview = h.app.drawing_points();
+                let picked = if tool == Tool::Rectangle {
+                    preview[2]
+                } else {
+                    preview[0]
+                };
+                assert!(picked.distance(snap.point) < 1e-7);
+                assert!(
+                    preview
+                        .iter()
+                        .all(|p| (*p - origin).dot(normal).abs() < 1e-7)
+                );
+                if tool != Tool::Rectangle {
+                    let radius = snap.point.distance(origin);
+                    assert!(
+                        preview
+                            .iter()
+                            .all(|p| (p.distance(origin) - radius).abs() < 1e-7)
+                    );
+                }
+                h.click(h.at(target));
+                assert!(h.app.drawing.is_none(), "{tool:?}: {target:?}");
+                assert!(preview.iter().all(|p| {
+                    h.app
+                        .doc
+                        .model
+                        .vertices
+                        .values()
+                        .any(|v| v.position.distance(*p) < 1e-7)
+                }));
+                h.app.doc.model.validate().unwrap();
+                h.app.undo(&h.ctx, false);
+                assert_eq!(h.app.doc.model, before);
+            }
+        }
+    }
+}
+
+#[test]
+fn unlocked_shapes_acquire_all_local_axes_and_preserve_explicit_plane_locks() {
+    for tool in [Tool::Rectangle, Tool::Circle, Tool::Polygon] {
+        for (axis, _) in PLANE_LOCKS {
+            let mut h = Harness::new();
+            h.app.doc.snap_to_geometry = false;
+            h.app.set_tool(tool);
+            let start = DVec3::new(1., 2., 0.);
+            h.click(h.at(start));
+            let origin = h.app.drawing.as_ref().unwrap().origin;
+            let target = origin + axis.vector() * 3.;
+            hover(&mut h, target);
+            assert_eq!(h.app.snap.unwrap().kind, Inference::Axis(axis));
+            assert!(h.app.snap.unwrap().point.distance(target) < 1e-5);
+            assert!(
+                (h.app.snap.unwrap().point - origin)
+                    .dot(h.app.drawing.as_ref().unwrap().normal)
+                    .abs()
+                    < 1e-7
+            );
+            h.key(Key::ArrowUp);
+            assert_eq!(h.app.drawing.as_ref().unwrap().normal, DVec3::Z);
+            hover(&mut h, origin + DVec3::new(0., 2., 3.));
+            assert!(
+                h.app
+                    .drawing_points()
+                    .iter()
+                    .all(|p| (p.z - origin.z).abs() < 1e-7)
+            );
+            assert_eq!(h.app.lock, Some(Axis::Z));
+        }
+    }
+}
+
+#[test]
+fn unlocked_shapes_can_follow_a_reference_axis_outside_the_current_plane() {
+    for tool in [Tool::Rectangle, Tool::Circle, Tool::Polygon] {
+        let mut h = Harness::new();
+        let point = DVec3::new(0., 3., 2.);
+        reference(&mut h, point);
+        h.app.set_tool(tool);
+        h.click(h.at(DVec3::ZERO));
+        hover(&mut h, point);
+        let target = DVec3::new(3., 3., 2.);
+        hover(&mut h, target);
+        let snap = h.app.snap.unwrap();
+        assert!(snap.point.distance(target) < 1e-5);
+        assert_eq!(h.app.active_drawing_guide().unwrap().axis, Axis::X);
+        let drawing = h.app.drawing.as_ref().unwrap();
+        assert!((snap.point - drawing.origin).dot(drawing.normal).abs() < 1e-7);
+        assert_eq!(h.app.lock, None);
+        let preview = h.app.drawing_points();
+        h.click(h.at(target));
+        assert!(h.app.drawing.is_none());
+        assert!(preview.iter().all(|p| {
+            h.app
+                .doc
+                .model
+                .vertices
+                .values()
+                .any(|v| v.position.distance(*p) < 1e-7)
+        }));
+        h.app.doc.model.validate().unwrap();
+    }
+}
+
+#[test]
+fn unlocked_freehand_snaps_in_three_dimensions_without_moving_prior_samples() {
+    let mut h = Harness::new();
+    let targets = [
+        DVec3::new(0., 3., 2.),
+        DVec3::new(3., 0., 2.),
+        DVec3::new(2., 3., 4.),
+    ];
+    for point in targets {
+        reference(&mut h, point);
+    }
+    let before = h.app.doc.model.clone();
+    h.app.set_tool(Tool::Freehand);
+    h.pointer(h.at(DVec3::ZERO), egui::PointerButton::Primary, true, false);
+    for target in targets {
+        let previous = h.app.drawing.as_ref().unwrap().points.clone();
+        hover(&mut h, target);
+        let drawing = h.app.drawing.as_ref().unwrap();
+        assert_eq!(&drawing.points[..previous.len()], previous.as_slice());
+        assert!(drawing.points.last().unwrap().distance(target) < 1e-5);
+        assert_eq!(h.app.snap.unwrap().kind, Inference::Endpoint);
+    }
+    let preview = h.app.drawing_points();
+    h.pointer(h.at(targets[2]), egui::PointerButton::Primary, false, false);
+    assert!(h.app.drawing.is_none());
+    assert!(preview.iter().all(|p| {
+        h.app
+            .doc
+            .model
+            .vertices
+            .values()
+            .any(|v| v.position.distance(*p) < 1e-7)
+    }));
+    h.app.doc.model.validate().unwrap();
+    h.app.undo(&h.ctx, false);
+    assert_eq!(h.app.doc.model, before);
+}
+
+#[test]
 fn hovered_endpoints_midpoints_and_edges_supply_axis_references() {
     for fraction in [0., 0.5, 0.25] {
         let mut h = Harness::new();
@@ -311,7 +496,7 @@ fn reference_axis_and_explicit_line_lock_intersect_without_breaking_the_lock() {
 }
 
 #[test]
-fn rectangle_reference_alignment_stays_on_its_plane() {
+fn rectangle_reference_alignment_can_return_to_the_horizontal_plane() {
     let mut h = Harness::new();
     let point = DVec3::new(3., 4., 2.);
     reference(&mut h, point);

@@ -209,6 +209,44 @@ fn axis_dimensions_project_layout_and_measure_attached_endpoints() {
 }
 
 #[test]
+fn perpendicular_axis_dimensions_keep_the_span_extension_lines_and_label_length() {
+    use crate::Axis;
+    let a = DVec3::new(1., 1., 1.);
+    for (axis, b) in [
+        (Axis::X, DVec3::new(1., 4., 5.)),
+        (Axis::Y, DVec3::new(4., 1., 5.)),
+        (Axis::Z, DVec3::new(4., 5., 1.)),
+    ] {
+        let mut doc = Document::default();
+        let edge = doc.model.add_edge(a, b).unwrap();
+        let offset = axis.vector() * 2.;
+        let id = doc
+            .model
+            .add_dimension_with_axis(a, b, offset, Some(axis))
+            .unwrap();
+        let dimension = &doc.model.dimensions[&id];
+        assert_eq!(dimension.points(&doc.model), (a, b));
+        assert_eq!(dimension.length(&doc.model), 5.);
+        assert_eq!(dimension.layout(&doc.model), [a, b, a + offset, b + offset]);
+        assert!((dimension.line_direction(&doc.model) - (b - a) / 5.).length() < 1e-9);
+
+        let saved = Document::from_json(&serde_json::to_string(&doc).unwrap()).unwrap();
+        assert_eq!(saved.model, doc.model);
+        doc.model
+            .scale_selection(&BTreeSet::from([edge]), a, 2.)
+            .unwrap();
+        let dimension = &doc.model.dimensions[&id];
+        assert_eq!(dimension.axis, Some(axis));
+        assert_eq!(dimension.length(&doc.model), 10.);
+        let [start, end, line_start, line_end] = dimension.layout(&doc.model);
+        assert!(start.distance(line_start) > 1.);
+        assert!(end.distance(line_end) > 1.);
+        assert_eq!(line_start.distance(line_end), 10.);
+        doc.model.validate().unwrap();
+    }
+}
+
+#[test]
 fn axis_dimensions_preserve_alignment_in_history_clipboard_and_documents() {
     use crate::Axis;
     let mut doc = Document::default();

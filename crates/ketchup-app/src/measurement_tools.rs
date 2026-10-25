@@ -28,7 +28,13 @@ impl KetchupApp {
         self.snap = self.infer_snap(
             pos,
             points.first().copied(),
-            self.lock,
+            // Dimensions align the annotation, not the geometry being measured.
+            // Keep both picked endpoints and their attachments on the model.
+            if self.tool == Tool::Dimensions {
+                None
+            } else {
+                self.lock
+            },
             self.doc.snap_to_axes,
         );
         if self.tool == Tool::Protractor && points.len() == 2 {
@@ -47,16 +53,25 @@ impl KetchupApp {
         if self.tool == Tool::Dimensions && points.len() == 2 {
             self.snap = None;
             let (a, b) = (points[0], points[1]);
+            let direction = self
+                .dimension_preview()
+                .unwrap()
+                .line_direction(&self.doc.model);
+            let center = (a + b) * 0.5;
             let normal = (self.doc.camera.target - self.doc.camera.eye()).normalize();
             let ray = self.doc.camera.ray(cursor, size);
             let denominator = ray.direction.dot(normal);
-            if denominator.abs() > 1e-8 {
-                let center = (a + b) * 0.5;
+            if let Some(axis) = self
+                .lock
+                .filter(|axis| (b - a).dot(axis.vector()).abs() < 1e-7)
+            {
+                // A perpendicular lock places the annotation along the axis;
+                // projecting its measured span onto that axis would merge it.
+                if let Some(point) = ray.axis(center, axis.vector()) {
+                    self.measurement.as_mut().unwrap().offset = point - center;
+                }
+            } else if denominator.abs() > 1e-8 {
                 let t = (center - ray.origin).dot(normal) / denominator;
-                let direction = self
-                    .lock
-                    .map(Axis::vector)
-                    .unwrap_or_else(|| (b - a).normalize());
                 let delta = ray.origin + ray.direction * t - center;
                 self.measurement.as_mut().unwrap().offset =
                     delta - direction * delta.dot(direction);
@@ -196,7 +211,7 @@ impl KetchupApp {
             (Tool::Protractor, 1) => "Click a baseline point · Esc to cancel",
             (Tool::Protractor, 2) => "Click the angle point · Esc to cancel",
             (Tool::Dimensions, 1) => {
-                "Click the second endpoint · Arrow keys lock axes · Esc to cancel"
+                "Click the second endpoint · Arrow keys align X / Y / Z · Esc to cancel"
             }
             (Tool::Dimensions, 2) => {
                 "Move to place · Arrow keys align X / Y / Z · Down clears the lock"
@@ -228,6 +243,7 @@ impl KetchupApp {
         if !self.doc.display.dimensions {
             return;
         }
+        let colors = Palette::for_painter(p);
         let camera = &self.doc.camera;
         let size = dv(rect.size());
         let selected = model.expand_entities(&self.selected);
@@ -237,13 +253,13 @@ impl KetchupApp {
             .filter(|d| self.entity_cache.get(d.id).displayed(&self.doc.display))
         {
             let color = if model.entity_in_context(dimension.id).is_none() {
-                MUTED
+                colors.muted
             } else if selected.contains(&dimension.id) {
-                ACCENT
+                colors.accent
             } else if self.hover.is_some() && self.hover == model.entity_in_context(dimension.id) {
-                GREEN
+                colors.green
             } else {
-                INK
+                colors.ink
             };
             paint_dimension(p, camera, rect, model, dimension, color);
         }
@@ -266,7 +282,7 @@ impl KetchupApp {
                     point: b + offset,
                     weights: vec![],
                 };
-                paint_dimension(p, camera, rect, model, &dimension, GREEN);
+                paint_dimension(p, camera, rect, model, &dimension, colors.green);
             }
         }
         if !self.tool.is_measuring() {
@@ -278,7 +294,7 @@ impl KetchupApp {
             if let Some((a, b)) = camera.segment(a, b, size) {
                 p.line_segment(
                     [rect.min + pv(a), rect.min + pv(b)],
-                    Stroke::new(1.5, GREEN),
+                    Stroke::new(1.5, colors.green),
                 );
             }
         };
@@ -290,7 +306,7 @@ impl KetchupApp {
                     rect,
                     model,
                     &dimension,
-                    self.lock.map(axis_color).unwrap_or(GREEN),
+                    self.lock.map(axis_color).unwrap_or(colors.green),
                 );
             }
         } else if self.tool == Tool::Protractor {
@@ -309,7 +325,7 @@ impl KetchupApp {
                             p,
                             mid + egui::vec2(0., -14.),
                             format!("{angle:.2}°"),
-                            GREEN,
+                            colors.green,
                         );
                     }
                 }
@@ -321,26 +337,26 @@ impl KetchupApp {
                     p,
                     mid + egui::vec2(0., -14.),
                     format_length(points[0].distance(points[1])),
-                    GREEN,
+                    colors.green,
                 );
             }
         }
         for point in points {
             if let Some(point) = screen(point) {
-                p.circle_filled(point, 3., PAPER);
-                p.circle_stroke(point, 3., Stroke::new(1.5, GREEN));
+                p.circle_filled(point, 3., colors.paper);
+                p.circle_stroke(point, 3., Stroke::new(1.5, colors.green));
             }
         }
         if !self.measurement.as_ref().is_some_and(|m| m.complete) {
             if let Some(snap) = self.snap {
                 if let Some(point) = screen(snap.point) {
-                    p.circle_stroke(point, 4., Stroke::new(1.5, GREEN));
+                    p.circle_stroke(point, 4., Stroke::new(1.5, colors.green));
                     if snap.kind != Inference::Plane {
                         measurement_label(
                             p,
                             point + egui::vec2(45., 18.),
                             snap.kind.label().into(),
-                            GREEN,
+                            colors.green,
                         );
                     }
                 }
@@ -387,6 +403,6 @@ fn paint_dimension(
 fn measurement_label(p: &egui::Painter, at: Pos2, text: String, color: Color32) {
     let galley = p.layout_no_wrap(text, FontId::monospace(12.), color);
     let rect = Rect::from_center_size(at, galley.size() + egui::vec2(12., 8.));
-    p.rect_filled(rect, 4, PAPER);
+    p.rect_filled(rect, 4, Palette::for_painter(p).paper);
     p.galley(rect.min + egui::vec2(6., 4.), galley, color);
 }

@@ -32,7 +32,8 @@ pub struct Dimension {
     pub start: DimensionAnchor,
     pub end: DimensionAnchor,
     pub offset: DVec3,
-    /// When set, measure the separation along this world axis.
+    /// When set, measure the separation along this world axis. A perpendicular
+    /// axis keeps the full span instead of collapsing it to a zero-length line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis: Option<Axis>,
 }
@@ -40,19 +41,28 @@ impl Dimension {
     pub fn points(&self, model: &Model) -> (DVec3, DVec3) {
         (self.start.position(model), self.end.position(model))
     }
+    fn projected_axis(&self, a: DVec3, b: DVec3) -> Option<Axis> {
+        self.axis
+            .filter(|axis| (b - a).dot(axis.vector()).abs() >= EPS)
+    }
+    /// Direction of the dimension line, preserving the span when the requested
+    /// axis is perpendicular to it. Placement can then use that axis as an offset.
+    pub fn line_direction(&self, model: &Model) -> DVec3 {
+        let (a, b) = self.points(model);
+        self.projected_axis(a, b)
+            .map(Axis::vector)
+            .unwrap_or_else(|| (b - a).try_normalize().unwrap_or(DVec3::X))
+    }
     pub fn length(&self, model: &Model) -> f64 {
         let (a, b) = self.points(model);
-        self.axis
+        self.projected_axis(a, b)
             .map_or_else(|| a.distance(b), |axis| (b - a).dot(axis.vector()).abs())
     }
     pub fn layout(&self, model: &Model) -> [DVec3; 4] {
         let (a, b) = self.points(model);
-        let direction = self
-            .axis
-            .map(Axis::vector)
-            .unwrap_or_else(|| (b - a).try_normalize().unwrap_or(DVec3::X));
+        let direction = self.line_direction(model);
         let offset = self.offset - direction * self.offset.dot(direction);
-        if self.axis.is_some() {
+        if self.projected_axis(a, b).is_some() {
             let center = (a + b) * 0.5;
             let line = center + offset;
             [

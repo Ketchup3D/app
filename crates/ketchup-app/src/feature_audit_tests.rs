@@ -154,7 +154,10 @@ pub(super) fn render_workspace(name: &str) -> KetchupApp {
                 DVec3::new(-5., 5., -0.1),
             ];
             for i in 0..4 {
-                app.doc.model.add_edge(floor[i], floor[(i + 1) % 4]).unwrap();
+                app.doc
+                    .model
+                    .add_edge(floor[i], floor[(i + 1) % 4])
+                    .unwrap();
             }
         }
         "fog_start" | "fog_end" => {

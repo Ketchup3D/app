@@ -1319,6 +1319,88 @@ fn snap_checkbox_starts_checked_and_disables_geometry_magnet() {
 }
 
 #[test]
+fn eraser_hovers_and_erases_face_interiors_without_removing_boundary_edges() {
+    let mut h = Harness::new();
+    let face = modeling_rectangle(&mut h);
+    let before = h.app.doc.model.clone();
+    h.key(Key::E);
+    let cursor = h.at(DVec3::new(2., 2., 0.));
+    h.frame(
+        vec![egui::Event::PointerMoved(cursor)],
+        egui::Modifiers::NONE,
+    );
+    assert_eq!(h.app.hover, Some(face));
+    h.click(cursor);
+    assert!(!h.app.doc.model.faces.contains_key(&face));
+    assert_eq!(h.app.doc.model.edges, before.edges);
+    assert_eq!(h.app.doc.model.vertices, before.vertices);
+    assert_eq!(h.app.history.undo_label(), Some("Erase geometry"));
+    h.app.undo(&h.ctx, false);
+    assert_eq!(h.app.doc.model, before);
+    h.app.undo(&h.ctx, true);
+    assert!(!h.app.doc.model.faces.contains_key(&face));
+    assert_eq!(h.app.doc.model.edges, before.edges);
+}
+
+#[test]
+fn eraser_stroke_within_a_face_previews_and_commits_one_undo_step() {
+    let mut h = Harness::new();
+    let face = modeling_rectangle(&mut h);
+    let before = h.app.doc.model.clone();
+    h.key(Key::E);
+    let start = h.at(DVec3::new(1., 2., 0.));
+    let end = h.at(DVec3::new(3., 2., 0.));
+    h.pointer(start, egui::PointerButton::Primary, true, false);
+    h.frame(vec![egui::Event::PointerMoved(end)], egui::Modifiers::NONE);
+    let GestureKind::Erase { ids } = &h.app.gesture.as_ref().unwrap().kind else {
+        panic!("The erase stroke should remain active until release");
+    };
+    assert_eq!(ids, &BTreeSet::from([face]));
+    assert_eq!(h.app.doc.model, before);
+    h.pointer(end, egui::PointerButton::Primary, false, false);
+    assert!(h.app.doc.model.faces.is_empty());
+    assert_eq!(h.app.doc.model.edges, before.edges);
+    h.app.undo(&h.ctx, false);
+    assert_eq!(h.app.doc.model, before);
+    assert!(h.app.history.undo_label().is_none());
+}
+
+#[test]
+fn eraser_face_targets_respect_hidden_and_locked_objects() {
+    for grouped in [false, true] {
+        for hidden in [false, true] {
+            let mut h = Harness::new();
+            let face = modeling_rectangle(&mut h);
+            let target = if grouped {
+                h.app
+                    .doc
+                    .model
+                    .make_object(&BTreeSet::from([face]), false, "Group")
+                    .unwrap()
+            } else {
+                face
+            };
+            if hidden {
+                h.app.doc.model.hidden.insert(target);
+            } else {
+                h.app.doc.model.locked.insert(target);
+            }
+            let before = h.app.doc.model.clone();
+            h.key(Key::E);
+            let cursor = h.at(DVec3::new(2., 2., 0.));
+            h.frame(
+                vec![egui::Event::PointerMoved(cursor)],
+                egui::Modifiers::NONE,
+            );
+            assert_eq!(h.app.hover, None);
+            h.click(cursor);
+            assert_eq!(h.app.doc.model, before);
+            assert!(h.app.history.undo_label().is_none());
+        }
+    }
+}
+
+#[test]
 fn eraser_does_not_delete_an_edge_hidden_behind_a_filled_face() {
     let mut h = Harness::new();
     let square = [
@@ -1342,7 +1424,8 @@ fn eraser_does_not_delete_an_edge_hidden_behind_a_filled_face() {
         .ray(dv(cursor - h.app.viewport.min), dv(h.app.viewport.size()))
         .plane_z(0.)
         .unwrap();
-    h.app
+    let hidden_edge = h
+        .app
         .doc
         .model
         .add_edge(hidden - DVec3::X, hidden + DVec3::X)
@@ -1350,6 +1433,10 @@ fn eraser_does_not_delete_an_edge_hidden_behind_a_filled_face() {
     let before = h.app.doc.model.clone();
     h.key(Key::E);
     h.click(cursor);
+    assert!(h.app.doc.model.faces.is_empty());
+    assert!(h.app.doc.model.edges.contains_key(&hidden_edge));
+    assert_eq!(h.app.doc.model.edges, before.edges);
+    h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model, before);
 }
 
@@ -3704,6 +3791,146 @@ fn flip_uses_keyboard_inspector_and_clickable_planes_without_detaching_objects()
         })
     );
     h.app.doc.model.validate().unwrap();
+}
+
+#[test]
+fn dimensions_locked_during_selection_or_placement_keep_three_lines_and_a_label() {
+    fn has_label(shape: &egui::Shape, label: &str, at: Pos2) -> bool {
+        match shape {
+            egui::Shape::Text(text) => {
+                text.galley.job.text == label
+                    && (text.pos + text.galley.size() * 0.5).distance(at) < 1.
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().any(|shape| has_label(shape, label, at)),
+            _ => false,
+        }
+    }
+
+    fn collect_lines(shape: &egui::Shape, color: Color32, lines: &mut Vec<[Pos2; 2]>) {
+        match shape {
+            egui::Shape::LineSegment { points, stroke }
+                if stroke.width == 1. && stroke.color == color =>
+            {
+                lines.push(*points);
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_lines(shape, color, lines);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let a = DVec3::new(-1., -1., 1.);
+    let diagonal = DVec3::new(2., 3., 3.);
+    let placement = DVec3::new(3., -2., 3.);
+    for lock_stage in [0, 1, 2] {
+        for (key, axis, b, expected, placement) in [
+            (Key::ArrowRight, Axis::X, diagonal, 3., placement),
+            (Key::ArrowLeft, Axis::Y, diagonal, 4., placement),
+            (Key::ArrowUp, Axis::Z, diagonal, 2., placement),
+            (
+                Key::ArrowRight,
+                Axis::X,
+                DVec3::new(-1., 2., 5.),
+                5.,
+                DVec3::new(1., 0.5, 3.),
+            ),
+            (
+                Key::ArrowLeft,
+                Axis::Y,
+                DVec3::new(2., -1., 5.),
+                5.,
+                DVec3::new(0.5, 1., 3.),
+            ),
+            (
+                Key::ArrowUp,
+                Axis::Z,
+                DVec3::new(2., 3., 1.),
+                5.,
+                DVec3::new(0.5, 1., 3.),
+            ),
+        ] {
+            let mut h = Harness::new();
+            h.app.doc.model.add_edge(a, b).unwrap();
+            h.key(Key::I);
+            if lock_stage == 0 {
+                h.key(key);
+            }
+            h.click(h.at(a));
+            if lock_stage == 1 {
+                h.key(key);
+            }
+            let second = h.at(b);
+            h.frame(
+                vec![egui::Event::PointerMoved(second)],
+                egui::Modifiers::NONE,
+            );
+            assert!(h.app.snap.unwrap().point.distance(b) < 1e-6);
+            if lock_stage < 2 {
+                assert_eq!(h.app.measurement_value(), Some(format_length(expected)));
+            }
+            h.click(second);
+            if lock_stage == 2 {
+                h.key(key);
+            }
+            assert_eq!(h.app.measurement_value(), Some(format_length(expected)));
+            let points = &h.app.measurement.as_ref().unwrap().points;
+            assert_eq!(points.len(), 2);
+            assert!(points[0].distance(a) < 1e-6);
+            assert!(points[1].distance(b) < 1e-6);
+
+            let placement = h.at(placement);
+            let preview = h.frame(
+                vec![egui::Event::PointerMoved(placement)],
+                egui::Modifiers::NONE,
+            );
+            let mut lines = vec![];
+            for shape in &preview.shapes {
+                collect_lines(&shape.shape, axis_color(axis), &mut lines);
+            }
+            assert_eq!(lines.len(), 3);
+            assert!(
+                lines
+                    .iter()
+                    .all(|[a, b]| a.is_finite() && b.is_finite() && a.distance(*b) > 1.)
+            );
+            let label_at = lines[2][0].lerp(lines[2][1], 0.5);
+            assert!(preview.shapes.iter().any(|shape| has_label(
+                &shape.shape,
+                &format_length(expected),
+                label_at
+            )));
+
+            let placed = h.click(placement);
+            let dimension = h.app.doc.model.dimensions.values().next().unwrap();
+            let (start, end) = dimension.points(&h.app.doc.model);
+            assert!(start.distance(a) < 1e-6);
+            assert!(end.distance(b) < 1e-6);
+            assert_eq!(dimension.axis, Some(axis));
+            assert_eq!(dimension.start.weights.len(), 1);
+            assert_eq!(dimension.end.weights.len(), 1);
+            assert!((dimension.length(&h.app.doc.model) - expected).abs() < 1e-6);
+            if (b - a).dot(axis.vector()).abs() < 1e-7 {
+                let [_, _, line_start, line_end] = dimension.layout(&h.app.doc.model);
+                assert!((line_start - start).cross(axis.vector()).length() < 1e-6);
+                assert!((line_end - end).cross(axis.vector()).length() < 1e-6);
+                assert!((line_start - start).length() > 1.);
+                assert!((line_end - end).length() > 1.);
+            }
+            let mut placed_lines = vec![];
+            for shape in &placed.shapes {
+                collect_lines(&shape.shape, ACCENT, &mut placed_lines);
+            }
+            assert_eq!(placed_lines, lines);
+            assert!(placed.shapes.iter().any(|shape| has_label(
+                &shape.shape,
+                &format_length(expected),
+                label_at
+            )));
+        }
+    }
 }
 
 #[test]

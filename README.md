@@ -176,6 +176,39 @@ trunk build --release --locked
 
 Serve the resulting `dist/` directory with a static web server. Use HTTPS for WebGPU (localhost is also supported). `public_url = "./"` allows serving from a subdirectory. There is no service worker or external asset dependency.
 
+### GitHub Pages website
+
+The presentation page lives in [`site/`](site/index.html). The
+[Deploy GitHub Pages](.github/workflows/pages.yml) workflow builds the browser
+editor into `dist/site/play/`, adds the landing page and existing branding and
+screenshot assets to `dist/site/`, and deploys them together. The main browser
+entry point (`index.html`) and `trunk serve` continue to open the editor directly.
+
+To enable publishing for `Ketchup3D/app`:
+
+1. In the repository, open **Settings → Pages → Build and deployment** and set
+   **Source** to **GitHub Actions**. See the
+   [GitHub Pages setup guide](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site#publishing-with-a-custom-github-actions-workflow).
+2. Push these files to `main`, or run **Deploy GitHub Pages** from the Actions
+   tab with `main` selected. Subsequent pushes to `main` redeploy both the page
+   and the editor; desktop releases keep their separate tag-based workflow.
+3. After the deployment succeeds, the landing page is at
+   <https://ketchup3d.github.io/app/> and its **Try in browser** links open
+   <https://ketchup3d.github.io/app/play/>. The workflow's environment link shows
+   the actual URL if a custom domain is configured.
+
+All local page and editor asset links are relative, so the same package supports
+the repository path or a custom domain. GitHub Pages supplies HTTPS. The editor
+uses browser-local autosave; visitors should download `.ketchup` projects they
+want to keep. GitHub Pages is not cloud model storage.
+
+The landing page includes a canonical URL, Open Graph image metadata, and a
+large-image Twitter/X card using the editor screenshot. During deployment,
+the workflow sets these absolute URLs from the GitHub Pages configuration,
+including a configured custom domain. Social previews require the deployed
+public HTTPS page and image; the local preview URL cannot be fetched by social
+networks.
+
 ## Controls
 
 | Action | Control |
@@ -220,7 +253,7 @@ Serve the resulting `dist/` directory with a static web server. Use HTTPS for We
 | Shape plane lock | Rectangle, Circle, Polygon, Freehand: Right / Left / Up locks the drawing plane perpendicular to X / Y / Z; repeat or Down unlocks |
 | Clear axis lock | Down arrow |
 | Cancel preview/gesture | Escape |
-| Erase | E; click or drag across edges |
+| Erase | E; click or drag across edges or faces |
 | Delete selection | Delete or Backspace; a selected face leaves its outline, a selected boundary edge also removes dependent faces |
 | Orbit | O + left-drag, or middle-drag from any tool |
 | Orbit while drawing | Hold Ctrl/Command and move the cursor; release Ctrl/Command to resume drawing |
@@ -238,13 +271,13 @@ Typed lengths accept `mm`, `cm`, `m`, `km`, `in`, `ft`, and `yd` (or `"` for inc
 
 Dimension inputs also accept formulas with `+`, `-`, `*`, `/`, and parentheses. Units are converted before evaluating: `60cm - 89mm` is `0.511m` (511 mm), `(60cm - 89mm) / 2` is `0.2555m`, and `2 * 5cm` is `0.1m`. Multiplication and division take precedence over addition and subtraction. Plain numbers default to meters when added to lengths and act as unitless multipliers or divisors in products. A unit can follow a parenthesized numeric expression, such as `(60 - 8.9)cm`. Rectangles accept a formula for each dimension, for example `6m - 100cm,60mm - 10mm`. Formulas work for drawing lengths, radii, total freehand length, Move, Push/Pull, and Offset; Scale accepts formulas containing only numbers. Invalid formulas, division by zero, and area or volume results leave the operation available for correction.
 
-Hovering an existing endpoint, midpoint, or position on an edge acquires that position as an axis reference. As the pointer moves away, it snaps near the red X, green Y, or blue Z axis through that reference. A colored dashed line and a marker at the reference show the active alignment. This works before the first drawing point, while drawing lines or shapes, and while placing measurement points. Direct geometry snaps keep priority. With an arrow-key axis lock active, hovering the reference directly sets the endpoint coordinate on that axis; the cursor can stay over the reference edge even when the endpoint is far away on screen. For example, with Y locked, the endpoint takes the hovered point’s Y coordinate while keeping the start’s X and Z coordinates. Visible geometry inside groups, nested groups, and components can supply this reference, including geometry outside the group currently being edited. A dashed connection shows the projection from the hovered geometry to the endpoint. Drawing planes and snapped surfaces are preserved. Turning off Snap or Snap to axes releases the reference, as does hiding or deleting its source geometry. Hover another point or edge to replace the reference.
+Hovering an existing endpoint, midpoint, or position on an edge acquires that position as an axis reference. As the pointer moves away, it snaps near the red X, green Y, or blue Z axis through that reference. A colored dashed line and a marker at the reference show the active alignment. This works before the first drawing point, while drawing lines or shapes, and while placing measurement points. Direct geometry snaps keep priority. With an arrow-key axis lock active, hovering the reference directly sets the endpoint coordinate on that axis; the cursor can stay over the reference edge even when the endpoint is far away on screen. For example, with Y locked, the endpoint takes the hovered point’s Y coordinate while keeping the start’s X and Z coordinates. Visible geometry inside groups, nested groups, and components can supply this reference, including geometry outside the group currently being edited. A dashed connection shows the projection from the hovered geometry to the endpoint. Explicitly locked drawing planes and snapped surfaces are preserved; unlocked shapes can turn their plane to follow a reference axis. Turning off Snap or Snap to axes releases the reference, as does hiding or deleting its source geometry. Hover another point or edge to replace the reference.
 
-Rectangle, Circle, Polygon, and Freehand support arrow-key drawing-plane locks before or after the first point. Right locks the YZ plane (red X normal), Left locks XZ (green Y normal), and Up locks XY (blue Z normal), always through the first point. The preview uses the locked axis color. Repeating the arrow or pressing Down restores the original surface plane. Switching planes during a freehand stroke preserves the sampled stroke’s shape and size. Typed dimensions, reference snapping within the plane, cancellation, and undo work with locked shapes. Plane locks remain available when Snap or Snap to axes is off.
+Rectangle, Circle, Polygon, and Freehand support arrow-key drawing-plane locks before or after the first point. Right locks the YZ plane (red X normal), Left locks XZ (green Y normal), and Up locks XY (blue Z normal), always through the first point. The preview uses the locked axis color. Repeating the arrow or pressing Down unlocks the plane and resumes automatic inference from the original surface orientation. Switching locked planes during a planar freehand stroke preserves the sampled stroke’s shape and size. Typed dimensions, reference snapping within the plane, cancellation, and undo work with locked shapes. Plane locks remain available when Snap or Snap to axes is off.
 
 Coordinates use meters and Z-up. Free drawing starts on Z=0, or at a snapped existing point/surface. Subsequent free segments use the horizontal plane through their start; axis inference and locks allow drawing vertically. Snap, checked by default, attracts drawing to visible endpoints, midpoints, arbitrary points on edges, and filled surfaces. Snap to axes, also checked by default, automatically aligns drawing directions with the red X, green Y, and blue Z axes at every point in a connected chain, including short segments. Points can also snap onto the visible model axes. Automatic alignment combines with geometry snapping, allowing perpendicular previews to acquire nearby endpoints, edges, and surfaces; explicit arrow-key locks keep points strictly on the chosen axis. The live endpoint marker and dashed axis guide show the snapped position before clicking; the same position is used when confirming the point. These options are independent; arrow-key axis locks remain available even with automatic axis snapping off. Move also combines intersecting axis guides from visible endpoints and midpoints: a target can align along X with one point and Y with another, or along all three axes. Colored dashed guides and an alignment label show the combined target before confirmation. Snap and Snap to axes must both be enabled to use these references; arrow-key locks remain strict.
 
-Close a flat outline (for example, four lines making a rectangle) to generate a filled face. Concave, vertical, and tilted planar outlines work too. Non-planar or self-crossing outlines remain edges. Snapping a new endpoint onto an existing edge splits it into connected edges; a boundary-to-boundary divider splits a face. Arbitrary crossings without a snapped endpoint do not split automatically. Line creation uses click-to-click input. Rectangle, Circle, and Polygon show a live outline before the second click and create a filled face. These shapes and Freehand stay on the plane of the face under the starting point, or a horizontal plane through that point. Freehand samples the drag into connected edges; returning to its start with Snap enabled closes the outline. Each shape or stroke is one undo step; Escape or switching tools cancels its preview.
+Close a flat outline (for example, four lines making a rectangle) to generate a filled face. Concave, vertical, and tilted planar outlines work too. Non-planar or self-crossing outlines remain edges. Snapping a new endpoint onto an existing edge splits it into connected edges; a boundary-to-boundary divider splits a face. Arbitrary crossings without a snapped endpoint do not split automatically. Line creation uses click-to-click input. Rectangle, Circle, and Polygon show a live outline before the second click and create a filled face. These shapes and Freehand begin on the plane of the face under the starting point, or a horizontal plane through that point. Without an explicit lock, they snap to visible points, edges, and axes in three dimensions and adjust the working plane to include the target. Existing compatible planes stay unchanged; off-plane targets choose a matching world plane or a tilted plane through the first point. Circles and polygons keep a true circular radius, and rectangles keep perpendicular sides. Freehand preserves earlier samples when acquiring a target on another plane, allowing strokes in three dimensions. Explicit arrow-key plane locks keep all subsequent targets on the selected plane. Freehand samples the drag into connected edges; returning to its start with Snap enabled closes the outline. Each shape or stroke is one undo step; Escape or switching tools cancels its preview.
 
 Click a face interior to select its fill; click near a visible edge to select the edge instead. Faces and edges can be selected together with Shift or box selection. Deleting a face leaves the boundary edges intact, and unrelated edits do not regenerate the fill. Retrace a boundary edge to heal an erased face. Nested outlines create independently selectable inner faces; deleting an inner fill leaves a real hole. Faces use depth-tested, double-sided rendering, and the inspector shows selected surface area.
 
@@ -258,7 +291,7 @@ Hide removes geometry from rendering, picking, snapping, and Fit; right-click an
 
 Tape Measure shows the true 3D distance between two points. Protractor measures the smaller angle (0–180°) between two rays, with a live arc and degree readout. These tools leave geometry unchanged; their results stay visible until you start another measurement, switch tools, or press Escape. Middle-button navigation preserves an unfinished measurement.
 
-Dimensions adds persistent linear annotations with extension lines, endpoint ticks, and a meter label. The third click places the dimension away from the measured geometry. During placement, Right / Left / Up locks the dimension line and its displayed length to X / Y / Z while preserving both picked endpoints; repeat the arrow or press Down to return to the full aligned length. The saved dimension keeps this alignment when the source geometry changes. Snapped endpoints attach to vertices, edges, or surfaces and update when that geometry moves or scales; deleting the source geometry keeps the annotation at its last position. Free points remain in world coordinates. Select a dimension by its line or label to delete, move, copy, group, or hide it. Dimensions support undo/redo, local saving, and component editing.
+Dimensions adds persistent linear annotations with extension lines, endpoint ticks, and a meter label. The third click places the dimension away from the measured geometry. During placement, Right / Left / Up locks the dimension line and its displayed length to X / Y / Z while preserving both picked endpoints; repeat the arrow or press Down to return to the full aligned length. If the locked axis is perpendicular to the measured span (for example, Z for two points on a horizontal face), placement moves the extension lines along that axis and preserves the full measured length instead of collapsing the dimension. The saved dimension keeps this alignment when the source geometry changes. Snapped endpoints attach to vertices, edges, or surfaces and update when that geometry moves or scales; deleting the source geometry keeps the annotation at its last position. Free points remain in world coordinates. Select a dimension by its line or label to delete, move, copy, group, or hide it. Dimensions support undo/redo, local saving, and component editing.
 
 The toolbar is ordered Select, Line, Erase, Orbit, Push/Pull, Scale, Offset, Move, Paint, Dimensions, and Union. Dimensions groups Dimensions, Tape Measure, and Protractor, with Dimensions selected by default. Every flyout entry has an icon, and each group remembers its last chosen tool.
 

@@ -1,17 +1,55 @@
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke};
 use ketchup_core::Tool;
 
-// SketchUp-inspired tool colors stay consistent in the rail and flyouts,
-// including when selected. The button background and label indicate selection.
+// Every icon uses the same theme palette in the rail, flyouts, and cursor.
+// Selection is indicated by the button background and label.
 const OUTLINE: Color32 = Color32::from_rgb(63, 70, 76);
-const RED: Color32 = Color32::from_rgb(198, 57, 49);
-const BLUE: Color32 = Color32::from_rgb(48, 111, 173);
-const GOLD: Color32 = Color32::from_rgb(153, 108, 21);
-const YELLOW: Color32 = Color32::from_rgb(249, 205, 74);
-const PINK: Color32 = Color32::from_rgb(235, 144, 171);
-const PINK_EDGE: Color32 = Color32::from_rgb(168, 65, 106);
-const FACE: Color32 = Color32::from_rgb(211, 225, 238);
-const METAL: Color32 = Color32::from_rgb(226, 231, 233);
+
+#[derive(Clone, Copy)]
+struct ToolPalette {
+    outline: Color32,
+    red: Color32,
+    blue: Color32,
+    gold: Color32,
+    yellow: Color32,
+    pink: Color32,
+    pink_edge: Color32,
+    face: Color32,
+    metal: Color32,
+    warm_face: Color32,
+}
+
+impl ToolPalette {
+    fn for_painter(p: &egui::Painter) -> Self {
+        if p.ctx().global_style().visuals.dark_mode {
+            Self {
+                outline: Color32::from_rgb(203, 214, 204),
+                red: Color32::from_rgb(246, 142, 125),
+                blue: Color32::from_rgb(131, 185, 239),
+                gold: Color32::from_rgb(230, 190, 104),
+                yellow: Color32::from_rgb(122, 97, 31),
+                pink: Color32::from_rgb(127, 65, 86),
+                pink_edge: Color32::from_rgb(244, 169, 195),
+                face: Color32::from_rgb(65, 82, 95),
+                metal: Color32::from_rgb(90, 106, 113),
+                warm_face: Color32::from_rgb(98, 76, 44),
+            }
+        } else {
+            Self {
+                outline: OUTLINE,
+                red: Color32::from_rgb(198, 57, 49),
+                blue: Color32::from_rgb(48, 111, 173),
+                gold: Color32::from_rgb(153, 108, 21),
+                yellow: Color32::from_rgb(249, 205, 74),
+                pink: Color32::from_rgb(235, 144, 171),
+                pink_edge: Color32::from_rgb(168, 65, 106),
+                face: Color32::from_rgb(211, 225, 238),
+                metal: Color32::from_rgb(226, 231, 233),
+                warm_face: Color32::from_rgb(249, 219, 166),
+            }
+        }
+    }
+}
 
 pub fn tool(p: &egui::Painter, rect: Rect, tool: Tool) {
     if tool == Tool::Select && p.ctx().global_style().visuals.dark_mode {
@@ -20,7 +58,7 @@ pub fn tool(p: &egui::Painter, rect: Rect, tool: Tool) {
         select_arrow(p, rect, Stroke::new(2.2, Color32::WHITE));
         return;
     }
-    paint_tool(p, rect, tool, OUTLINE);
+    ui_tool(p, rect, tool);
 }
 
 fn select_arrow(p: &egui::Painter, rect: Rect, stroke: Stroke) {
@@ -42,30 +80,37 @@ fn select_arrow(p: &egui::Painter, rect: Rect, stroke: Stroke) {
 }
 
 pub fn ui_tool(p: &egui::Painter, rect: Rect, tool: Tool) {
-    let outline = if p.ctx().global_style().visuals.dark_mode {
-        Color32::from_rgb(203, 214, 204)
-    } else {
-        OUTLINE
-    };
-    paint_tool(p, rect, tool, outline);
+    paint_tool(p, rect, tool, ToolPalette::for_painter(p));
 }
 
-fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
+fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, colors: ToolPalette) {
+    let ToolPalette {
+        outline,
+        red,
+        blue,
+        gold,
+        yellow,
+        pink,
+        pink_edge,
+        face,
+        metal,
+        warm_face,
+    } = colors;
     let c = rect.center();
     let r = rect.width().min(rect.height()) * 0.36;
     let xy = |x: f32, y: f32| c + egui::vec2(x * r, y * r);
     let color = match tool {
         Tool::Select => outline,
-        Tool::TapeMeasure | Tool::Protractor => GOLD,
+        Tool::TapeMeasure | Tool::Protractor => gold,
         Tool::Erase
         | Tool::PushPull
         | Tool::Scale
         | Tool::Offset
         | Tool::Paint
         | Tool::Flip
-        | Tool::Dimensions => BLUE,
-        Tool::OuterShell | Tool::Union | Tool::Intersect | Tool::Trim | Tool::Split => BLUE,
-        _ => RED,
+        | Tool::Dimensions => blue,
+        Tool::OuterShell | Tool::Union | Tool::Intersect | Tool::Trim | Tool::Split => blue,
+        _ => red,
     };
     let stroke = Stroke::new(1.65, color);
     match tool {
@@ -74,14 +119,14 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
             p.line_segment([xy(-0.75, 0.75), xy(0.55, -0.55)], Stroke::new(3.5, color));
             p.add(egui::Shape::convex_polygon(
                 vec![xy(0.55, -0.55), xy(0.75, -0.95), xy(1., -0.7)],
-                PINK,
-                Stroke::new(1., PINK_EDGE),
+                pink,
+                Stroke::new(1., pink_edge),
             ));
-            p.line_segment([xy(-0.75, 0.75), xy(-0.95, 0.95)], Stroke::new(2., GOLD));
+            p.line_segment([xy(-0.75, 0.75), xy(-0.95, 0.95)], Stroke::new(2., gold));
             p.line_segment([xy(-0.9, 1.), xy(-0.25, 1.)], Stroke::new(1., outline));
         }
         Tool::Rectangle => {
-            p.rect_filled(Rect::from_two_pos(xy(-1., -0.7), xy(1., 0.7)), 0, FACE);
+            p.rect_filled(Rect::from_two_pos(xy(-1., -0.7), xy(1., 0.7)), 0, face);
             p.rect_stroke(
                 Rect::from_two_pos(xy(-1., -0.7), xy(1., 0.7)),
                 0,
@@ -90,7 +135,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
             );
         }
         Tool::Circle => {
-            p.circle_filled(c, r, FACE);
+            p.circle_filled(c, r, face);
             p.circle_stroke(c, r, stroke);
         }
         Tool::Polygon => {
@@ -101,7 +146,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
                         xy(angle.cos(), angle.sin())
                     })
                     .collect(),
-                FACE,
+                face,
                 stroke,
             ));
         }
@@ -124,7 +169,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
                     xy(0.95, -0.05),
                     xy(-0.1, 1.),
                 ],
-                BLUE,
+                blue,
                 stroke,
             ));
             p.add(egui::Shape::convex_polygon(
@@ -134,27 +179,27 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
                     xy(0.35, 0.55),
                     xy(-0.1, 1.),
                 ],
-                FACE,
+                face,
                 stroke,
             ));
-            p.line_segment([xy(-0.1, 1.), xy(0.95, 1.)], Stroke::new(1.2, BLUE));
+            p.line_segment([xy(-0.1, 1.), xy(0.95, 1.)], Stroke::new(1.2, blue));
         }
         Tool::PushPull => {
             p.add(egui::Shape::convex_polygon(
                 vec![xy(-1., 0.5), xy(0., 0.), xy(1., 0.5), xy(0., 1.)],
-                FACE,
+                face,
                 stroke,
             ));
             p.arrow(
                 xy(0., 0.35),
                 egui::vec2(0., -r * 1.35),
-                Stroke::new(2., RED),
+                Stroke::new(2., red),
             );
         }
         Tool::Flip => {
             p.line_segment([xy(0., -1.), xy(0., 1.)], Stroke::new(1.2, outline));
             for sign in [-1., 1.] {
-                let (fill, edge) = if sign < 0. { (FACE, BLUE) } else { (PINK, RED) };
+                let (fill, edge) = if sign < 0. { (face, blue) } else { (pink, red) };
                 p.add(egui::Shape::convex_polygon(
                     vec![xy(sign * 0.3, -0.7), xy(sign, 0.6), xy(sign * 0.3, 0.6)],
                     fill,
@@ -163,12 +208,8 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
             }
         }
         Tool::OuterShell | Tool::Union | Tool::Intersect | Tool::Trim | Tool::Split => {
-            p.rect_filled(Rect::from_two_pos(xy(-1., -0.8), xy(0.3, 0.5)), 0, FACE);
-            p.rect_filled(
-                Rect::from_two_pos(xy(-0.3, -0.2), xy(1., 1.)),
-                0,
-                Color32::from_rgb(249, 219, 166),
-            );
+            p.rect_filled(Rect::from_two_pos(xy(-1., -0.8), xy(0.3, 0.5)), 0, face);
+            p.rect_filled(Rect::from_two_pos(xy(-0.3, -0.2), xy(1., 1.)), 0, warm_face);
             p.rect_stroke(
                 Rect::from_two_pos(xy(-1., -0.8), xy(0.3, 0.5)),
                 0,
@@ -178,7 +219,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
             p.rect_stroke(
                 Rect::from_two_pos(xy(-0.3, -0.2), xy(1., 1.)),
                 0,
-                Stroke::new(1.65, GOLD),
+                Stroke::new(1.65, gold),
                 egui::StrokeKind::Inside,
             );
             if tool == Tool::OuterShell {
@@ -204,10 +245,10 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
                 p.rect_filled(Rect::from_two_pos(xy(-0.3, -0.2), xy(0.3, 0.5)), 0, color);
             }
             if tool == Tool::Trim {
-                p.line_segment([xy(0.3, -0.2), xy(0.3, 0.5)], Stroke::new(3., RED));
+                p.line_segment([xy(0.3, -0.2), xy(0.3, 0.5)], Stroke::new(3., red));
             }
             if tool == Tool::Split {
-                p.line_segment([xy(-0.1, -1.), xy(-0.1, 1.1)], Stroke::new(2.5, RED));
+                p.line_segment([xy(-0.1, -1.), xy(-0.1, 1.1)], Stroke::new(2.5, red));
             }
         }
         Tool::Scale => {
@@ -220,7 +261,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
             p.arrow(
                 xy(-0.45, 0.45),
                 egui::vec2(r * 1.1, -r * 1.1),
-                Stroke::new(1.65, RED),
+                Stroke::new(1.65, red),
             );
             for (x, y) in [(-0.9, -0.9), (-0.9, 0.9), (0.9, 0.9), (0.9, -0.9)] {
                 p.rect_filled(
@@ -238,7 +279,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
                     if scale == 1. {
                         stroke
                     } else {
-                        Stroke::new(1.65, RED)
+                        Stroke::new(1.65, red)
                     },
                     egui::StrokeKind::Inside,
                 );
@@ -270,7 +311,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
                     bucket(0.48, 0.65),
                     bucket(-0.48, 0.65),
                 ],
-                METAL,
+                metal,
                 stroke,
             ));
             p.add(egui::Shape::convex_polygon(
@@ -280,8 +321,8 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
                         bucket(0.64 * angle.cos(), -0.48 + 0.16 * angle.sin())
                     })
                     .collect(),
-                BLUE,
-                Stroke::new(1.1, BLUE),
+                blue,
+                Stroke::new(1.1, blue),
             ));
             p.add(egui::Shape::line(
                 vec![bucket(0.64, -0.48), xy(0.94, 0.16), xy(0.98, 0.36)],
@@ -298,19 +339,19 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
                     xy(0.78, 0.79),
                     xy(0.84, 0.63),
                 ],
-                BLUE,
+                blue,
                 Stroke::NONE,
             ));
         }
         Tool::TapeMeasure => {
-            p.rect_filled(Rect::from_two_pos(xy(-0.9, -0.8), xy(0.5, 0.6)), 3, YELLOW);
+            p.rect_filled(Rect::from_two_pos(xy(-0.9, -0.8), xy(0.5, 0.6)), 3, yellow);
             p.rect_stroke(
                 Rect::from_two_pos(xy(-0.9, -0.8), xy(0.5, 0.6)),
                 3,
                 stroke,
                 egui::StrokeKind::Inside,
             );
-            p.circle_filled(xy(-0.2, -0.1), r * 0.35, METAL);
+            p.circle_filled(xy(-0.2, -0.1), r * 0.35, metal);
             p.circle_stroke(xy(-0.2, -0.1), r * 0.35, Stroke::new(1.2, outline));
             p.add(egui::Shape::line(
                 vec![xy(0.5, 0.3), xy(1., 0.3), xy(1., 0.9), xy(-0.1, 0.9)],
@@ -328,7 +369,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
                         xy(angle.cos(), -angle.sin() + 0.4)
                     })
                     .collect(),
-                YELLOW,
+                yellow,
                 stroke,
             ));
             for i in 0..=6 {
@@ -352,7 +393,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
             p.line_segment([xy(0.6, 0.), xy(1., -0.6)], stroke);
             p.line_segment([xy(-0.4, 0.6), xy(0.4, 0.6)], Stroke::new(1.65, outline));
             for x in [-0.8, 0.8] {
-                p.circle_filled(xy(x, -0.3), 2., RED);
+                p.circle_filled(xy(x, -0.3), 2., red);
             }
         }
         Tool::Orbit => {
@@ -366,7 +407,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
                 egui::vec2(r * 0.48, r),
                 stroke,
             ));
-            p.circle_filled(c, 2., RED);
+            p.circle_filled(c, 2., red);
             p.line_segment([xy(0.75, -0.4), xy(1.06, -0.37)], stroke);
             p.line_segment([xy(1.06, -0.37), xy(0.97, -0.75)], stroke);
         }

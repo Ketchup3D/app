@@ -1,0 +1,96 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TRUNK_VERSION: '0.22.0'
+
+jobs:
+  build:
+    name: Package website and browser app
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Configure GitHub Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Install Rust and WebAssembly target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: github-pages-wasm
+
+      - name: Install Trunk
+        run: cargo install trunk --locked --version "$TRUNK_VERSION"
+
+      - name: Build browser app
+        run: trunk build --release --locked --dist dist/site/play --public-url ./
+
+      - name: Stage landing page and shared assets
+        run: |
+          cp site/index.html site/styles.css dist/site/
+          mkdir -p dist/site/assets
+          cp -R assets/branding assets/screenshots dist/site/assets/
+          test -f dist/site/index.html
+          test -f dist/site/play/index.html
+          test -n "$(find dist/site/play -name '*.wasm' -print -quit)"
+
+      - name: Set canonical and social sharing URLs
+        env:
+          PAGES_BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          python3 - <<'PY'
+          import html
+          import os
+          from pathlib import Path
+
+          base_url = os.environ["PAGES_BASE_URL"].rstrip("/") + "/"
+          if not base_url.startswith("https://"):
+              raise SystemExit("GitHub Pages must supply an HTTPS public URL")
+          page = Path("dist/site/index.html")
+          page.write_text(page.read_text().replace(
+              "https://ketchup3d.github.io/app/", html.escape(base_url, quote=True)
+          ))
+          PY
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist/site
+
+  deploy:
+    name: Publish GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -48,10 +48,10 @@ mod move_tool;
 mod precision;
 #[path = "projects.rs"]
 mod projects;
-#[path = "sidebar.rs"]
-mod sidebar;
 #[path = "shortcuts.rs"]
 mod shortcuts;
+#[path = "sidebar.rs"]
+mod sidebar;
 #[path = "solid_tools.rs"]
 mod solid_tools;
 use move_tool::{CopyArray, MoveCopy};
@@ -132,23 +132,62 @@ struct Drawing {
 }
 
 impl Drawing {
+    fn set_normal(&mut self, normal: DVec3) {
+        let u = (DVec3::X - normal * normal.x)
+            .try_normalize()
+            .unwrap_or(DVec3::Y);
+        self.normal = normal;
+        self.u = u;
+        self.v = normal.cross(u);
+    }
+
     fn set_lock(&mut self, lock: Option<Axis>) {
         let normal = lock.map(Axis::vector).unwrap_or(self.surface_normal);
         if normal == self.normal {
             return;
         }
-        let u = (DVec3::X - normal * normal.x)
-            .try_normalize()
-            .unwrap_or(DVec3::Y);
-        let v = normal.cross(u);
+        let (u, v) = (self.u, self.v);
+        self.set_normal(normal);
         // Preserve a sampled stroke's size and shape when changing its plane.
         for point in &mut self.points {
             let delta = *point - self.origin;
-            *point = self.origin + u * delta.dot(self.u) + v * delta.dot(self.v);
+            *point = self.origin + self.u * delta.dot(u) + self.v * delta.dot(v);
         }
-        self.normal = normal;
-        self.u = u;
-        self.v = v;
+    }
+
+    fn align_to(&mut self, point: DVec3, eye: DVec3) {
+        let delta = point - self.origin;
+        if delta.dot(self.normal).abs() < 1e-6 {
+            return;
+        }
+        let Some(direction) = delta.try_normalize() else {
+            return;
+        };
+        let view = (eye - self.origin).normalize();
+        // Prefer a world plane containing both points. For a vertical radius,
+        // choose the plane that faces the camera rather than one seen edge-on.
+        let normal = [DVec3::X, DVec3::Y, DVec3::Z]
+            .into_iter()
+            .filter(|normal| delta.dot(*normal).abs() < 1e-6)
+            .max_by(|a, b| a.dot(view).abs().total_cmp(&b.dot(view).abs()))
+            .or_else(|| {
+                // A tilted target still needs an exact, planar shape. Keep the
+                // normal as close to the current orientation as possible.
+                let projected = self.normal - direction * self.normal.dot(direction);
+                (projected.length_squared() > 1e-12).then(|| projected.normalize())
+            })
+            .or_else(|| {
+                let projected = view - direction * view.dot(direction);
+                (projected.length_squared() > 1e-12).then(|| projected.normalize())
+            })
+            .unwrap_or_else(|| direction.cross(DVec3::X).normalize());
+        let normal = if normal.dot(self.normal) < 0. {
+            -normal
+        } else {
+            normal
+        };
+        // Automatic inference changes the working plane, never earlier samples.
+        self.set_normal(normal);
     }
 }
 
@@ -836,12 +875,18 @@ impl KetchupApp {
         let drawing = self.drawing.as_ref()?;
         let size = dv(self.viewport.size());
         let pixel = dv(pos - self.viewport.min);
-        // Stay on the initial surface plane or the explicitly locked plane.
-        // Directional axis inference would flatten a rectangle near its corners.
-        let inferred = self.infer_snap(pos, None, None, false);
+        // Unlocked shapes can acquire targets on any axis; their working plane
+        // follows the target. Explicit plane locks reject incompatible targets.
+        let inferred = self.infer_snap(
+            pos,
+            (self.lock.is_none()).then_some(drawing.origin),
+            None,
+            self.lock.is_none() && self.doc.snap_to_axes,
+        );
         if let Some(snap) = inferred.filter(|snap| {
             snap.kind != Inference::Plane
-                && (snap.point - drawing.origin).dot(drawing.normal).abs() < 1e-6
+                && (self.lock.is_none()
+                    || (snap.point - drawing.origin).dot(drawing.normal).abs() < 1e-6)
         }) {
             return Some(snap);
         }
@@ -873,6 +918,14 @@ impl KetchupApp {
             point,
             kind: Inference::Plane,
         })
+    }
+    fn align_drawing_plane(&mut self) {
+        if self.lock.is_none()
+            && let Some(snap) = self.snap.filter(|snap| snap.kind != Inference::Plane)
+            && let Some(drawing) = &mut self.drawing
+        {
+            drawing.align_to(snap.point, self.doc.camera.eye());
+        }
     }
     fn drawing_points(&self) -> Vec<DVec3> {
         self.precise_drawing_points()
@@ -997,7 +1050,7 @@ impl KetchupApp {
         let pixel = dv(pos - self.viewport.min);
         let ray = self.doc.camera.ray(pixel, size);
         if self.tool == Tool::Paint {
-            if let Some((face, _, _)) = self.doc.model.nearest_editable_face(ray) {
+            if let Some((face, _, _)) = self.doc.model.nearest_context_face(ray) {
                 let before = self.doc.model.clone();
                 match self.doc.model.paint_face(face, self.paint_color) {
                     Ok(()) => self.finish_edit("Paint face", before, ctx),
@@ -2001,7 +2054,7 @@ impl KetchupApp {
                 },
             );
         }
-        let color = if active { ACCENT } else { colors.ink };
+        let color = if active { colors.accent } else { colors.ink };
         icons::ui_tool(
             ui.painter(),
             Rect::from_center_size(
@@ -2090,10 +2143,10 @@ impl KetchupApp {
                                         egui::vec2(3., 24.),
                                     ),
                                     2,
-                                    ACCENT,
+                                    colors.accent,
                                 );
                             }
-                            let color = if active { ACCENT } else { colors.ink };
+                            let color = if active { colors.accent } else { colors.ink };
                             icons::ui_tool(
                                 ui.painter(),
                                 Rect::from_center_size(
@@ -2337,7 +2390,7 @@ impl KetchupApp {
             ui.add_space(14.);
             if ui
                 .add(
-                    egui::Button::new(RichText::new("Erase selection").color(ACCENT))
+                    egui::Button::new(RichText::new("Erase selection").color(colors.accent))
                         .min_size(egui::vec2(ui.available_width(), 32.)),
                 )
                 .clicked()
@@ -2410,11 +2463,27 @@ impl KetchupApp {
         }
     }
 
-    fn sweep_erase(&self, from: Pos2, to: Pos2) -> BTreeSet<u64> {
+    fn erase_target(&mut self, pos: Pos2) -> Option<u64> {
+        let pixel = dv(pos - self.viewport.min);
+        let size = dv(self.viewport.size());
+        let id = self.pick_at(pixel, size, false).or_else(|| {
+            self.picking_cache
+                .nearest(
+                    &self.face_cache,
+                    &self.entity_cache,
+                    self.doc.camera.ray(pixel, size),
+                    false,
+                )
+                .and_then(|(id, _, _)| self.entity_cache.get(id).context)
+        })?;
+        (!self.doc.model.is_locked(id)).then_some(id)
+    }
+    fn sweep_erase(&mut self, from: Pos2, to: Pos2) -> BTreeSet<u64> {
         let a = dv(from - self.viewport.min);
         let b = dv(to - self.viewport.min);
         let size = dv(self.viewport.size());
-        self.doc
+        let mut ids: BTreeSet<_> = self
+            .doc
             .model
             .edges
             .values()
@@ -2435,7 +2504,18 @@ impl KetchupApp {
                     .then(|| self.doc.model.entity_in_context(edge.id))
                     .flatten()
             })
-            .collect()
+            .collect();
+        // Boundary crossings are handled by the edge sweep. Pick interiors
+        // explicitly so clicks and strokes contained within a face work too.
+        if let Some(id) = self.erase_target(from) {
+            ids.insert(id);
+        }
+        if to != from {
+            if let Some(id) = self.erase_target(to) {
+                ids.insert(id);
+            }
+        }
+        ids
     }
     fn prepare_picking(&mut self) {
         #[cfg(test)]
@@ -2503,14 +2583,16 @@ impl KetchupApp {
         }
         let local = dv(pos - self.viewport.min);
         let size = dv(self.viewport.size());
-        self.hover = if matches!(self.tool, Tool::PushPull | Tool::Offset | Tool::Paint) {
+        self.hover = if self.tool == Tool::Erase {
+            self.erase_target(pos)
+        } else if matches!(self.tool, Tool::PushPull | Tool::Offset | Tool::Paint) {
             self.prepare_picking();
             self.picking_cache
                 .nearest(
                     &self.face_cache,
                     &self.entity_cache,
                     self.doc.camera.ray(local, size),
-                    true,
+                    self.tool != Tool::Paint,
                 )
                 .map(|(id, _, _)| id)
         } else if matches!(self.tool, Tool::Select | Tool::Move | Tool::Scale)
@@ -2546,8 +2628,12 @@ impl KetchupApp {
             }
             if self.drawing.is_some() && self.paste_preview.is_none() {
                 self.snap = self.drawing_snap(pos);
+                self.align_drawing_plane();
             }
             self.update_drawing_inference(pos);
+            if self.paste_preview.is_none() {
+                self.align_drawing_plane();
+            }
         }
         if self.modeling.is_some() {
             self.update_modeling(pos);
@@ -2967,7 +3053,7 @@ impl KetchupApp {
                                 ids.extend(self.sweep_erase(gesture.last, pos));
                                 let before = self.doc.model.clone();
                                 self.doc.model.erase(&ids);
-                                self.finish_edit("Erase edges", before, ctx);
+                                self.finish_edit("Erase geometry", before, ctx);
                             }
                             GestureKind::Modeling
                                 if self.viewport.contains(pos)
@@ -3162,6 +3248,13 @@ impl KetchupApp {
             });
         }
         let lighting = display_scene::FaceLighting::new(camera);
+        let erasing = match &self.gesture {
+            Some(Gesture {
+                kind: GestureKind::Erase { ids },
+                ..
+            }) => Some(ids),
+            _ => None,
+        };
         for face in visible_faces
             .into_iter()
             .filter(|_| display.face_style != ketchup_core::FaceStyle::Wireframe)
@@ -3191,6 +3284,13 @@ impl KetchupApp {
             };
             let color = if entities.get(face.id).context.is_none() {
                 faces.inactive
+            } else if erasing.is_some_and(|ids| {
+                entities
+                    .get(face.id)
+                    .context
+                    .is_some_and(|id| ids.contains(&id))
+            }) {
+                Color32::from_rgb(220, 91, 76)
             } else if self.tool == Tool::Paint && model.face_colors.contains_key(&face.id) {
                 material
             } else if selected_entities.contains(&face.id) {
@@ -3221,13 +3321,6 @@ impl KetchupApp {
                 }
             }
         }
-        let erasing = match &self.gesture {
-            Some(Gesture {
-                kind: GestureKind::Erase { ids },
-                ..
-            }) => Some(ids),
-            _ => None,
-        };
         display_scene::paint_sections(
             &mut mesh,
             camera,
@@ -3348,11 +3441,7 @@ impl KetchupApp {
                 .filter(|f| !preview.clipboard.model.is_hidden(f.id))
             {
                 for triangle in &self.paste_face_cache.get(face.id).triangles {
-                    mesh.world_triangle(
-                        camera,
-                        triangle.map(|p| p + offset),
-                        faces.paste,
-                    );
+                    mesh.world_triangle(camera, triangle.map(|p| p + offset), faces.paste);
                 }
             }
             for edge in preview
@@ -3387,7 +3476,7 @@ impl KetchupApp {
                     if let Some((a, b)) = camera.segment(corner(i), corner(i | (1 << axis)), size) {
                         p.extend(egui::Shape::dashed_line(
                             &[rect.min + pv(a), rect.min + pv(b)],
-                            Stroke::new(1., MUTED),
+                            Stroke::new(1., colors.muted),
                             4.,
                             4.,
                         ));
@@ -3405,7 +3494,7 @@ impl KetchupApp {
                     .picking_cache
                     .visible(&self.face_cache, entities, camera, size, DVec3::ZERO)
                 {
-                    p.circle_filled(origin, 2.5, MUTED);
+                    p.circle_filled(origin, 2.5, colors.muted);
                 }
             }
         }
@@ -3414,8 +3503,8 @@ impl KetchupApp {
                 let (a, b) = model.points(e);
                 for pt in [a, b] {
                     if let Some(point) = screen(pt) {
-                        p.circle_filled(point, 3., PAPER);
-                        p.circle_stroke(point, 3., Stroke::new(1.3, ACCENT));
+                        p.circle_filled(point, 3., colors.paper);
+                        p.circle_stroke(point, 3., Stroke::new(1.3, colors.accent));
                     }
                 }
             }
@@ -3429,6 +3518,10 @@ impl KetchupApp {
                 }
                 match self.line_preview_snap()?.kind {
                     Inference::OnAxis(axis) => Some((DVec3::ZERO, axis)),
+                    Inference::Axis(axis) => self
+                        .line_start
+                        .or_else(|| self.drawing.as_ref().map(|d| d.origin))
+                        .map(|origin| (origin, axis)),
                     _ => self
                         .preview_alignment()
                         .zip(self.line_start)
@@ -3452,14 +3545,14 @@ impl KetchupApp {
             }
             if self.drawing_guide.is_some() {
                 if let Some(point) = screen(origin) {
-                    p.circle_filled(point, 3., PAPER);
+                    p.circle_filled(point, 3., colors.paper);
                     p.circle_stroke(point, 3., Stroke::new(1.5, axis_color(axis)));
                 }
             }
         }
         if let Some((source, target)) = self.active_drawing_projection().filter(|_| display.guides)
         {
-            let color = self.lock.map(axis_color).unwrap_or(GREEN);
+            let color = self.lock.map(axis_color).unwrap_or(colors.green);
             if let Some((a, b)) = camera.segment(source, target, size) {
                 p.extend(egui::Shape::dashed_line(
                     &[rect.min + pv(a), rect.min + pv(b)],
@@ -3469,15 +3562,15 @@ impl KetchupApp {
                 ));
             }
             if let Some(point) = screen(source) {
-                p.circle_filled(point, 3., PAPER);
+                p.circle_filled(point, 3., colors.paper);
                 p.circle_stroke(point, 3., Stroke::new(1.5, color));
             }
         }
         if self.tool.is_drawing() {
             if let Some(start) = self.line_start.or(self.drawing.as_ref().map(|d| d.origin)) {
                 if let Some(point) = screen(start) {
-                    p.circle_filled(point, 3.5, PAPER);
-                    p.circle_stroke(point, 3.5, Stroke::new(1.5, INK));
+                    p.circle_filled(point, 3.5, colors.paper);
+                    p.circle_stroke(point, 3.5, Stroke::new(1.5, colors.ink));
                 }
             }
             if let Some(snap) = self.line_preview_snap() {
@@ -3485,7 +3578,7 @@ impl KetchupApp {
                     let color = match snap.kind {
                         Inference::Axis(a) | Inference::OnAxis(a) => axis_color(a),
                         Inference::Midpoint => Color32::from_rgb(85, 150, 183),
-                        _ => GREEN,
+                        _ => colors.green,
                     };
                     let color = self
                         .lock
@@ -3500,7 +3593,7 @@ impl KetchupApp {
                                     point + egui::vec2(-5., 4.),
                                     point + egui::vec2(5., 4.),
                                 ],
-                                PAPER,
+                                colors.paper,
                                 Stroke::new(1.5, color),
                             ));
                         }
@@ -3508,7 +3601,7 @@ impl KetchupApp {
                             p.rect_filled(
                                 Rect::from_center_size(point, egui::vec2(7., 7.)),
                                 1,
-                                PAPER,
+                                colors.paper,
                             );
                             p.rect_stroke(
                                 Rect::from_center_size(point, egui::vec2(7., 7.)),
@@ -3538,7 +3631,7 @@ impl KetchupApp {
                             galley.size() + egui::vec2(12., 8.),
                         ),
                         4,
-                        PAPER.gamma_multiply(0.95),
+                        colors.paper.gamma_multiply(0.95),
                     );
                     p.galley(at, galley, color);
                     if let Some(start) = self.line_start {
@@ -3556,7 +3649,7 @@ impl KetchupApp {
                                 Align2::CENTER_CENTER,
                                 format_length(start.distance(snap.point)),
                                 FontId::monospace(11.),
-                                INK,
+                                colors.ink,
                             );
                         }
                     }
@@ -3574,7 +3667,7 @@ impl KetchupApp {
                 let r = Rect::from_two_pos(*start, *last);
                 let crossing = start.x > last.x;
                 let color = if crossing {
-                    GREEN
+                    colors.green
                 } else {
                     Color32::from_rgb(89, 136, 173)
                 };
@@ -3619,7 +3712,11 @@ impl KetchupApp {
             let galley = p.layout_no_wrap(
                 text,
                 FontId::monospace(12.),
-                if edit.error.is_some() { ACCENT } else { INK },
+                if edit.error.is_some() {
+                    colors.accent
+                } else {
+                    colors.ink
+                },
             );
             let at = rect.left_bottom() + egui::vec2(20., -40.);
             p.rect_filled(
@@ -3628,9 +3725,9 @@ impl KetchupApp {
                     galley.size() + egui::vec2(16., 12.),
                 ),
                 5,
-                PAPER,
+                colors.paper,
             );
-            p.galley(at, galley, INK);
+            p.galley(at, galley, colors.ink);
             if self.tool == Tool::Move {
                 if display.guides && self.length_input.is_empty() {
                     for guide in &edit.guides {
@@ -3653,8 +3750,8 @@ impl KetchupApp {
                     }
                     if !edit.guides.is_empty() {
                         if let Some(point) = screen(edit.anchor + edit.direction) {
-                            p.circle_filled(point, 4., PAPER);
-                            p.circle_stroke(point, 4., Stroke::new(1.5, GREEN));
+                            p.circle_filled(point, 4., colors.paper);
+                            p.circle_stroke(point, 4., Stroke::new(1.5, colors.green));
                         }
                     }
                 }
@@ -3663,7 +3760,7 @@ impl KetchupApp {
                 {
                     p.line_segment(
                         [a, b],
-                        Stroke::new(1.5, self.lock.map(axis_color).unwrap_or(GREEN)),
+                        Stroke::new(1.5, self.lock.map(axis_color).unwrap_or(colors.green)),
                     );
                 }
             }
@@ -3675,16 +3772,21 @@ impl KetchupApp {
                 let galley = p.layout(
                     notice.clone(),
                     FontId::proportional(12.),
-                    INK,
+                    colors.ink,
                     (rect.width() - 80.).clamp(120., 600.),
                 );
                 let r = Rect::from_min_size(
                     rect.left_top() + egui::vec2(20., 20.),
                     galley.size() + egui::vec2(24., 20.),
                 );
-                p.rect_filled(r, 7, PAPER);
-                p.rect_stroke(r, 7, Stroke::new(1., BORDER), egui::StrokeKind::Inside);
-                p.galley(r.min + egui::vec2(12., 10.), galley, INK);
+                p.rect_filled(r, 7, colors.paper);
+                p.rect_stroke(
+                    r,
+                    7,
+                    Stroke::new(1., colors.border),
+                    egui::StrokeKind::Inside,
+                );
+                p.galley(r.min + egui::vec2(12., 10.), galley, colors.ink);
             }
         }
     }

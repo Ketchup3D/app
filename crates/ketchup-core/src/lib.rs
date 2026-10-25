@@ -202,7 +202,7 @@ impl Tool {
             Self::Freehand => {
                 "Drag to draw · Release to finish · Arrow keys lock the drawing plane"
             }
-            Self::Erase => "Click or drag across edges to erase · Ctrl / ⌘ Z to undo",
+            Self::Erase => "Click or drag across edges or faces to erase · Ctrl / ⌘ Z to undo",
             Self::Flip => {
                 "Select geometry · Choose a red, green, or blue flip plane · Arrow keys choose X / Y / Z"
             }

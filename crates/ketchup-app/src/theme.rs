@@ -14,6 +14,7 @@ const PREFERENCE_KEY: &str = "ketchup.theme.v1";
 #[derive(Clone, Copy)]
 pub struct Palette {
     pub ink: Color32,
+    pub accent: Color32,
     pub muted: Color32,
     pub border: Color32,
     pub paper: Color32,
@@ -29,10 +30,15 @@ impl Palette {
         Self::new(ui.visuals().dark_mode)
     }
 
+    pub fn for_painter(p: &egui::Painter) -> Self {
+        Self::new(p.ctx().global_style().visuals.dark_mode)
+    }
+
     fn new(dark: bool) -> Self {
         if dark {
             Self {
                 ink: Color32::from_rgb(229, 234, 226),
+                accent: Color32::from_rgb(246, 142, 125),
                 muted: Color32::from_rgb(163, 175, 163),
                 border: Color32::from_rgb(65, 77, 67),
                 paper: Color32::from_rgb(30, 37, 32),
@@ -45,6 +51,7 @@ impl Palette {
         } else {
             Self {
                 ink: INK,
+                accent: ACCENT,
                 muted: MUTED,
                 border: BORDER,
                 paper: PAPER,
@@ -155,7 +162,7 @@ fn style(dark: bool) -> egui::Style {
     visuals.faint_bg_color = colors.canvas;
     visuals.extreme_bg_color = colors.surface;
     visuals.selection.bg_fill = colors.selected;
-    visuals.selection.stroke = Stroke::new(1., ACCENT);
+    visuals.selection.stroke = Stroke::new(1., colors.accent);
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1., colors.border);
     visuals.widgets.inactive.bg_fill = colors.canvas;
     visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
@@ -167,7 +174,7 @@ fn style(dark: bool) -> egui::Style {
     visuals.widgets.hovered.fg_stroke = Stroke::new(1., colors.ink);
     visuals.widgets.active.bg_fill = colors.selected;
     visuals.widgets.active.weak_bg_fill = colors.selected;
-    visuals.widgets.active.bg_stroke = Stroke::new(1., ACCENT);
+    visuals.widgets.active.bg_stroke = Stroke::new(1., colors.accent);
     visuals.widgets.active.fg_stroke = Stroke::new(1., colors.ink);
     style.visuals = visuals;
     style.spacing.item_spacing = egui::vec2(8., 8.);
