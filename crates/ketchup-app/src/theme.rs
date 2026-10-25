@@ -58,6 +58,66 @@ impl Palette {
     }
 }
 
+/// Theme defaults for model faces and their style previews. User paint and tag
+/// colors stay independent of the theme.
+#[derive(Clone, Copy)]
+pub struct FacePalette {
+    pub front: Color32,
+    pub side: Color32,
+    pub shaded_side: Color32,
+    pub back: Color32,
+    pub inactive: Color32,
+    pub selected: Color32,
+    pub hovered: Color32,
+    pub paste: Color32,
+    pub section: Color32,
+    pub materials: [Color32; 3],
+}
+
+impl FacePalette {
+    pub fn for_ui(ui: &egui::Ui) -> Self {
+        Self::new(ui.visuals().dark_mode)
+    }
+
+    fn new(dark: bool) -> Self {
+        if dark {
+            Self {
+                front: Color32::from_rgb(112, 128, 116),
+                side: Color32::from_rgb(84, 101, 88),
+                shaded_side: Color32::from_rgb(70, 88, 76),
+                back: Color32::from_rgb(77, 100, 119),
+                inactive: Color32::from_rgb(52, 62, 54),
+                selected: Color32::from_rgb(136, 78, 57),
+                hovered: Color32::from_rgb(78, 110, 76),
+                paste: Color32::from_rgb(86, 117, 77),
+                section: Color32::from_rgb(124, 79, 61),
+                materials: [
+                    Color32::from_rgb(162, 124, 68),
+                    Color32::from_rgb(129, 71, 54),
+                    Color32::from_rgb(63, 105, 91),
+                ],
+            }
+        } else {
+            Self {
+                front: Color32::from_rgb(244, 247, 239),
+                side: Color32::from_rgb(210, 218, 207),
+                shaded_side: Color32::from_rgb(169, 183, 168),
+                back: Color32::from_rgb(150, 172, 185),
+                inactive: Color32::from_rgb(231, 234, 225),
+                selected: Color32::from_rgb(244, 202, 181),
+                hovered: Color32::from_rgb(208, 227, 202),
+                paste: Color32::from_rgb(218, 232, 207),
+                section: Color32::from_rgb(183, 133, 111),
+                materials: [
+                    Color32::from_rgb(233, 192, 128),
+                    Color32::from_rgb(191, 108, 83),
+                    Color32::from_rgb(106, 153, 139),
+                ],
+            }
+        }
+    }
+}
+
 pub fn apply(ctx: &egui::Context) {
     ctx.set_style_of(egui::Theme::Light, style(false));
     ctx.set_style_of(egui::Theme::Dark, style(true));

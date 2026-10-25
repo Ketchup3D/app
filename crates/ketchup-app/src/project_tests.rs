@@ -56,7 +56,7 @@ fn opening_project_replaces_state_and_resets_history() {
         &ctx,
     );
     assert_eq!(app.doc.model, model);
-    assert_eq!(app.doc.name, "Opened project");
+    assert_eq!(app.doc.name, "opened");
     assert!(!app.doc.snap_to_geometry);
     assert_eq!(app.project.path, Some(path));
     assert!(!app.project.modified);
@@ -97,7 +97,10 @@ fn successful_save_continues_new_only_when_all_current_changes_were_saved() {
         app.project.snapshot = Some(serde_json::to_string(&app.doc).unwrap());
         app.project.after_save = Some(projects::Action::New);
         if edited_during_save {
-            app.doc.name = "Later change".into();
+            app.doc
+                .model
+                .add_edge(DVec3::Y, DVec3::Y + DVec3::X)
+                .unwrap();
         }
         deliver(
             &mut app,
@@ -108,6 +111,23 @@ fn successful_save_continues_new_only_when_all_current_changes_were_saved() {
         assert_eq!(app.project.modified, edited_during_save);
         assert!(app.project.after_save.is_none());
     }
+}
+
+#[test]
+fn save_as_updates_the_name_without_marking_the_project_modified() {
+    let ctx = egui::Context::default();
+    let mut app = KetchupApp::with_document(Document::default(), None, true);
+    app.project.path = Some("original.ketchup".into());
+    app.project.snapshot = Some(serde_json::to_string(&app.doc).unwrap());
+    deliver(
+        &mut app,
+        Ok(Outcome::Saved(Some("New house.ketchup".into()))),
+        &ctx,
+    );
+    assert_eq!(app.doc.name, "New house");
+    assert_eq!(app.project.path, Some("New house.ketchup".into()));
+    assert!(!app.project.modified);
+    assert!(app.dirty_since.is_some());
 }
 
 #[test]

@@ -68,7 +68,7 @@ impl KetchupApp {
             );
         }
         if self.storage_recovery {
-            return Err("Your previous workspace could not be restored. Use File → Save locally now to keep this workspace before restarting.".into());
+            return Err("Your previous workspace could not be restored. Make an edit and wait for local autosave to keep this workspace before restarting.".into());
         }
         self.persist();
         if let Some(error) = &self.save_error {

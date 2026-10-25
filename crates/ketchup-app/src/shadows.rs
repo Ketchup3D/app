@@ -40,11 +40,30 @@ impl ShadowCache {
         if !self.enabled {
             return;
         }
+        let section = d.section_cuts.then_some(d.section_height);
+        // Hover/orbit frames only validate visibility; do not allocate fresh
+        // face ID lists when the cached geometry is still valid.
+        if self.key.as_ref().is_some_and(|key| {
+            key.revision == faces.revision()
+                && key.angle == d.sun_angle
+                && key.elevation == d.sun_elevation
+                && key.section == section
+                && key.receivers.iter().copied().eq(faces
+                    .iter()
+                    .filter(|(id, _)| entities.get(*id).displayed(d))
+                    .map(|(id, _)| id))
+                && key.casters.iter().copied().eq(faces
+                    .iter()
+                    .filter(|(id, _)| !entities.get(*id).hidden)
+                    .map(|(id, _)| id))
+        }) {
+            return;
+        }
         let key = Key {
             revision: faces.revision(),
             angle: d.sun_angle,
             elevation: d.sun_elevation,
-            section: d.section_cuts.then_some(d.section_height),
+            section,
             receivers: faces
                 .iter()
                 .filter(|(id, _)| entities.get(*id).displayed(d))
@@ -56,9 +75,6 @@ impl ShadowCache {
                 .map(|(id, _)| id)
                 .collect(),
         };
-        if self.key.as_ref() == Some(&key) {
-            return;
-        }
         let angle = d.sun_angle.to_radians();
         let elevation = d.sun_elevation.to_radians();
         let light = DVec3::new(
@@ -86,35 +102,7 @@ impl ShadowCache {
             let mut result = FaceShadow::default();
             for &triangle in &faces.get(id).triangles {
                 for triangle in section_triangle(triangle, key.section) {
-                    let mut lit = vec![triangle.to_vec()];
-                    let mut candidates = Vec::new();
-                    tree.query(Bounds::new(triangle, basis), &mut candidates);
-                    for index in candidates {
-                        let volume = &tree.volumes[index];
-                        if volume.face == id {
-                            continue;
-                        }
-                        let mut remaining = Vec::new();
-                        for polygon in lit {
-                            // Keep outside pieces only if there is a real
-                            // intersection; disjoint casters must not fragment
-                            // a face simply because their bounds overlap.
-                            let (inside, outside) = volume.partition(&polygon);
-                            if has_area(&inside) {
-                                triangulate(&inside, &mut result.shaded);
-                                remaining.extend(outside);
-                            } else {
-                                remaining.push(polygon);
-                            }
-                        }
-                        lit = remaining;
-                        if lit.is_empty() {
-                            break;
-                        }
-                    }
-                    for polygon in lit {
-                        triangulate(&polygon, &mut result.lit);
-                    }
+                    tree.shade(id, triangle, basis, &mut result);
                 }
             }
             if !result.shaded.is_empty() {
@@ -244,9 +232,21 @@ impl Volume {
     }
 
     fn partition(&self, polygon: &[DVec3]) -> (Vec<DVec3>, Vec<Vec<DVec3>>) {
+        // Most overlapping bounding boxes still miss the actual volume.
+        // Reject these without copying or allocating any clipped polygons.
+        if self
+            .planes
+            .iter()
+            .any(|&plane| polygon.iter().all(|&p| plane.distance(p) < 0.))
+        {
+            return (Vec::new(), Vec::new());
+        }
         let mut inside = polygon.to_vec();
         let mut outside = Vec::new();
         for &plane in &self.planes {
+            if inside.iter().all(|&p| plane.distance(p) >= 0.) {
+                continue;
+            }
             let (keep, rest) = split(&inside, plane);
             if has_area(&rest) {
                 outside.push(rest);
@@ -269,7 +269,11 @@ struct Bounds {
 }
 impl Bounds {
     fn new(triangle: Triangle, basis: [DVec3; 3]) -> Self {
-        triangle.into_iter().fold(
+        Self::polygon(&triangle, basis)
+    }
+
+    fn polygon(polygon: &[DVec3], basis: [DVec3; 3]) -> Self {
+        polygon.iter().fold(
             Self {
                 lo: DVec3::splat(f64::INFINITY),
                 hi: DVec3::splat(f64::NEG_INFINITY),
@@ -302,6 +306,8 @@ struct Node {
     start: usize,
     end: usize,
     children: Option<(usize, usize)>,
+    /// First node after this subtree in the preorder array.
+    next: usize,
 }
 struct VolumeTree {
     volumes: Vec<Volume>,
@@ -333,6 +339,7 @@ impl VolumeTree {
             start,
             end,
             children: None,
+            next: 0,
         });
         if end - start > 8 {
             let extent = bounds.hi - bounds.lo;
@@ -346,9 +353,63 @@ impl VolumeTree {
             let right = self.build(middle, end);
             self.nodes[index].children = Some((left, right));
         }
+        self.nodes[index].next = self.nodes.len();
         index
     }
 
+    fn shade(&self, face: u64, triangle: Triangle, basis: [DVec3; 3], result: &mut FaceShadow) {
+        // Continue each fragment through the hierarchy using its own bounds.
+        // A large receiver may overlap thousands of casters, but a clipped
+        // piece can skip entire subtrees instead of testing every caster.
+        let mut pending = vec![(triangle.to_vec(), Bounds::new(triangle, basis), 0)];
+        while let Some((polygon, bounds, mut index)) = pending.pop() {
+            while index < self.nodes.len() {
+                let node = &self.nodes[index];
+                if !node.bounds.overlaps(bounds) {
+                    index = node.next;
+                } else if let Some((left, _)) = node.children {
+                    index = left;
+                } else {
+                    break;
+                }
+            }
+            let Some(node) = self.nodes.get(index) else {
+                triangulate(&polygon, &mut result.lit);
+                continue;
+            };
+            let mut lit = vec![(polygon, bounds)];
+            for volume in &self.volumes[node.start..node.end] {
+                if volume.face == face {
+                    continue;
+                }
+                let mut remaining = Vec::new();
+                for (polygon, bounds) in lit {
+                    if !volume.bounds.overlaps(bounds) {
+                        remaining.push((polygon, bounds));
+                        continue;
+                    }
+                    let (inside, outside) = volume.partition(&polygon);
+                    if has_area(&inside) {
+                        triangulate(&inside, &mut result.shaded);
+                        remaining.extend(outside.into_iter().map(|polygon| {
+                            let bounds = Bounds::polygon(&polygon, basis);
+                            (polygon, bounds)
+                        }));
+                    } else {
+                        // Bounds overlap alone must not fragment a receiver.
+                        remaining.push((polygon, bounds));
+                    }
+                }
+                lit = remaining;
+                if lit.is_empty() {
+                    break;
+                }
+            }
+            pending.extend(lit.into_iter().map(|(p, b)| (p, b, node.next)));
+        }
+    }
+
+    #[cfg(test)]
     fn query(&self, receiver: Bounds, hits: &mut Vec<usize>) {
         if self.nodes.is_empty() {
             return;
@@ -622,6 +683,141 @@ mod tests {
                 .map(|(i, _)| i)
                 .collect();
             assert_eq!(hits, expected);
+        }
+    }
+
+    #[test]
+    fn fragment_traversal_matches_exhaustive_shadow_coverage() {
+        let mut seed = 42u64;
+        let mut random = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 32) as f64 / u32::MAX as f64
+        };
+        for light in [DVec3::Z, DVec3::new(1., 2., 3.).normalize()] {
+            let u = DVec3::Y.cross(light).normalize();
+            let basis = [u, light.cross(u), light];
+            let volumes = (0..128)
+                .filter_map(|id| {
+                    let a = DVec3::new(random() * 10. - 5., random() * 10. - 5., random() * 4.);
+                    Volume::new(
+                        id,
+                        [a, a + DVec3::X * (0.2 + random() * 3.), a + DVec3::Y * 2.],
+                        basis,
+                    )
+                })
+                .collect();
+            let tree = VolumeTree::new(volumes);
+            for receiver in [
+                [
+                    DVec3::new(-8., -8., -1.),
+                    DVec3::new(8., -8., -1.),
+                    DVec3::new(0., 8., -1.),
+                ],
+                [
+                    DVec3::new(-8., -8., 1.),
+                    DVec3::new(8., -8., -2.),
+                    DVec3::new(0., 8., 1.),
+                ],
+            ] {
+                let mut expected = FaceShadow::default();
+                let mut lit = vec![receiver.to_vec()];
+                // No hierarchy or bounds rejection in this reference path.
+                for volume in &tree.volumes {
+                    if volume.face == 0 {
+                        continue;
+                    }
+                    let mut remaining = Vec::new();
+                    for polygon in lit {
+                        let (inside, outside) = volume.partition(&polygon);
+                        if has_area(&inside) {
+                            triangulate(&inside, &mut expected.shaded);
+                            remaining.extend(outside);
+                        } else {
+                            remaining.push(polygon);
+                        }
+                    }
+                    lit = remaining;
+                }
+                for polygon in lit {
+                    triangulate(&polygon, &mut expected.lit);
+                }
+                let mut actual = FaceShadow::default();
+                tree.shade(0, receiver, basis, &mut actual);
+                close(area(&actual.shaded), area(&expected.shaded));
+                close(area(&actual.lit) + area(&actual.shaded), area(&[receiver]));
+                let contains = |triangles: &[Triangle], p: DVec3| {
+                    triangles.iter().any(|&[a, b, c]| {
+                        let n = (b - a).cross(c - a).normalize();
+                        [(a, b), (b, c), (c, a)]
+                            .into_iter()
+                            .all(|(a, b)| (b - a).cross(p - a).dot(n) >= -1e-9)
+                    })
+                };
+                for _ in 0..512 {
+                    let s = random();
+                    let t = random() * (1. - s);
+                    let p = receiver[0] * (1. - s - t) + receiver[1] * s + receiver[2] * t;
+                    assert_eq!(contains(&actual.shaded, p), contains(&expected.shaded, p));
+                    assert!(contains(&actual.shaded, p) || contains(&actual.lit, p));
+                }
+            }
+        }
+    }
+
+    /// Excludes model construction/triangulation; run on the same machine to compare changes.
+    #[test]
+    #[ignore = "Explicit shadow generation and rendering CPU benchmark"]
+    fn shadow_workload_benchmark() {
+        use crate::renderer::Mesh;
+        use eframe::egui::Color32;
+        use ketchup_core::{Camera, DVec2};
+        use std::{hint::black_box, time::Instant};
+
+        for count in [256, 1024] {
+            let mut model = crate::picking::tests::triangle_grid(count);
+            for vertex in model.vertices.values_mut() {
+                vertex.position.z = 3.;
+            }
+            let floor = square(&mut model, DVec3::new(96., 24., 0.), 110.);
+            let mut faces = FaceCache::default();
+            faces.update(&model);
+            let mut entities = EntityCache::default();
+            entities.update(&model);
+            let mut cache = ShadowCache::default();
+            let mut d = settings();
+            let start = Instant::now();
+            for angle in [0., 15., 30.] {
+                d.sun_angle = angle;
+                cache.update(&faces, &entities, &d);
+            }
+            let generation = start.elapsed() / 3;
+            let shadow = cache.get(floor).unwrap();
+            let triangles = shadow.lit.len() + shadow.shaded.len();
+            let mut camera = Camera::default();
+            let size = DVec2::new(1200., 800.);
+            camera.fit(model.bounds(), size);
+            let start = Instant::now();
+            for _ in 0..20 {
+                cache.update(&faces, &entities, &d);
+                let mut mesh = Mesh::new(&camera, size);
+                for (id, face) in faces.iter() {
+                    if let Some(shadow) = cache.get(id) {
+                        mesh.shadow_face(&face.triangles, shadow, Color32::WHITE, Color32::GRAY);
+                    } else {
+                        for &t in &face.triangles {
+                            mesh.world_triangle(&camera, t, Color32::WHITE);
+                        }
+                    }
+                }
+                for edge in model.edges.values() {
+                    mesh.styled_edge(edge, &model, 1., Color32::BLACK, false, false);
+                }
+                black_box(mesh);
+            }
+            eprintln!(
+                "{count} casters: generation {generation:?}, mesh+edges {:?}/frame, {triangles} floor triangles",
+                start.elapsed() / 20
+            );
         }
     }
 }

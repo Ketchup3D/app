@@ -10,7 +10,7 @@ ketchup-core = { path = "../ketchup-core" }
 serde.workspace = true
 serde_json.workspace = true
 glam.workspace = true
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland", "accesskit", "persistence"] }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland", "accesskit", "persistence", "links"] }
 bytemuck = { version = "1", features = ["derive"] }
 rfd = { version = "0.17.2", features = ["file-handle-inner"] }
 

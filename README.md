@@ -217,6 +217,7 @@ Serve the resulting `dist/` directory with a static web server. Use HTTPS for We
 | Precise length | Choose a preview direction, type a length such as `5`, `5cm`, or `50mm`, press Enter; plain numbers use meters |
 | Reference axis snapping | Hover an endpoint, midpoint, or edge to acquire X/Y/Z references; with an axis locked, hover geometry to match its coordinate directly, including grouped/component geometry; Snap and Snap to axes must both be enabled |
 | X / Y / Z axis lock | Right / Left / Up arrow; repeat to unlock |
+| Shape plane lock | Rectangle, Circle, Polygon, Freehand: Right / Left / Up locks the drawing plane perpendicular to X / Y / Z; repeat or Down unlocks |
 | Clear axis lock | Down arrow |
 | Cancel preview/gesture | Escape |
 | Erase | E; click or drag across edges |
@@ -226,7 +227,7 @@ Serve the resulting `dist/` directory with a static web server. Use HTTPS for We
 | Pan | **Hold Shift while orbiting**, including middle-drag |
 | Zoom | Mouse wheel; anchors at the pointer on the camera target plane |
 | Fit all geometry | F, or the Fit view button |
-| Ground, sky, and horizon colors | Environment menu in the top bar; color pickers, Sky/Ground toggles, and reset colors |
+| Ground, sky, and horizon colors | Model inspector → Display → Environment; color pickers, Sky/Ground toggles, and reset colors |
 | Undo | Ctrl/Command Z |
 | Redo | Ctrl/Command Shift Z, or Ctrl Y |
 | Shortcuts | F1, or Help → Keyboard shortcuts |
@@ -238,6 +239,8 @@ Typed lengths accept `mm`, `cm`, `m`, `km`, `in`, `ft`, and `yd` (or `"` for inc
 Dimension inputs also accept formulas with `+`, `-`, `*`, `/`, and parentheses. Units are converted before evaluating: `60cm - 89mm` is `0.511m` (511 mm), `(60cm - 89mm) / 2` is `0.2555m`, and `2 * 5cm` is `0.1m`. Multiplication and division take precedence over addition and subtraction. Plain numbers default to meters when added to lengths and act as unitless multipliers or divisors in products. A unit can follow a parenthesized numeric expression, such as `(60 - 8.9)cm`. Rectangles accept a formula for each dimension, for example `6m - 100cm,60mm - 10mm`. Formulas work for drawing lengths, radii, total freehand length, Move, Push/Pull, and Offset; Scale accepts formulas containing only numbers. Invalid formulas, division by zero, and area or volume results leave the operation available for correction.
 
 Hovering an existing endpoint, midpoint, or position on an edge acquires that position as an axis reference. As the pointer moves away, it snaps near the red X, green Y, or blue Z axis through that reference. A colored dashed line and a marker at the reference show the active alignment. This works before the first drawing point, while drawing lines or shapes, and while placing measurement points. Direct geometry snaps keep priority. With an arrow-key axis lock active, hovering the reference directly sets the endpoint coordinate on that axis; the cursor can stay over the reference edge even when the endpoint is far away on screen. For example, with Y locked, the endpoint takes the hovered point’s Y coordinate while keeping the start’s X and Z coordinates. Visible geometry inside groups, nested groups, and components can supply this reference, including geometry outside the group currently being edited. A dashed connection shows the projection from the hovered geometry to the endpoint. Drawing planes and snapped surfaces are preserved. Turning off Snap or Snap to axes releases the reference, as does hiding or deleting its source geometry. Hover another point or edge to replace the reference.
+
+Rectangle, Circle, Polygon, and Freehand support arrow-key drawing-plane locks before or after the first point. Right locks the YZ plane (red X normal), Left locks XZ (green Y normal), and Up locks XY (blue Z normal), always through the first point. The preview uses the locked axis color. Repeating the arrow or pressing Down restores the original surface plane. Switching planes during a freehand stroke preserves the sampled stroke’s shape and size. Typed dimensions, reference snapping within the plane, cancellation, and undo work with locked shapes. Plane locks remain available when Snap or Snap to axes is off.
 
 Coordinates use meters and Z-up. Free drawing starts on Z=0, or at a snapped existing point/surface. Subsequent free segments use the horizontal plane through their start; axis inference and locks allow drawing vertically. Snap, checked by default, attracts drawing to visible endpoints, midpoints, arbitrary points on edges, and filled surfaces. Snap to axes, also checked by default, automatically aligns drawing directions with the red X, green Y, and blue Z axes at every point in a connected chain, including short segments. Points can also snap onto the visible model axes. Automatic alignment combines with geometry snapping, allowing perpendicular previews to acquire nearby endpoints, edges, and surfaces; explicit arrow-key locks keep points strictly on the chosen axis. The live endpoint marker and dashed axis guide show the snapped position before clicking; the same position is used when confirming the point. These options are independent; arrow-key axis locks remain available even with automatic axis snapping off. Move also combines intersecting axis guides from visible endpoints and midpoints: a target can align along X with one point and Y with another, or along all three axes. Colored dashed guides and an alignment label show the combined target before confirmation. Snap and Snap to axes must both be enabled to use these references; arrow-key locks remain strict.
 
@@ -277,19 +280,19 @@ Display controls axes, inference guides, grid, dimensions, hidden geometry and o
 
 ## Saved models
 
-File → **New project** starts a fresh project. **Open** reads a `.ketchup` file; **Save As** writes a separate project file, including the model name, geometry, camera, and snapping settings. On desktop, **Save** updates the opened or last saved file; a project without a file opens Save As. Saves replace the destination only after writing a complete temporary file. In the browser, Save and Save As download a `.ketchup` file named after the model; the browser controls the download location. Rename the model to choose a different download name. New and Open offer Save, Discard changes, and Cancel when the current project has changes that have not been saved to a project file. Invalid files and cancelled operations leave the current project intact. Opening or creating a project resets geometry history.
+File → **New project** starts a fresh project. **Open** reads a `.ketchup` file; **Save As** writes a separate project file, including the model name, geometry, camera, and snapping settings. The app bar shows the filename without its extension as a read-only model name. Opening a project or saving it under a different filename updates the name automatically. New projects show **Untitled model** until saved. On desktop, **Save** updates the opened or last saved file; a project without a file opens Save As. Saves replace the destination only after writing a complete temporary file. In the browser, Save and Save As download a `.ketchup` file using the current name; the browser controls the download location and any filename changes. New and Open offer Save, Discard changes, and Cancel when the current project has changes that have not been saved to a project file. Invalid files and cancelled operations leave the current project intact. Opening or creating a project resets geometry history.
 
 File → **Import/Export → Import SketchUp (.skp)** adds geometry to the current editing level at its original location, selects it, and fits the view. Import is one undo step and keeps the current project name and save destination. Nested group/component placements become independent editable groups; face holes, solid material colors, explicit hiding, and inch-to-metre conversion are retained. Textures, transparency, scenes, annotations, and linked component definitions are omitted. The embedded reader handles legacy MFC and modern ZIP/VFF containers, but some SketchUp versions or model features may be unsupported. Files larger than 64 MiB, malformed geometry, and recursive definitions are rejected before changing the document. Cancelled or failed imports leave the project intact. Both desktop and browser imports run locally; no SketchUp installation or upload is needed. Desktop parsing uses a compiled C++ reader on the file-operation thread; browser parsing runs in a dedicated Web Worker so the workspace stays responsive. Face picking reuses cached planes and a spatial index, and the inspector reuses cached surface areas for large imported models.
 
 **Export Wavefront OBJ (.obj)** writes visible edges and triangulated faces, including face holes, using metre coordinates with Z up. OBJ export does not include materials, dimensions, or group/component links. Desktop export uses a save dialog; browser export downloads the file. Export leaves the project destination and unsaved state unchanged.
 
-Local autosave continues independently of project files: editing never automatically overwrites an opened `.ketchup` file. The last model name, geometry (including faces, holes, face colors, and dimensions), camera, and both snapping settings are saved locally after activity settles. Geometry edits are also saved immediately in the browser. History holds the last 100 geometry operations, including fill creation/deletion, and is not persisted. Naming and camera changes are outside geometry history. Version 1 edge-only documents migrate automatically to version 2, filling their existing closed planar outlines; subsequent reloads preserve intentionally deleted faces. The browser storage key is unchanged for compatibility. A restored autosave with model content is treated as unsaved to a project file; use Save As to choose its destination again.
+Local autosave continues independently of project files: editing never automatically overwrites an opened `.ketchup` file. The last model name, geometry (including faces, holes, face colors, and dimensions), camera, and both snapping settings are saved locally after activity settles. Geometry edits are also saved immediately in the browser. History holds the last 100 geometry operations, including fill creation/deletion, and is not persisted. Filename and camera changes are outside geometry history. Version 1 edge-only documents migrate automatically to version 2, filling their existing closed planar outlines; subsequent reloads preserve intentionally deleted faces. The browser storage key is unchanged for compatibility. A restored autosave with model content is treated as unsaved to a project file; use Save As to choose its destination again.
 
 - Desktop: the platform's local application-data directory, resolved by `directories::ProjectDirs`, in `model.json`.
 - Browser: `localStorage["ketchup.document.v1"]`, scoped to the current origin.
 - For isolated desktop sessions/tests, set `KETCHUP_DATA_DIR` to a directory of your choice.
 
-Local autosave failures show an Unsaved indicator with the error in its tooltip. The live model remains editable; File → Save locally now retries. Project file errors appear in a dialog and preserve the current project and its destination. An unreadable or unsupported autosave starts a clean workspace with a recovery notice. The existing saved data is not overwritten until you edit or explicitly save.
+Local autosave failures show an Unsaved indicator with the error in its tooltip. The live model remains editable; further edits trigger another autosave attempt. Project file errors appear in a dialog and preserve the current project and its destination. An unreadable or unsupported autosave starts a clean workspace with a recovery notice. The existing saved data is not overwritten until you edit or load another project.
 
 ## Development and verification
 
@@ -314,7 +317,8 @@ cargo test -p ketchup-app gpu_renders_empty_and_modeled_workspace --locked -- --
 Snapshots appear in `target/qa/`. This test requires a working native GPU adapter. Normal tests cover document validation, geometry, inference, camera math, selection, undo/redo, and synthetic keyboard/pointer interactions through egui.
 
 Run the repeatable CPU interaction benchmarks explicitly (10/100-face drawing,
-10/100-object Move, a 4,096-face imported model, and axes on/off with 512 groups):
+10/100-object Move, a 4,096-face imported model, axes on/off with 512 groups,
+and 256/1,024 shadow casters over a large receiving face):
 
 ```sh
 cargo test -p ketchup-app --locked --config 'profile.test.package.ketchup-app.opt-level=2' --config 'profile.test.package.ketchup-core.opt-level=2' workload_benchmark -- --ignored --nocapture --test-threads=1
@@ -323,6 +327,8 @@ cargo test -p ketchup-app --locked --config 'profile.test.package.ketchup-app.op
 These settings optimize application geometry and rendering code while retaining
 the existing test dependencies. Timings exclude model construction and GPU
 presentation; compare runs on the same machine without other CPU-heavy work.
+The shadow workload reports regeneration after sun changes and CPU mesh/edge
+rendering separately.
 The normal suite also exercises all 22 tools through interrupted gestures,
 focus loss, resizing, and document reload, plus display styles and effects.
 

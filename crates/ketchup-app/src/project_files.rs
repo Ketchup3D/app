@@ -20,6 +20,12 @@ pub fn file_name(name: &str) -> String {
     exchange_name(name, "ketchup")
 }
 
+pub fn set_document_name(doc: &mut Document, path: &std::path::Path) {
+    if let Some(name) = path.file_stem() {
+        doc.name = name.to_string_lossy().into_owned();
+    }
+}
+
 fn exchange_name(name: &str, extension: &str) -> String {
     let name: String = name
         .trim()
@@ -161,8 +167,12 @@ pub fn open(ctx: &eframe::egui::Context) -> Pending {
             .await
         {
             match wasm_bindgen_futures::JsFuture::from(file.inner().array_buffer()).await {
-                Ok(buffer) => decode(&js_sys::Uint8Array::new(&buffer).to_vec())
-                    .map(|doc| Outcome::Opened(Box::new(doc), None)),
+                Ok(buffer) => {
+                    decode(&js_sys::Uint8Array::new(&buffer).to_vec()).map(|mut doc| {
+                        set_document_name(&mut doc, std::path::Path::new(&file.file_name()));
+                        Outcome::Opened(Box::new(doc), None)
+                    })
+                }
                 Err(_) => Err("The browser could not read this project".into()),
             }
         } else {

@@ -91,6 +91,7 @@ pub(super) fn paint_sections(
     cache: &renderer::FaceCache,
     entities: &renderer::EntityCache,
     d: &DisplaySettings,
+    faces: &FacePalette,
 ) {
     if !d.section_cuts && !d.section_planes {
         return;
@@ -121,7 +122,7 @@ pub(super) fn paint_sections(
         if d.section_fill && d.face_style != ketchup_core::FaceStyle::Wireframe {
             for face in section.faces.values() {
                 for triangle in section.face_triangles(face) {
-                    mesh.world_triangle(camera, triangle, Color32::from_rgb(183, 133, 111));
+                    mesh.world_triangle(camera, triangle, faces.section);
                 }
             }
         }

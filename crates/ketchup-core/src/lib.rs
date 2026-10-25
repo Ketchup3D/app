@@ -194,10 +194,14 @@ impl Tool {
             Self::Line => {
                 "Click to start a line · Arrow keys lock axes · Type a length for precision"
             }
-            Self::Rectangle => "Click two opposite corners · Esc to cancel",
-            Self::Circle => "Click the center, then a point on the circle · Esc to cancel",
-            Self::Polygon => "Click the center, then a vertex · Choose sides in the drawing menu",
-            Self::Freehand => "Drag to draw · Release to finish · Esc to cancel",
+            Self::Rectangle => "Click two opposite corners · Arrow keys lock the drawing plane",
+            Self::Circle => {
+                "Click the center, then a point on the circle · Arrow keys lock the drawing plane"
+            }
+            Self::Polygon => "Click the center, then a vertex · Arrow keys lock the drawing plane",
+            Self::Freehand => {
+                "Drag to draw · Release to finish · Arrow keys lock the drawing plane"
+            }
             Self::Erase => "Click or drag across edges to erase · Ctrl / ⌘ Z to undo",
             Self::Flip => {
                 "Select geometry · Choose a red, green, or blue flip plane · Arrow keys choose X / Y / Z"

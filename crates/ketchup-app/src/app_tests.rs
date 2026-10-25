@@ -1149,18 +1149,48 @@ fn eraser_sweep_is_one_undo_step_and_ui_panels_never_draw() {
 }
 
 #[test]
-fn naming_field_keeps_tool_shortcuts_from_firing() {
+fn model_name_is_read_only_and_does_not_capture_tool_shortcuts() {
     let mut h = Harness::new();
-    h.click(egui::pos2(490., 32.));
-    assert!(h.ctx.egui_wants_keyboard_input());
+    let name = h.app.doc.name.clone();
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, &name));
+    assert!(!h.ctx.egui_wants_keyboard_input());
     h.key(Key::L);
-    assert_eq!(h.app.tool, Tool::Select);
+    assert_eq!(h.app.tool, Tool::Line);
     h.frame(
         vec![egui::Event::Text("Sketch".into())],
         egui::Modifiers::NONE,
     );
-    assert!(h.app.doc.name.contains("Sketch"));
-    assert_eq!(h.app.tool, Tool::Select);
+    assert_eq!(h.app.doc.name, name);
+    assert_eq!(h.app.tool, Tool::Line);
+}
+
+#[test]
+fn closing_shortcuts_preserves_unfinished_drawing_and_blocks_file_commands() {
+    let mut h = Harness::new();
+    h.app.set_tool(Tool::Line);
+    h.app.line_start = Some(DVec3::X);
+    h.app.lock = Some(Axis::Y);
+    h.app.length_input = "2m".into();
+    h.key(Key::F1);
+    assert!(h.app.help);
+    h.frame(
+        vec![egui::Event::Key {
+            key: Key::N,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }],
+        egui::Modifiers::COMMAND,
+    );
+    assert!(h.app.project.confirm.is_none());
+    assert_eq!(h.app.line_start, Some(DVec3::X));
+    h.key(Key::Escape);
+    assert!(!h.app.help);
+    assert_eq!(h.app.line_start, Some(DVec3::X));
+    assert_eq!(h.app.lock, Some(Axis::Y));
+    assert_eq!(h.app.length_input, "2m");
 }
 
 #[test]
@@ -3785,6 +3815,25 @@ fn sidebar_sections_collapse_and_display_controls_change_saved_settings() {
     text_position(&output, "No components yet");
     let saved = Document::from_json(&serde_json::to_string(&h.app.doc).unwrap()).unwrap();
     assert!(!saved.display.axes);
+}
+
+#[test]
+fn expanding_edge_style_keeps_the_inspector_width_stable() {
+    let mut h = Harness::new();
+    h.ctx.style_mut_of(h.ctx.theme(), |s| s.animation_time = 0.);
+    h.size.y = 1600.;
+    for _ in 0..3 {
+        h.frame(vec![], egui::Modifiers::NONE);
+    }
+    let right = h.app.viewport.right();
+    for _ in 0..2 {
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&output, "Edge style"));
+        for _ in 0..5 {
+            h.frame(vec![], egui::Modifiers::NONE);
+            assert!((h.app.viewport.right() - right).abs() < 0.1);
+        }
+    }
 }
 
 #[test]

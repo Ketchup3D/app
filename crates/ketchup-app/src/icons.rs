@@ -14,7 +14,31 @@ const FACE: Color32 = Color32::from_rgb(211, 225, 238);
 const METAL: Color32 = Color32::from_rgb(226, 231, 233);
 
 pub fn tool(p: &egui::Painter, rect: Rect, tool: Tool) {
+    if tool == Tool::Select && p.ctx().global_style().visuals.dark_mode {
+        // A contrasting border keeps the cursor visible over light model faces too.
+        select_arrow(p, rect, Stroke::new(4.5, OUTLINE));
+        select_arrow(p, rect, Stroke::new(2.2, Color32::WHITE));
+        return;
+    }
     paint_tool(p, rect, tool, OUTLINE);
+}
+
+fn select_arrow(p: &egui::Painter, rect: Rect, stroke: Stroke) {
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.36;
+    let xy = |x: f32, y: f32| c + egui::vec2(x * r, y * r);
+    p.add(egui::Shape::closed_line(
+        vec![
+            xy(-0.55, -0.95),
+            xy(-0.45, 0.8),
+            xy(0.02, 0.34),
+            xy(0.43, 1.),
+            xy(0.77, 0.8),
+            xy(0.34, 0.12),
+            xy(0.95, 0.02),
+        ],
+        stroke,
+    ));
 }
 
 pub fn ui_tool(p: &egui::Painter, rect: Rect, tool: Tool) {
@@ -45,20 +69,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, outline: Color32) {
     };
     let stroke = Stroke::new(1.65, color);
     match tool {
-        Tool::Select => {
-            p.add(egui::Shape::closed_line(
-                vec![
-                    xy(-0.55, -0.95),
-                    xy(-0.45, 0.8),
-                    xy(0.02, 0.34),
-                    xy(0.43, 1.),
-                    xy(0.77, 0.8),
-                    xy(0.34, 0.12),
-                    xy(0.95, 0.02),
-                ],
-                stroke,
-            ));
-        }
+        Tool::Select => select_arrow(p, rect, stroke),
         Tool::Line => {
             p.line_segment([xy(-0.75, 0.75), xy(0.55, -0.55)], Stroke::new(3.5, color));
             p.add(egui::Shape::convex_polygon(

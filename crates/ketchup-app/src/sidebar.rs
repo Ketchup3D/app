@@ -1,6 +1,124 @@
 use super::*;
 use ketchup_core::{DisplaySettings, FaceStyle};
 
+#[path = "outliner.rs"]
+mod outliner;
+
+fn face_style_preview(
+    painter: &egui::Painter,
+    rect: Rect,
+    style: FaceStyle,
+    colors: Palette,
+    faces: FacePalette,
+) {
+    let center = rect.center();
+    let scale = rect.width().min(rect.height()) * 0.46;
+    let point = |x, y| center + egui::vec2(x * scale, y * scale);
+    let top = point(0., -1.);
+    let left = point(-0.9, -0.55);
+    let front = point(0., -0.1);
+    let right = point(0.9, -0.55);
+    let bottom_left = point(-0.9, 0.55);
+    let bottom = point(0., 1.);
+    let bottom_right = point(0.9, 0.55);
+    let outline = Stroke::new(1.2, colors.ink);
+    if style == FaceStyle::Wireframe {
+        let back = point(0., 0.1);
+        for end in [top, bottom_left, bottom_right] {
+            painter.line_segment([back, end], Stroke::new(1., colors.muted));
+        }
+    } else {
+        let fills = match style {
+            FaceStyle::HiddenLine => [colors.paper; 3],
+            FaceStyle::Monochrome => [faces.front, faces.side, faces.back],
+            FaceStyle::Materials => faces.materials,
+            FaceStyle::Shaded => [faces.front, faces.side, faces.shaded_side],
+            FaceStyle::Wireframe => unreachable!(),
+        };
+        for (points, fill) in [
+            ([top, right, front, left], fills[0]),
+            ([left, front, bottom, bottom_left], fills[1]),
+            ([front, right, bottom_right, bottom], fills[2]),
+        ] {
+            painter.add(egui::Shape::convex_polygon(
+                points.to_vec(),
+                fill,
+                Stroke::NONE,
+            ));
+        }
+    }
+    painter.add(egui::Shape::closed_line(
+        vec![top, right, bottom_right, bottom, bottom_left, left],
+        outline,
+    ));
+    for end in [left, right, bottom] {
+        painter.line_segment([front, end], outline);
+    }
+}
+
+fn face_style_picker(ui: &mut egui::Ui, current: &mut FaceStyle) {
+    let colors = Palette::for_ui(ui);
+    let faces = FacePalette::for_ui(ui);
+    let spacing = ui.spacing().item_spacing.x;
+    let columns = ((ui.available_width() + spacing) / (96. + spacing))
+        .floor()
+        .clamp(1., FaceStyle::ALL.len() as f32) as usize;
+    let width = (ui.available_width() - spacing * (columns - 1) as f32) / columns as f32;
+    ui.push_id("face_style", |ui| {
+        for row in FaceStyle::ALL.chunks(columns) {
+            ui.horizontal(|ui| {
+                for &style in row {
+                    let selected = *current == style;
+                    let mut response = ui
+                        .add_sized(
+                            egui::vec2(width, 100.),
+                            egui::Button::new("").selected(selected).corner_radius(5),
+                        )
+                        .on_hover_text(style.label());
+                    if response.clicked() && !selected {
+                        *current = style;
+                        response.mark_changed();
+                    }
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::Role::RadioButton,
+                            ui.is_enabled(),
+                            *current == style,
+                            style.label(),
+                        )
+                    });
+                    if ui.is_rect_visible(response.rect) {
+                        let rect = response.rect;
+                        face_style_preview(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                egui::pos2(rect.center().x, rect.top() + 33.),
+                                egui::vec2(width - 16., 50.),
+                            ),
+                            style,
+                            colors,
+                            faces,
+                        );
+                        let mut label = egui::text::LayoutJob::simple(
+                            style.label().to_owned(),
+                            FontId::proportional(11.),
+                            colors.ink,
+                            width - 12.,
+                        );
+                        label.halign = egui::Align::Center;
+                        let galley = ui.fonts_mut(|fonts| fonts.layout_job(label));
+                        let pos = egui::pos2(
+                            rect.center().x,
+                            rect.bottom() - 21. - galley.size().y * 0.5,
+                        );
+                        ui.painter().galley(pos, galley, colors.ink);
+                    }
+                }
+            });
+        }
+    });
+}
+
 // Keep egui's disclosure behavior, animation, and accessibility while giving
 // inspector groups a shared surface and a full-width click target.
 fn inspector_section<R>(
@@ -47,7 +165,7 @@ fn inspector_section<R>(
                     if primary { colors.canvas } else { colors.paper };
                 visuals.widgets.hovered.weak_bg_fill = colors.hovered;
                 visuals.widgets.active.weak_bg_fill = colors.selected;
-                let response = egui::CollapsingHeader::new(RichText::new(title).strong())
+                egui::CollapsingHeader::new(RichText::new(title).strong())
                     .id_salt(id)
                     .default_open(primary)
                     .icon(move |ui, openness, response| {
@@ -76,17 +194,6 @@ fn inspector_section<R>(
                         *ui.style_mut() = body_style;
                         egui::Frame::new().inner_margin(10).show(ui, contents).inner
                     });
-                if response.openness > 0. {
-                    let rect = response.header_response.rect;
-                    ui.painter().rect_filled(
-                        Rect::from_min_size(
-                            rect.left_top() + egui::vec2(0., 10.),
-                            egui::vec2(3., rect.height() - 20.),
-                        ),
-                        2,
-                        colors.green.linear_multiply(response.openness),
-                    );
-                }
             });
         });
     ui.add_space(if primary { 4. } else { 1. });
@@ -94,6 +201,9 @@ fn inspector_section<R>(
 
 impl KetchupApp {
     pub(super) fn inspector_contents(&mut self, ui: &mut egui::Ui) {
+        inspector_section(ui, "Outliner", "outliner", true, |ui| {
+            self.outliner_contents(ui)
+        });
         inspector_section(ui, "Entity Info", "entity_info", true, |ui| {
             self.entity_info_contents(ui)
         });
@@ -402,14 +512,7 @@ impl KetchupApp {
         }
         ui.separator();
         ui.label(RichText::new("Face style").strong());
-        egui::ComboBox::from_id_salt("face_style")
-            .selected_text(d.face_style.label())
-            .width(ui.available_width() - 10.)
-            .show_ui(ui, |ui| {
-                for style in FaceStyle::ALL {
-                    ui.selectable_value(&mut d.face_style, style, style.label());
-                }
-            });
+        face_style_picker(ui, &mut d.face_style);
         ui.checkbox(&mut d.x_ray, "X-Ray");
         ui.checkbox(&mut d.color_by_tag, "Color by tag");
         inspector_section(ui, "Edge style", "edge_style", false, |ui| {
@@ -423,10 +526,13 @@ impl KetchupApp {
             ] {
                 ui.checkbox(value, label);
             }
-            ui.add_enabled(
-                d.profiles,
-                egui::Slider::new(&mut d.profile_width, 1. ..=8.).text("Profile width"),
-            );
+            ui.add_enabled_ui(d.profiles, |ui| {
+                // Keep the label above the slider so this nested section fits
+                // even at the inspector's minimum width.
+                let label = ui.label("Profile width");
+                ui.add(egui::Slider::new(&mut d.profile_width, 1. ..=8.))
+                    .labelled_by(label.id);
+            });
         });
         inspector_section(ui, "Sections", "sections", false, |ui| {
             ui.checkbox(&mut d.section_planes, "Section planes");
@@ -486,13 +592,13 @@ impl KetchupApp {
                 });
                 d.fog_end = d.fog_end.max(d.fog_start + 0.1);
             });
+            ui.horizontal(|ui| {
+                crate::environment::background_control(ui, d);
+                ui.label("Background / fog color");
+            });
         });
         inspector_section(ui, "Environment", "display_environment", false, |ui| {
             crate::environment::controls(ui, d);
-        });
-        ui.horizontal(|ui| {
-            crate::environment::background_control(ui, d);
-            ui.label("Background / fog color");
         });
         if ui.button("Reset display").clicked() {
             *d = DisplaySettings::default();

@@ -142,7 +142,21 @@ pub(super) fn render_workspace(name: &str) -> KetchupApp {
         }
         "section_fill" | "section_height" => app.doc.display.section_cuts = true,
         "profile_width" => app.doc.display.profiles = true,
-        "shadow_darkness" | "sun_angle" | "sun_elevation" => app.doc.display.shadows = true,
+        "shadow_darkness" | "sun_angle" | "sun_elevation" => {
+            app.doc.display.shadows = true;
+            // Shadows only fall on model faces. A receiving floor makes sun
+            // elevation visibly change the shadow instead of merely leaving
+            // the same box walls fully shaded at both tested elevations.
+            let floor = [
+                DVec3::new(-5., -4., -0.1),
+                DVec3::new(6., -4., -0.1),
+                DVec3::new(6., 5., -0.1),
+                DVec3::new(-5., 5., -0.1),
+            ];
+            for i in 0..4 {
+                app.doc.model.add_edge(floor[i], floor[(i + 1) % 4]).unwrap();
+            }
+        }
         "fog_start" | "fog_end" => {
             app.doc.display.fog = true;
             app.doc.display.fog_start = 0.;
@@ -184,7 +198,7 @@ fn sidebar_position(h: &Harness, output: &egui::FullOutput, label: &str) -> Pos2
     fn find(shape: &egui::Shape, label: &str, left: f32) -> Option<Pos2> {
         match shape {
             egui::Shape::Text(text) if text.galley.job.text == label && text.pos.x > left => {
-                Some(text.pos + text.galley.size() * 0.5)
+                Some(text.pos + text.galley.rect.center().to_vec2())
             }
             egui::Shape::Vec(shapes) => shapes.iter().rev().find_map(|s| find(s, label, left)),
             _ => None,
@@ -281,9 +295,6 @@ fn check_face_style(style: ketchup_core::FaceStyle) {
     if style == h.app.doc.display.face_style {
         h.app.doc.display.face_style = ketchup_core::FaceStyle::Wireframe;
     }
-    let output = h.frame(vec![], egui::Modifiers::NONE);
-    let current = h.app.doc.display.face_style.label();
-    h.click(sidebar_position(&h, &output, current));
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(sidebar_position(&h, &output, style.label()));
     assert_eq!(h.app.doc.display.face_style, style);

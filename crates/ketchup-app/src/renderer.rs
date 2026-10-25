@@ -304,6 +304,29 @@ impl Mesh {
         }
     }
     pub fn world_triangle(&mut self, _camera: &Camera, triangle: [DVec3; 3], color: Color32) {
+        self.face_triangle(triangle, color, true, true);
+    }
+    pub fn shadow_face(
+        &mut self,
+        triangles: &[[DVec3; 3]],
+        shadow: &crate::shadows::FaceShadow,
+        color: Color32,
+        shaded: Color32,
+    ) {
+        // Lighting subdivisions do not change the opaque surface. Use its
+        // original triangles for edge occlusion, keeping the hierarchy small
+        // and stable when the sun moves or shadows are toggled.
+        for &triangle in triangles {
+            self.face_triangle(triangle, color, false, true);
+        }
+        for &triangle in &shadow.lit {
+            self.face_triangle(triangle, color, true, false);
+        }
+        for &triangle in &shadow.shaded {
+            self.face_triangle(triangle, shaded, true, false);
+        }
+    }
+    fn face_triangle(&mut self, triangle: [DVec3; 3], color: Color32, draw: bool, occlude: bool) {
         let start = self.indices.len() as u32;
         // A triangle clipped against the section plane has at most four points.
         let mut polygon = [DVec3::ZERO; 4];
@@ -335,8 +358,11 @@ impl Mesh {
             let indices = &mut self.indices;
             let occlusion = &mut self.occlusion;
             self.view.for_each_triangle_depth(triangle, |triangle| {
-                if color[3] == 255 {
+                if occlude && color[3] == 255 {
                     occlusion.insert(triangle);
+                }
+                if !draw {
+                    return;
                 }
                 let base = vertices.len() as u32;
                 indices.extend([base, base + 1, base + 2]);
@@ -1456,6 +1482,69 @@ mod tests {
             Color32::from_rgba_unmultiplied(255, 255, 255, 64),
         );
         assert!(translucent.occlusion.triangles.is_empty());
+    }
+
+    #[test]
+    fn shadow_subdivisions_preserve_draw_geometry_and_original_occluders() {
+        let camera = Camera::default();
+        let size = DVec2::new(1000., 800.);
+        let [a, b, c] = [
+            DVec3::new(-2., -2., 0.),
+            DVec3::new(2., -2., 0.),
+            DVec3::new(0., 2., 2.),
+        ];
+        let ab = (a + b) * 0.5;
+        let bc = (b + c) * 0.5;
+        let ca = (c + a) * 0.5;
+        let shadow = crate::shadows::FaceShadow {
+            lit: vec![[a, ab, ca], [ab, b, bc], [ca, bc, c]],
+            shaded: vec![[ab, bc, ca]],
+        };
+        for section in [false, true] {
+            for alpha in [64, 255] {
+                let display = ketchup_core::DisplaySettings {
+                    section_cuts: section,
+                    section_height: 0.75,
+                    fog: true,
+                    ..Default::default()
+                };
+                let color = Color32::from_rgba_unmultiplied(200, 200, 200, alpha);
+                let shaded = Color32::from_rgba_unmultiplied(100, 100, 100, alpha);
+                let mut actual = Mesh::new(&camera, size);
+                actual.set_display(&display);
+                actual.shadow_face(&[[a, b, c]], &shadow, color, shaded);
+                let mut expected = Mesh::new(&camera, size);
+                expected.set_display(&display);
+                for &triangle in &shadow.lit {
+                    expected.world_triangle(&camera, triangle, color);
+                }
+                for &triangle in &shadow.shaded {
+                    expected.world_triangle(&camera, triangle, shaded);
+                }
+                assert_eq!(
+                    bytemuck::cast_slice::<Vertex, u8>(&actual.vertices),
+                    bytemuck::cast_slice::<Vertex, u8>(&expected.vertices)
+                );
+                assert_eq!(actual.indices, expected.indices);
+                assert_eq!(actual.triangle_ranges, expected.triangle_ranges);
+                let mut original = Mesh::new(&camera, size);
+                original.set_display(&display);
+                original.world_triangle(&camera, [a, b, c], color);
+                let points = |mesh: &Mesh| {
+                    mesh.occlusion
+                        .triangles
+                        .iter()
+                        .map(|t| t.points)
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(points(&actual), points(&original));
+                if alpha == 255 {
+                    assert!(actual.occlusion.triangles.len() < expected.occlusion.triangles.len());
+                } else {
+                    assert!(actual.occlusion.triangles.is_empty());
+                }
+            }
+        }
     }
 
     #[test]

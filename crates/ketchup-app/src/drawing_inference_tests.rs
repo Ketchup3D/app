@@ -1,5 +1,232 @@
 use super::*;
 
+const PLANE_LOCKS: [(Axis, Key); 3] = [
+    (Axis::X, Key::ArrowRight),
+    (Axis::Y, Key::ArrowLeft),
+    (Axis::Z, Key::ArrowUp),
+];
+
+#[test]
+fn shape_plane_locks_before_and_after_the_first_click_commit_the_preview() {
+    for tool in [Tool::Rectangle, Tool::Circle, Tool::Polygon] {
+        for (axis, key) in PLANE_LOCKS {
+            for lock_first in [false, true] {
+                for snapping in [false, true] {
+                    let mut h = Harness::new();
+                    h.app.doc.snap_to_geometry = snapping;
+                    h.app.doc.snap_to_axes = snapping;
+                    h.app.set_tool(tool);
+                    if lock_first {
+                        h.key(key);
+                    }
+                    h.click(h.at(DVec3::ZERO));
+                    if !lock_first {
+                        h.key(key);
+                    }
+                    let drawing = h.app.drawing.as_ref().unwrap();
+                    let origin = drawing.origin;
+                    let target = origin + drawing.u * 2. + drawing.v * 1.3;
+                    assert_eq!(drawing.normal, axis.vector());
+                    hover(&mut h, target);
+                    assert!(h.app.snap.unwrap().point.distance(target) < 1e-5);
+                    let preview = h.app.drawing_points();
+                    assert!(preview.len() >= 5);
+                    assert!(
+                        preview
+                            .iter()
+                            .all(|p| { (*p - origin).dot(axis.vector()).abs() < 1e-7 })
+                    );
+                    let before = h.app.doc.model.clone();
+                    h.click(h.at(target));
+                    assert!(h.app.drawing.is_none(), "{tool:?} {axis:?}");
+                    assert_eq!(h.app.doc.model.faces.len(), 1);
+                    assert!(preview.iter().all(|p| {
+                        h.app
+                            .doc
+                            .model
+                            .vertices
+                            .values()
+                            .any(|v| v.position.distance(*p) < 1e-7)
+                    }));
+                    h.app.doc.model.validate().unwrap();
+                    h.app.undo(&h.ctx, false);
+                    assert_eq!(h.app.doc.model, before);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn locked_shape_planes_keep_typed_dimensions() {
+    for tool in [Tool::Rectangle, Tool::Circle, Tool::Polygon] {
+        for (axis, key) in PLANE_LOCKS {
+            let mut h = Harness::new();
+            h.app.set_tool(tool);
+            h.click(h.at(DVec3::ZERO));
+            h.key(key);
+            let drawing = h.app.drawing.as_ref().unwrap();
+            let origin = drawing.origin;
+            let target = origin + drawing.u * 3. + drawing.v * 2.;
+            hover(&mut h, target);
+            h.frame(
+                vec![egui::Event::Text(if tool == Tool::Rectangle {
+                    "2m,50cm".into()
+                } else {
+                    "2m".into()
+                })],
+                egui::Modifiers::NONE,
+            );
+            let preview = h.app.drawing_points();
+            assert!(
+                preview
+                    .iter()
+                    .all(|p| (*p - origin).dot(axis.vector()).abs() < 1e-7)
+            );
+            if tool == Tool::Rectangle {
+                assert!((preview[0].distance(preview[1]) - 2.).abs() < 1e-7);
+                assert!((preview[1].distance(preview[2]) - 0.5).abs() < 1e-7);
+            } else {
+                assert!(
+                    preview
+                        .iter()
+                        .all(|p| (p.distance(origin) - 2.).abs() < 1e-7)
+                );
+            }
+            h.key(Key::Enter);
+            assert!(h.app.drawing.is_none());
+            assert_eq!(h.app.doc.model.faces.len(), 1);
+            assert!(preview.iter().all(|p| {
+                h.app
+                    .doc
+                    .model
+                    .vertices
+                    .values()
+                    .any(|v| v.position.distance(*p) < 1e-7)
+            }));
+            h.app.doc.model.validate().unwrap();
+        }
+    }
+}
+
+#[test]
+fn shape_plane_locks_switch_and_restore_the_original_surface_plane() {
+    for tool in [Tool::Rectangle, Tool::Circle, Tool::Polygon] {
+        let mut h = Harness::new();
+        let corners = [
+            DVec3::new(-4., -4., -1.),
+            DVec3::new(4., -4., -1.),
+            DVec3::new(4., 4., 3.),
+            DVec3::new(-4., 4., 3.),
+        ];
+        for i in 0..4 {
+            h.app
+                .doc
+                .model
+                .add_edge(corners[i], corners[(i + 1) % 4])
+                .unwrap();
+        }
+        let before = h.app.doc.model.clone();
+        h.app.set_tool(tool);
+        h.click(h.at(DVec3::Z));
+        let drawing = h.app.drawing.as_ref().unwrap();
+        let (origin, normal) = (drawing.origin, drawing.normal);
+        assert!(normal.cross(DVec3::Z).length() > 0.1);
+        for (axis, key) in PLANE_LOCKS {
+            h.key(key);
+            assert_eq!(h.app.lock, Some(axis));
+            assert_eq!(h.app.drawing.as_ref().unwrap().normal, axis.vector());
+            // Off-plane geometry must not pull a locked shape off its plane.
+            hover(&mut h, corners[2]);
+            assert!(
+                (h.app.snap.unwrap().point - origin)
+                    .dot(axis.vector())
+                    .abs()
+                    < 1e-7
+            );
+            h.key(key);
+            assert_eq!(h.app.lock, None);
+            assert_eq!(h.app.drawing.as_ref().unwrap().normal, normal);
+        }
+        h.key(Key::ArrowRight);
+        h.key(Key::ArrowLeft);
+        assert_eq!(h.app.drawing.as_ref().unwrap().normal, DVec3::Y);
+        h.key(Key::ArrowDown);
+        assert_eq!(h.app.lock, None);
+        assert_eq!(h.app.drawing.as_ref().unwrap().normal, normal);
+        h.key(Key::ArrowUp);
+        h.key(Key::Escape);
+        assert!(h.app.drawing.is_none());
+        assert_eq!(h.app.lock, None);
+        assert_eq!(h.app.doc.model, before);
+    }
+}
+
+#[test]
+fn freehand_plane_locks_preserve_sampled_strokes_when_switching_planes() {
+    for (axis, key) in PLANE_LOCKS {
+        let mut h = Harness::new();
+        h.app.doc.snap_to_geometry = false;
+        h.app.doc.snap_to_axes = false;
+        h.app.set_tool(Tool::Freehand);
+        h.key(key);
+        h.pointer(h.at(DVec3::ZERO), egui::PointerButton::Primary, true, false);
+        let drawing = h.app.drawing.as_ref().unwrap();
+        let (origin, u, v) = (drawing.origin, drawing.u, drawing.v);
+        assert_eq!(drawing.normal, axis.vector());
+        for offset in [u, u * 2. + v, u * 3. + v * 0.5] {
+            hover(&mut h, origin + offset);
+        }
+        let samples = h.app.drawing.as_ref().unwrap().points.clone();
+        assert!(samples.len() >= 4);
+        let next = if axis == Axis::X {
+            Key::ArrowLeft
+        } else {
+            Key::ArrowRight
+        };
+        h.key(next);
+        let drawing = h.app.drawing.as_ref().unwrap();
+        assert_eq!(drawing.origin, origin);
+        assert_eq!(drawing.points.len(), samples.len());
+        for (before, after) in samples.windows(2).zip(drawing.points.windows(2)) {
+            assert!((before[0].distance(before[1]) - after[0].distance(after[1])).abs() < 1e-7);
+        }
+        assert!(
+            drawing
+                .points
+                .iter()
+                .all(|p| (*p - origin).dot(drawing.normal).abs() < 1e-7)
+        );
+        h.key(Key::ArrowDown);
+        assert_eq!(h.app.drawing.as_ref().unwrap().normal, DVec3::Z);
+        h.key(key);
+        let drawing = h.app.drawing.as_ref().unwrap();
+        assert!(
+            drawing
+                .points
+                .iter()
+                .zip(&samples)
+                .all(|(a, b)| a.distance(*b) < 1e-7)
+        );
+        let end = h.at(origin + u * 3. + v * 0.5);
+        let preview = h.app.drawing_points();
+        h.pointer(end, egui::PointerButton::Primary, false, false);
+        assert!(h.app.drawing.is_none());
+        assert!(!h.app.doc.model.edges.is_empty());
+        assert!(preview.iter().all(|p| {
+            h.app
+                .doc
+                .model
+                .vertices
+                .values()
+                .any(|v| v.position.distance(*p) < 1e-7)
+        }));
+        h.app.doc.model.validate().unwrap();
+        h.app.undo(&h.ctx, false);
+        assert!(h.app.doc.model.edges.is_empty());
+    }
+}
+
 fn reference(h: &mut Harness, point: DVec3) -> u64 {
     h.app
         .doc

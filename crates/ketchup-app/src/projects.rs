@@ -39,10 +39,13 @@ impl Project {
 impl KetchupApp {
     pub(super) fn replace_project(
         &mut self,
-        doc: Document,
+        mut doc: Document,
         path: Option<PathBuf>,
         ctx: &egui::Context,
     ) {
+        if let Some(path) = &path {
+            project_files::set_document_name(&mut doc, path);
+        }
         self.set_tool(Tool::Select);
         self.doc = doc;
         self.history = History::default();
@@ -54,6 +57,7 @@ impl KetchupApp {
         self.new_tag_name.clear();
         self.tag_rename = None;
         self.help = false;
+        self.about = false;
         self.entity_cache = renderer::EntityCache::default();
         self.face_cache = renderer::FaceCache::default();
         self.picking_cache = crate::picking::PickingCache::default();
@@ -163,8 +167,13 @@ impl KetchupApp {
                 self.say(ctx, "Project opened");
             }
             Ok(Outcome::Saved(path)) => {
+                let modified = serde_json::to_string(&self.doc).ok() != snapshot;
+                if let Some(path) = &path {
+                    project_files::set_document_name(&mut self.doc, path);
+                    self.changed(ctx);
+                }
                 self.project.path = path;
-                self.project.modified = serde_json::to_string(&self.doc).ok() != snapshot;
+                self.project.modified = modified;
                 self.say(
                     ctx,
                     if cfg!(target_arch = "wasm32") {
@@ -205,47 +214,51 @@ impl KetchupApp {
 
     pub(super) fn project_dialogs(&mut self, ctx: &egui::Context) {
         if self.project.pending.is_some() {
-            egui::Modal::new(egui::Id::unique("project_file_pending")).show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(match self.project.operation {
-                        Operation::Open => "Opening project…",
-                        Operation::Save => "Saving project…",
-                        Operation::Import => "Importing SketchUp model…",
-                        Operation::Export => "Exporting OBJ…",
+            egui::Modal::new(egui::Id::unique("project_file_pending"))
+                .backdrop_color(Color32::TRANSPARENT)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(match self.project.operation {
+                            Operation::Open => "Opening project…",
+                            Operation::Save => "Saving project…",
+                            Operation::Import => "Importing SketchUp model…",
+                            Operation::Export => "Exporting OBJ…",
+                        });
                     });
                 });
-            });
         }
         if let Some(action) = self.project.confirm {
-            let response = egui::Modal::new(egui::Id::unique("project_unsaved")).show(ctx, |ui| {
-                ui.set_max_width(400.);
-                ui.heading("Save project changes?");
-                ui.label(format!(
-                    "Save changes to “{}” as a .ketchup file before continuing?",
-                    self.doc.name
-                ));
-                ui.add_space(12.);
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
-                        Some(0)
-                    } else if ui
-                        .button(match action {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            Action::RestartForUpdate => "Restart with local recovery",
-                            _ => "Discard changes",
-                        })
-                        .clicked()
-                    {
-                        Some(1)
-                    } else if ui.button("Cancel").clicked() {
-                        Some(2)
-                    } else {
-                        None
-                    }
-                })
-                .inner
-            });
+            let response = egui::Modal::new(egui::Id::unique("project_unsaved"))
+                .backdrop_color(Color32::TRANSPARENT)
+                .show(ctx, |ui| {
+                    ui.set_max_width(400.);
+                    ui.heading("Save project changes?");
+                    ui.label(format!(
+                        "Save changes to “{}” as a .ketchup file before continuing?",
+                        self.doc.name
+                    ));
+                    ui.add_space(12.);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            Some(0)
+                        } else if ui
+                            .button(match action {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                Action::RestartForUpdate => "Restart with local recovery",
+                                _ => "Discard changes",
+                            })
+                            .clicked()
+                        {
+                            Some(1)
+                        } else if ui.button("Cancel").clicked() {
+                            Some(2)
+                        } else {
+                            None
+                        }
+                    })
+                    .inner
+                });
             if let Some(choice) = response.inner {
                 self.project.confirm = None;
                 match choice {
@@ -261,8 +274,9 @@ impl KetchupApp {
             }
         }
         if let Some(error) = &self.project.error {
-            let response =
-                egui::Modal::new(egui::Id::unique("project_file_error")).show(ctx, |ui| {
+            let response = egui::Modal::new(egui::Id::unique("project_file_error"))
+                .backdrop_color(Color32::TRANSPARENT)
+                .show(ctx, |ui| {
                     ui.set_max_width(440.);
                     ui.heading("Project file");
                     ui.label(error);
