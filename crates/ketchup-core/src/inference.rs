@@ -82,7 +82,7 @@ pub struct MoveInference {
 }
 
 /// Combine compatible world-space guides, rather than choosing only one axis.
-/// Keep Line's directional inference unchanged and preserve explicit Move locks.
+/// Preserve explicit axis locks and exact geometry targets.
 pub fn infer_move_with_snapping(
     model: &Model,
     camera: &Camera,
@@ -192,6 +192,7 @@ impl MoveSnapCache {
                     &camera.view(size),
                     start,
                     true,
+                    None,
                 ),
             });
         }
@@ -216,26 +217,25 @@ fn move_references(
     view: &CameraView,
     start: DVec3,
     geometry: bool,
+    faces: Option<&dyn FaceQuery>,
 ) -> Vec<MoveReference> {
+    let is_hidden = |id| match faces {
+        Some(query) => query.is_hidden(model, id),
+        None => model.is_hidden(id),
+    };
     let mut references = vec![start, DVec3::ZERO];
     if geometry {
         let vertices: std::collections::BTreeSet<_> = model
             .edges
             .values()
-            .filter(|e| !model.is_hidden(e.id))
+            .filter(|e| !is_hidden(e.id))
             .flat_map(|e| [e.a, e.b])
             .collect();
         references.extend(vertices.iter().map(|id| model.vertices[id].position));
-        references.extend(
-            model
-                .edges
-                .values()
-                .filter(|e| !model.is_hidden(e.id))
-                .map(|e| {
-                    let (a, b) = model.points(e);
-                    (a + b) * 0.5
-                }),
-        );
+        references.extend(model.edges.values().filter(|e| !is_hidden(e.id)).map(|e| {
+            let (a, b) = model.points(e);
+            (a + b) * 0.5
+        }));
     }
     references
         .into_iter()
@@ -281,24 +281,82 @@ fn infer_move(
         snap_to_axes,
         faces,
     )?;
+    if !snap_to_axes {
+        return Some(MoveInference {
+            snap: base,
+            guides: vec![],
+        });
+    }
+    Some(combine_axis_guides(
+        model,
+        camera,
+        size,
+        cursor,
+        start,
+        lock,
+        snap_to_geometry,
+        base,
+        prepared,
+        faces,
+    ))
+}
+
+/// Refine a drawing snap at the world-space intersection of compatible axis
+/// guides. Call only when automatic axis snapping is enabled. The supplied base
+/// retains directional/geometry inference and the viewport's cached face query.
+pub fn infer_axis_alignment_with_face_query(
+    model: &Model,
+    camera: &Camera,
+    size: DVec2,
+    cursor: DVec2,
+    start: DVec3,
+    lock: Option<Axis>,
+    snap_to_geometry: bool,
+    base: Snap,
+    faces: Option<&dyn FaceQuery>,
+) -> MoveInference {
+    combine_axis_guides(
+        model,
+        camera,
+        size,
+        cursor,
+        start,
+        lock,
+        snap_to_geometry,
+        base,
+        None,
+        faces,
+    )
+}
+
+fn combine_axis_guides(
+    model: &Model,
+    camera: &Camera,
+    size: DVec2,
+    cursor: DVec2,
+    start: DVec3,
+    lock: Option<Axis>,
+    snap_to_geometry: bool,
+    base: Snap,
+    prepared: Option<&[MoveReference]>,
+    faces: Option<&dyn FaceQuery>,
+) -> MoveInference {
     let fallback = MoveInference {
         snap: base,
         guides: vec![],
     };
-    if !snap_to_axes
-        || matches!(
-            base.kind,
-            Inference::Endpoint | Inference::Midpoint | Inference::Origin
-        )
-    {
-        return Some(fallback);
+    if matches!(
+        base.kind,
+        Inference::Endpoint | Inference::Midpoint | Inference::Origin
+    ) {
+        return fallback;
     }
     let view = camera.view(size);
     let temporary;
     let references = if let Some(prepared) = prepared {
         prepared
     } else {
-        temporary = move_references(model, camera, &view, start, snap_to_geometry);
+        temporary = move_references(model, camera, &view, start, snap_to_geometry, faces);
         &temporary
     };
     let axes = [Axis::X, Axis::Y, Axis::Z];
@@ -381,27 +439,27 @@ fn infer_move(
         }
     }
     intersections.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let is_hidden = |id| match faces {
+        Some(query) => query.is_hidden(model, id),
+        None => model.is_hidden(id),
+    };
     for (_, _, point, a, b) in intersections {
         // A guide may refine a surface/edge snap, but must stay on its geometry.
         if base.kind == Inference::OnFace
             && !model
                 .faces
                 .values()
-                .filter(|f| !model.is_hidden(f.id))
+                .filter(|f| !is_hidden(f.id))
                 .any(|f| model.face_contains(f, point, true))
         {
             continue;
         }
         if base.kind == Inference::OnEdge
-            && !model
-                .edges
-                .values()
-                .filter(|e| !model.is_hidden(e.id))
-                .any(|e| {
-                    let (a, b) = model.points(e);
-                    let t = ((point - a).dot(b - a) / (b - a).length_squared()).clamp(0., 1.);
-                    (a + (b - a) * t).distance(point) < 1e-7
-                })
+            && !model.edges.values().filter(|e| !is_hidden(e.id)).any(|e| {
+                let (a, b) = model.points(e);
+                let t = ((point - a).dot(b - a) / (b - a).length_squared()).clamp(0., 1.);
+                (a + (b - a) * t).distance(point) < 1e-7
+            })
         {
             continue;
         }
@@ -420,15 +478,15 @@ fn infer_move(
                 combined.push(*guide);
             }
         }
-        return Some(MoveInference {
+        return MoveInference {
             snap: Snap {
                 point,
                 kind: Inference::Aligned,
             },
             guides: combined,
-        });
+        };
     }
-    Some(fallback)
+    fallback
 }
 
 pub fn infer(
@@ -908,7 +966,8 @@ fn query_visible(
     let Some(pixel) = view.project(point) else {
         return false;
     };
+    let ray = view.ray(pixel);
     faces
-        .nearest(view.ray(pixel), true)
-        .is_none_or(|(_, t, _)| t + 1e-5 >= point.distance(view.eye()))
+        .nearest(ray, true)
+        .is_none_or(|(_, t, _)| t + 1e-5 >= point.distance(ray.origin))
 }

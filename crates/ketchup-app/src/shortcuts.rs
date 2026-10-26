@@ -35,29 +35,34 @@ impl Section<'_> {
                         .color(colors.ink),
                 );
                 ui.add_space(8.);
+                let column_width = (ui.available_width() - 12.) * 0.5;
                 egui::Grid::new(self.title)
                     .num_columns(2)
                     .spacing(egui::vec2(12., 9.))
-                    .max_col_width((ui.available_width() - 12.) * 0.5)
+                    .min_col_width(column_width)
+                    .max_col_width(column_width)
                     .show(ui, |ui| {
                         for (action, keys) in rows {
                             ui.add(egui::Label::new(*action).wrap());
-                            egui::Frame::new()
-                                .fill(colors.canvas)
-                                .stroke(Stroke::new(1., colors.border))
-                                .corner_radius(4)
-                                .inner_margin(egui::Margin::symmetric(7, 3))
-                                .show(ui, |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(keys)
-                                                .monospace()
-                                                .size(11.)
-                                                .color(colors.green),
-                                        )
-                                        .wrap(),
-                                    );
-                                });
+                            // Keep badges compact and align them to the section's right edge.
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                                egui::Frame::new()
+                                    .fill(colors.canvas)
+                                    .stroke(Stroke::new(1., colors.border))
+                                    .corner_radius(4)
+                                    .inner_margin(egui::Margin::symmetric(7, 3))
+                                    .show(ui, |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(keys)
+                                                    .monospace()
+                                                    .size(11.)
+                                                    .color(colors.green),
+                                            )
+                                            .wrap(),
+                                        );
+                                    });
+                            });
                             ui.end_row();
                         }
                     });

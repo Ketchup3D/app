@@ -10,9 +10,10 @@ pub(crate) fn visible_in_view(model: &Model, view: &CameraView, point: crate::DV
     let Some(pixel) = view.project(point) else {
         return false;
     };
+    let ray = view.ray(pixel);
     model
-        .nearest_context_face(view.ray(pixel))
-        .is_none_or(|(_, t, _)| t + 1e-5 >= point.distance(view.eye()))
+        .nearest_context_face(ray)
+        .is_none_or(|(_, t, _)| t + 1e-5 >= point.distance(ray.origin))
 }
 
 pub fn pick_entity(

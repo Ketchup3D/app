@@ -37,27 +37,35 @@ struct Outliner<'a> {
     drag_hover: Option<OutlinerDragHover>,
 }
 
+fn empty_outliner_label(ui: &mut egui::Ui, icon: &str, label: &str) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(18., 18.), Sense::hover());
+        icons::line_icon(ui.painter(), rect.center(), icon, Palette::for_ui(ui).muted);
+        ui.weak(label);
+    });
+}
+
 impl Outliner<'_> {
     fn row(&mut self, ui: &mut egui::Ui, id: u64) -> egui::Response {
         let state = self.entities.get(id);
-        let mut label = if let Some(object) = self.model.objects.get(&id) {
-            let kind = match object.kind {
-                ObjectKind::Group => "Group",
-                ObjectKind::Component { .. } => "Component",
-            };
-            let name = object.name.trim();
-            if name.is_empty() {
-                format!("{kind} #{id}")
-            } else {
-                format!("{kind}: {name}")
+        let object = self.model.objects.get(&id);
+        let (kind, icon) = if let Some(object) = object {
+            match object.kind {
+                ObjectKind::Group => ("Group", "group"),
+                ObjectKind::Component { .. } => ("Component", "component"),
             }
         } else if self.model.edges.contains_key(&id) {
-            format!("Edge #{id}")
+            ("Edge", "edge")
         } else if self.model.faces.contains_key(&id) {
-            format!("Face #{id}")
+            ("Face", "face")
         } else {
-            format!("Dimension #{id}")
+            ("Dimension", "dimension")
         };
+        let mut label = object
+            .map(|object| object.name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("#{id}"));
         if state.hidden {
             label.push_str(" · Hidden");
         }
@@ -73,8 +81,20 @@ impl Outliner<'_> {
         } else {
             text
         };
-        let object = self.model.objects.get(&id);
-        let button = egui::Button::selectable(self.selected.contains(&id), text)
+        let hidden = state.hidden;
+        let icon = egui::Atom::paint(egui::vec2(18., 18.), move |ui, args| {
+            icons::line_icon(
+                ui.painter(),
+                args.rect.center(),
+                icon,
+                if hidden {
+                    Palette::for_ui(ui).muted
+                } else {
+                    args.fallback_text_color
+                },
+            );
+        });
+        let button = egui::Button::selectable(self.selected.contains(&id), (icon, text))
             .truncate()
             .sense(if object.is_some() && !state.locked {
                 Sense::click_and_drag()
@@ -86,8 +106,9 @@ impl Outliner<'_> {
         let response = ui
             .scope_builder(egui::UiBuilder::new().scope_id(row_id), |ui| ui.add(button))
             .inner
+            .accessible_name(format!("{kind}: {label}"))
             .on_hover_text(format!(
-                "{label}\nEntity #{id}\n{}",
+                "{kind}: {label}\nEntity #{id}\n{}",
                 if state.hidden {
                     "Click to select · Shift-click to select a range · Ctrl/Cmd-click to toggle selection · Right-click to unhide; check Tags for tag visibility"
                 } else {
@@ -281,7 +302,11 @@ impl Outliner<'_> {
             }
             header.body(|ui| {
                 if object.entities.is_empty() {
-                    ui.weak("Empty object");
+                    let icon = match object.kind {
+                        ObjectKind::Group => "group",
+                        ObjectKind::Component { .. } => "component",
+                    };
+                    empty_outliner_label(ui, icon, "Empty object");
                 } else {
                     self.level(ui, &object.entities, Some(id));
                 }
@@ -296,7 +321,15 @@ impl Outliner<'_> {
         if !geometry.is_empty() {
             let key = format!("outliner_geometry/{parent:?}");
             let open = restored_header_open(ui, &key, false);
-            let header = egui::CollapsingHeader::new(format!("Geometry ({})", geometry.len()))
+            let mut label = egui::text::LayoutJob::simple(
+                format!("Geometry ({})", geometry.len()),
+                egui::TextStyle::Button.resolve(ui.style()),
+                Color32::PLACEHOLDER,
+                f32::INFINITY,
+            );
+            // Reserve space after the disclosure arrow for the geometry icon.
+            label.sections[0].leading_space = 22.;
+            let header = egui::CollapsingHeader::new(label)
                 .id_salt(("outliner_geometry", parent))
                 .open(open)
                 .show(ui, |ui| {
@@ -315,6 +348,15 @@ impl Outliner<'_> {
                             }
                         });
                 });
+            icons::line_icon(
+                ui.painter(),
+                Pos2::new(
+                    header.header_response.rect.left() + ui.spacing().indent + 9.,
+                    header.header_response.rect.center().y,
+                ),
+                "geometry",
+                ui.style().interact(&header.header_response).text_color(),
+            );
             remember_section(ui.ctx(), header.header_response.id, &key);
         }
     }
@@ -354,6 +396,32 @@ mod tests {
             additive: false,
             range: false,
             open: false,
+        }
+    }
+
+    #[test]
+    fn child_expansion_updates_unrendered_descendants_without_touching_other_sections() {
+        let (mut app, group, component, _) = nested_model();
+        let ctx = egui::Context::default();
+        app.selected = BTreeSet::from([group, component]);
+        set_section_open(&ctx, "outliner_geometry/None", false);
+        set_section_open(&ctx, "outliner_object/9999", true);
+        for open in [true, false] {
+            app.set_outliner_children_open(&ctx, open);
+            let sections = ctx.data_mut(|data| {
+                data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
+                    .0
+                    .clone()
+            });
+            for id in [group, component] {
+                assert_eq!(sections[&format!("outliner_object/{id}")], open);
+            }
+            assert_eq!(
+                sections[&format!("outliner_geometry/{:?}", Some(component))],
+                open
+            );
+            assert!(!sections["outliner_geometry/None"]);
+            assert!(sections["outliner_object/9999"]);
         }
     }
 
@@ -500,10 +568,10 @@ mod tests {
         for shape in &output.shapes {
             texts(&shape.shape, &mut labels);
         }
-        assert!(labels.contains(&"Group: Cabinet · Hidden · Locked".into()));
-        assert!(labels.contains(&"Component: Handle · Hidden · Locked".into()));
+        assert!(labels.contains(&"Cabinet · Hidden · Locked".into()));
+        assert!(labels.contains(&"Handle · Hidden · Locked".into()));
         assert!(labels.contains(&"Geometry (1)".into()));
-        assert!(labels.contains(&format!("Edge #{edge} · Hidden · Locked")));
+        assert!(labels.contains(&format!("#{edge} · Hidden · Locked")));
     }
 }
 
@@ -511,11 +579,11 @@ impl KetchupApp {
     pub(super) fn outliner_contents(&mut self, ui: &mut egui::Ui) {
         let roots = self.doc.model.root_entities();
         if roots.is_empty() {
-            ui.weak("No objects or geometry yet");
+            empty_outliner_label(ui, "geometry", "No objects or geometry yet");
             return;
         }
         self.entity_cache.update(&self.doc.model);
-        let hover_id = ui.id().with("outliner_drag_hover");
+        let hover_id = ui.scope_id().with("outliner_drag_hover");
         let mut tree = Outliner {
             model: &self.doc.model,
             selected: &self.selected,
@@ -561,7 +629,7 @@ impl KetchupApp {
         {
             let painter = ui.ctx().layer_painter(egui::LayerId::new(
                 egui::Order::Tooltip,
-                ui.id().with("outliner_drag_label"),
+                ui.scope_id().with("outliner_drag_label"),
             ));
             let colors = Palette::for_ui(ui);
             let label = format!(
@@ -610,8 +678,56 @@ impl KetchupApp {
                 self.select_context_target(Some(id));
                 self.context_position = None;
             }
-            self.context_menu(&response);
+            self.context_menu_with(&response, |app, ui| {
+                let has_children = app.selected.iter().any(|id| {
+                    app.doc
+                        .model
+                        .objects
+                        .get(id)
+                        .is_some_and(|object| !object.entities.is_empty())
+                });
+                ui.separator();
+                for (label, open) in [("Expand Children", true), ("Collapse Children", false)] {
+                    if ui
+                        .add_enabled(has_children, egui::Button::new(label))
+                        .clicked()
+                    {
+                        app.set_outliner_children_open(ui.ctx(), open);
+                        ui.close();
+                    }
+                }
+            });
         }
+    }
+
+    fn set_outliner_children_open(&self, ctx: &egui::Context, open: bool) {
+        let mut pending: Vec<_> = self.selected.iter().copied().collect();
+        let mut visited = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            let Some(object) = self.doc.model.objects.get(&id) else {
+                continue;
+            };
+            if !visited.insert(id) {
+                continue;
+            }
+            set_section_open(ctx, &format!("outliner_object/{id}"), open);
+            if object
+                .entities
+                .iter()
+                .any(|id| !self.doc.model.objects.contains_key(id))
+            {
+                set_section_open(ctx, &format!("outliner_geometry/{:?}", Some(id)), open);
+            }
+            // Walk objects only; large meshes need no per-entity expansion state.
+            pending.extend(
+                object
+                    .entities
+                    .iter()
+                    .filter(|id| self.doc.model.objects.contains_key(id))
+                    .copied(),
+            );
+        }
+        ctx.request_repaint();
     }
 
     fn apply_outliner_drop(&mut self, drop: OutlinerDrop, ctx: &egui::Context) {

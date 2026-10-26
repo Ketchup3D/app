@@ -4,6 +4,7 @@
 This script never compiles the app. Run packaging on the corresponding OS.
 """
 import argparse
+from datetime import date
 import hashlib
 import json
 import os
@@ -16,6 +17,8 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 APP_ID = "io.github.Ketchup3D.Ketchup"
 VPK_VERSION = "1.2.161"  # Must match the exact Rust dependency.
+RELEASE_NOTES = ROOT / "assets/release-notes.json"
+STABLE_VERSION = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
 PLATFORMS = {
     "windows-x64": ("win-x64", "ketchup-app.exe", "favicon.ico", ".exe"),
     "macos-arm64": ("osx-arm64", "ketchup-app", "ketchup.icns", ".pkg"),
@@ -25,7 +28,7 @@ PLATFORMS = {
 
 def version(tag):
     current = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
-    if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag):
+    if not re.fullmatch("v" + STABLE_VERSION, tag):
         raise ValueError("Desktop releases require a stable version tag such as v0.1.0.")
     if tag != f"v{current}":
         raise ValueError(f"Tag {tag} must match Cargo.toml version v{current}.")
@@ -36,7 +39,52 @@ def version(tag):
         raise ValueError("The Rust Velopack dependency and vpk tool versions must match.")
     if os.environ.get("VPK_VERSION", VPK_VERSION) != VPK_VERSION:
         raise ValueError("The workflow vpk version must match the Rust Velopack dependency.")
+    release_notes(current)
     return current
+
+
+def release_notes(current):
+    """Validate the catalog shared by the offline modal and GitHub Releases."""
+    releases = json.loads(RELEASE_NOTES.read_text(encoding="utf-8"))
+    if not isinstance(releases, list) or not releases:
+        raise ValueError("Release notes must contain at least one release.")
+    previous = None
+    for release in releases:
+        if not isinstance(release, dict):
+            raise ValueError("Each release must be an object.")
+        for field in ("version", "date", "title"):
+            if not isinstance(release.get(field), str) or not release[field].strip():
+                raise ValueError(f"Release notes need a non-empty {field}.")
+        if not re.fullmatch(STABLE_VERSION, release["version"]):
+            raise ValueError("Release notes need stable X.Y.Z versions.")
+        number = tuple(map(int, release["version"].split(".")))
+        if previous is not None and number >= previous:
+            raise ValueError("Release notes must have unique versions, newest first.")
+        previous = number
+        if date.fromisoformat(release["date"]).isoformat() != release["date"]:
+            raise ValueError("Release dates must use YYYY-MM-DD.")
+        sections = release.get("sections")
+        if not isinstance(sections, list) or not sections:
+            raise ValueError("Each release needs at least one section.")
+        for section in sections:
+            if not isinstance(section, dict) or not isinstance(section.get("title"), str) or not section["title"].strip():
+                raise ValueError("Each release section needs a title.")
+            changes = section.get("changes")
+            if not isinstance(changes, list) or not changes or any(
+                not isinstance(change, str) or not change.strip() for change in changes
+            ):
+                raise ValueError("Each release section needs non-empty changes.")
+    if releases[0]["version"] != current:
+        raise ValueError(f"Prepare release notes for v{current} as the newest entry before tagging.")
+    return releases
+
+
+def format_notes(release):
+    lines = [f"# KetchUp {release['version']} — {release['title']}", "", release["date"]]
+    for section in release["sections"]:
+        lines += ["", f"## {section['title']}", ""]
+        lines += [f"- {change}" for change in section["changes"]]
+    return "\n".join(lines) + "\n"
 
 
 def signing_required():
@@ -129,10 +177,10 @@ def checksums(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("version", "package", "validate"):
+    for command in ("version", "notes", "package", "validate"):
         child = subparsers.add_parser(command)
         child.add_argument("--tag", required=True)
-        if command != "version":
+        if command in ("package", "validate"):
             child.add_argument("--output-dir", type=Path, default=Path("dist"))
         if command == "package":
             child.add_argument("--platform", choices=PLATFORMS, required=True)
@@ -142,6 +190,8 @@ def main():
         current = version(args.tag)
         if args.command == "version":
             print(current)
+        elif args.command == "notes":
+            print(format_notes(release_notes(current)[0]), end="")
         elif args.command == "package":
             package(args.platform, args.tag, args.pack_dir, args.output_dir)
         else:

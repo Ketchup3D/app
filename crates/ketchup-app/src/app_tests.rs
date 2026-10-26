@@ -11,6 +11,8 @@ mod feature_audit;
 mod outliner_drag;
 #[path = "precision_tests.rs"]
 mod precision_input;
+#[path = "release_notes_tests.rs"]
+mod release_notes;
 
 struct Harness {
     ctx: egui::Context,
@@ -2482,7 +2484,7 @@ fn context_menu_lock_protects_delete_and_hide_can_be_reversed_from_outliner() {
     h.click(text_position(&tree, "Geometry (1)"));
     h.frame(vec![], egui::Modifiers::NONE);
     let tree = h.frame(vec![], egui::Modifiers::NONE);
-    let row = text_position(&tree, &format!("Edge #{id} · Hidden"));
+    let row = text_position(&tree, &format!("#{id} · Hidden"));
     let menu = open_context_menu(&mut h, row);
     h.click(text_position(&menu, "Unhide"));
     assert!(h.app.doc.model.hidden.is_empty());
@@ -4217,6 +4219,7 @@ fn sidebar_headers_reorder_in_memory_and_keep_their_disclosure_state() {
             InspectorSection::Tags,
             InspectorSection::Components,
             InspectorSection::Display,
+            InspectorSection::View,
         ]
     );
     let order = h.app.inspector_order;
@@ -4364,4 +4367,36 @@ fn library_placement_creates_linked_instance_supports_cancel_and_undo() {
     h.app.doc.model.validate().unwrap();
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model, before);
+}
+
+#[test]
+fn view_sidebar_buttons_set_projection_and_all_standard_views_without_resizing() {
+    let mut h = Harness::new();
+    h.ctx.style_mut_of(h.ctx.theme(), |s| s.animation_time = 0.);
+    h.size.y = 2600.;
+    h.frame(vec![], egui::Modifiers::NONE);
+    let width = h.app.viewport.right();
+    for title in ["Camera", "Standard views"] {
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&output, title));
+    }
+    for (label, projection) in [
+        ("Parallel", ketchup_core::Projection::Parallel),
+        ("Perspective", ketchup_core::Projection::Perspective),
+    ] {
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&output, label));
+        assert_eq!(h.app.doc.camera.projection, projection);
+    }
+    let target = h.app.doc.camera.target;
+    let distance = h.app.doc.camera.distance;
+    for view in ketchup_core::StandardView::ALL {
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&output, view.label()));
+        assert_eq!(h.app.doc.camera.standard_view(), Some(view));
+        assert_eq!(h.app.doc.camera.target, target);
+        assert_eq!(h.app.doc.camera.distance, distance);
+        assert!((h.app.viewport.right() - width).abs() < 0.1);
+    }
+    assert!(h.app.project.modified);
 }

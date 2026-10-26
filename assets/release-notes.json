@@ -1,0 +1,70 @@
+[
+  {
+    "version": "0.2.1",
+    "date": "2026-10-25",
+    "title": "Smoother modeling and editor workflows",
+    "sections": [
+      {
+        "title": "Editor",
+        "changes": [
+          "Use shared context menus in the viewport and Outliner to work with objects and selections.",
+          "Drag and drop Outliner entries to reorganize groups and components.",
+          "Inspector preferences, section order, and docked or floating layouts now persist across sessions."
+        ]
+      },
+      {
+        "title": "Modeling",
+        "changes": [
+          "Solid tools support planar intersections and nested component operands."
+        ]
+      }
+    ]
+  },
+  {
+    "version": "0.2.0",
+    "date": "2026-10-25",
+    "title": "Precision drawing and a more capable editor",
+    "sections": [
+      {
+        "title": "Drawing and modeling",
+        "changes": [
+          "Enter precise measurements and use improved axis snapping and 3D inference.",
+          "Lock drawing planes while creating shapes.",
+          "Erase faces as well as edges, with improved dimension behavior."
+        ]
+      },
+      {
+        "title": "Editor",
+        "changes": [
+          "Find entities in the Outliner and commands in searchable keyboard shortcut help.",
+          "Switch to a dark theme with matching tool icons, clearer cursors, and improved face previews and shadows.",
+          "Opened projects use their file names, with clearer autosave recovery messages.",
+          "Try the browser editor from the new KetchUp website."
+        ]
+      }
+    ]
+  },
+  {
+    "version": "0.1.0",
+    "date": "2026-10-23",
+    "title": "The first KetchUp release",
+    "sections": [
+      {
+        "title": "Create and organize",
+        "changes": [
+          "Draw edges and planar faces with Line, Rectangle, Circle, Polygon, and Freehand tools and geometry snapping.",
+          "Shape geometry with Push/Pull, Scale, Offset, Move, Paint, and solid tools.",
+          "Measure models with Tape Measure, Protractor, and Dimensions.",
+          "Organize models with groups and components, a geometry clipboard, and undo and redo."
+        ]
+      },
+      {
+        "title": "Files and platforms",
+        "changes": [
+          "Save portable .ketchup projects with local autosave, import SketchUp .skp geometry, and export Wavefront .obj files.",
+          "Run the editor on Windows, macOS, Linux, or in a desktop browser."
+        ]
+      }
+    ]
+  }
+]

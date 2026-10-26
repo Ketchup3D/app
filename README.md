@@ -73,12 +73,29 @@ packages the app with Velopack:
 | `ketchup-linux-x64` | Linux x64 (built on Ubuntu 22.04) | `*-linux-x64.AppImage` |
 
 After all three builds succeed, the workflow creates a GitHub Release for the
-pushed tag with generated release notes, installers, portable packages, full
+pushed tag with the prepared release notes, installers, portable packages, full
 `.nupkg` updates, one `releases.<platform>.json` feed per OS/architecture, and
 `SHA256SUMS`. It validates the packages against their feed hashes and publishes
 only after every platform succeeds and all assets have uploaded. Reruns can
 replace assets on an unfinished draft; a published version cannot be overwritten.
-To ship another update, bump the workspace version and push a new matching tag.
+To ship another update, first add its user-facing notes to
+`assets/release-notes.json` (newest version first, keeping previous releases),
+then bump the workspace version and lockfile. Validate and preview the notes:
+
+```sh
+python3 scripts/desktop_release.py version --tag vX.Y.Z
+python3 scripts/desktop_release.py notes --tag vX.Y.Z
+```
+
+Commit and push the release changes and notes before creating and pushing the
+matching tag. Release validation rejects missing or mismatched notes. The same
+catalog supplies the GitHub Release description and **Help → Release notes**
+in the app. The modal works offline, opens on the latest release, and lets you
+browse every release using the version picker or **Newer** / **Older** buttons.
+On the first launch of a new version, the release notes open automatically if
+you haven't viewed them yet. The last viewed release version is saved immediately
+across app restarts and browser reloads, so the modal appears automatically only
+once per release. You can reopen it at any time from **Help → Release notes**.
 
 Download the installer or AppImage from [Releases](https://github.com/Ketchup3D/app/releases).
 Workflow artifacts are also available on the run's summary page for 14 days.
@@ -346,10 +363,11 @@ cargo check --workspace --target wasm32-unknown-unknown --locked
 cargo test --workspace --locked
 ```
 
-The vendored SketchUp reader and adapter can also be tested without compiling the application:
+The vendored SketchUp reader, adapter, and browser shortcut handling can also be tested without compiling the application:
 
 ```sh
 node --test scripts/test_skp_import.cjs
+node --test scripts/test_web_shortcuts.cjs
 ```
 
 An optional offscreen GPU test renders the actual UI and custom viewport to PNGs without opening a window:

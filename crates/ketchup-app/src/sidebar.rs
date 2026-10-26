@@ -1,5 +1,8 @@
 use super::*;
-use ketchup_core::{DisplaySettings, FaceStyle};
+use ketchup_core::{DisplaySettings, FaceStyle, Projection};
+
+#[path = "view_controls.rs"]
+mod view_controls;
 
 #[path = "outliner.rs"]
 mod outliner;
@@ -17,7 +20,9 @@ pub(super) struct InspectorPreferences {
     width: f32,
     component_filter: String,
     paint_color: [u8; 3],
+    last_seen_release_notes: Option<String>,
     display: Option<DisplaySettings>,
+    camera: Option<CameraPreferences>,
     sections: std::collections::BTreeMap<String, bool>,
 }
 
@@ -28,8 +33,51 @@ impl Default for InspectorPreferences {
             width: 300.,
             component_filter: String::new(),
             paint_color: [195, 96, 67],
+            last_seen_release_notes: None,
             display: None,
+            camera: None,
             sections: Default::default(),
+        }
+    }
+}
+
+// Keep framing (target and distance) in the document, so opening another
+// project never inherits the previous model's position or scale.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct CameraPreferences {
+    projection: Projection,
+    fov: f64,
+    yaw: f64,
+    pitch: f64,
+}
+
+impl Default for CameraPreferences {
+    fn default() -> Self {
+        Self::capture(&Camera::default())
+    }
+}
+
+impl CameraPreferences {
+    fn capture(camera: &Camera) -> Self {
+        Self {
+            projection: camera.projection,
+            fov: camera.fov,
+            yaw: camera.yaw,
+            pitch: camera.pitch,
+        }
+    }
+
+    fn restore(&self, camera: &mut Camera) {
+        let candidate = Camera {
+            projection: self.projection,
+            fov: self.fov,
+            yaw: self.yaw,
+            pitch: self.pitch,
+            ..camera.clone()
+        };
+        if candidate.valid() {
+            *camera = candidate;
         }
     }
 }
@@ -41,7 +89,7 @@ struct SectionMemory(
 );
 
 fn section_memory_id() -> egui::Id {
-    egui::Id::new(PREFERENCE_KEY)
+    egui::Id::unique(PREFERENCE_KEY)
 }
 
 // All inspector disclosures (including future ones) use these helpers, with a
@@ -82,6 +130,15 @@ pub(super) fn remember_section(ctx: &egui::Context, id: egui::Id, key: &str) {
     }
 }
 
+fn set_section_open(ctx: &egui::Context, key: &str, open: bool) {
+    ctx.data_mut(|data| {
+        let memory = data.get_temp_mut_or_default::<SectionMemory>(section_memory_id());
+        memory.0.insert(key.to_owned(), open);
+        // Apply the new value even to a CollapsingHeader already in this scope.
+        memory.1.remove(key);
+    });
+}
+
 impl KetchupApp {
     pub(super) fn restore_inspector_preferences(
         &mut self,
@@ -100,10 +157,14 @@ impl KetchupApp {
         };
         self.component_filter = preferences.component_filter.clone();
         self.paint_color = preferences.paint_color;
+        self.release_notes.last_seen_version = preferences.last_seen_release_notes.clone();
         if let Some(display) = &preferences.display
             && display.valid()
         {
             self.doc.display = display.clone();
+        }
+        if let Some(camera) = &preferences.camera {
+            camera.restore(&mut self.doc.camera);
         }
         ctx.data_mut(|data| {
             data.insert_temp(
@@ -120,7 +181,9 @@ impl KetchupApp {
             width: self.inspector_width,
             component_filter: self.component_filter.clone(),
             paint_color: self.paint_color,
+            last_seen_release_notes: self.release_notes.last_seen_version.clone(),
             display: Some(self.doc.display.clone()),
+            camera: Some(CameraPreferences::capture(&self.doc.camera)),
             sections: ctx.data_mut(|data| {
                 data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
                     .0
@@ -159,9 +222,10 @@ pub(super) enum InspectorSection {
     Components,
     Tags,
     Display,
+    View,
 }
 
-pub(super) fn restore_order(storage: Option<&dyn eframe::Storage>) -> [InspectorSection; 5] {
+pub(super) fn restore_order(storage: Option<&dyn eframe::Storage>) -> [InspectorSection; 6] {
     let Some(saved) = storage.and_then(|storage| {
         eframe::get_value::<Vec<InspectorSection>>(storage, ORDER_PREFERENCE_KEY)
             // The original preference used a fixed five-element RON tuple.
@@ -187,7 +251,7 @@ pub(super) fn restore_order(storage: Option<&dyn eframe::Storage>) -> [Inspector
     order.try_into().unwrap_or(InspectorSection::ALL)
 }
 
-pub(super) fn save_order(order: &[InspectorSection; 5], storage: &mut dyn eframe::Storage) {
+pub(super) fn save_order(order: &[InspectorSection; 6], storage: &mut dyn eframe::Storage) {
     eframe::set_value(storage, ORDER_PREFERENCE_KEY, &order.to_vec());
     storage.flush();
 }
@@ -278,12 +342,20 @@ mod preference_tests {
         app.doc.display.profile_width = 7.;
         app.doc.display.sun_angle = 280.;
         app.doc.display.sky_color = [3, 4, 5];
+        app.doc.camera.projection = Projection::Parallel;
+        app.doc.camera.fov = 65_f64.to_radians();
+        app.doc
+            .camera
+            .set_standard_view(ketchup_core::StandardView::Bottom);
         for (key, open) in [
             ("display", false),
             ("fog", true),
+            ("view", false),
+            ("view_camera", true),
+            ("view_standard_views", true),
             ("outliner_object/42", true),
         ] {
-            let id = egui::Id::new(key);
+            let id = egui::Id::unique(key);
             let mut state =
                 egui::collapsing_header::CollapsingState::load_with_default_open(&ctx, id, false);
             state.set_open(open);
@@ -315,6 +387,107 @@ mod preference_tests {
     }
 
     #[test]
+    fn viewed_release_notes_save_immediately_and_restore_for_other_projects() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let mut storage = SavedPreferences::default();
+        // Establish saved preferences first, so only the read state changes.
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        storage.flushed = false;
+        assert!(app.release_notes.has_unread());
+        app.release_notes.open_if_unread();
+        assert!(app.release_notes.open);
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1000., 700.))),
+                ..Default::default()
+            },
+            |_| app.release_notes.show(&ctx),
+        );
+        assert!(!app.release_notes.has_unread());
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        assert!(app.dirty_since.is_none());
+
+        let mut other_doc = Document::default();
+        other_doc.name = "Another project".into();
+        let mut refreshed = KetchupApp::with_document(other_doc, None, true);
+        let refreshed_ctx = egui::Context::default();
+        refreshed.restore_inspector_preferences(&refreshed_ctx, Some(&storage));
+        refreshed.release_notes.open_if_unread();
+        assert!(!refreshed.release_notes.has_unread());
+        assert!(!refreshed.release_notes.open);
+        assert_eq!(refreshed.doc.name, "Another project");
+        storage.flushed = false;
+        refreshed.persist_inspector_changes(&refreshed_ctx, Some(&mut storage), false);
+        assert!(!storage.flushed);
+
+        // An older saved read version must allow the next release to open.
+        let mut older = refreshed.current_inspector_preferences(&refreshed_ctx);
+        older.last_seen_release_notes = Some("0.0.0".into());
+        eframe::set_value(&mut storage, PREFERENCE_KEY, &older);
+        let mut updated = KetchupApp::with_document(Document::default(), None, true);
+        updated.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        updated.release_notes.open_if_unread();
+        assert!(updated.release_notes.open);
+        assert!(updated.release_notes.has_unread());
+    }
+
+    #[test]
+    fn bulk_expansion_overrides_existing_headers_and_restores_after_immediate_save() {
+        fn render(ctx: &egui::Context, moved: bool) -> (bool, bool) {
+            let mut visible = (false, false);
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.push_id(if moved { "floating" } else { "docked" }, |ui| {
+                    let id = ui.make_persistent_id(("outliner_object", 42_u64));
+                    restore_section(ctx, id, "outliner_object/42", false);
+                    let state = egui::collapsing_header::CollapsingState::load(ctx, id).unwrap();
+                    visible.0 = state.is_open();
+                    remember_section(ctx, id, "outliner_object/42");
+                    let key = "outliner_geometry/Some(42)";
+                    let open = restored_header_open(ui, key, false);
+                    let header = egui::CollapsingHeader::new("Geometry (1)")
+                        .id_salt(("outliner_geometry", Some(42_u64)))
+                        .open(open)
+                        .show(ui, |ui| {
+                            visible.1 = true;
+                            ui.label("Edge");
+                        });
+                    remember_section(ctx, header.header_response.id, key);
+                });
+            });
+            visible
+        }
+
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.);
+        assert_eq!(render(&ctx, false), (false, false));
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let mut storage = SavedPreferences::default();
+        for open in [true, false] {
+            for key in ["outliner_object/42", "outliner_geometry/Some(42)"] {
+                set_section_open(&ctx, key, open);
+            }
+            // Save before another render, just as an immediate reload would.
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert_eq!(render(&ctx, false), (open, open));
+            assert_eq!(render(&ctx, false), (open, open));
+
+            let refreshed_ctx = egui::Context::default();
+            refreshed_ctx.style_mut_of(refreshed_ctx.theme(), |style| style.animation_time = 0.);
+            let mut refreshed = KetchupApp::with_document(Document::default(), None, true);
+            refreshed.restore_inspector_preferences(&refreshed_ctx, Some(&storage));
+            assert_eq!(render(&refreshed_ctx, true), (open, open));
+            assert!(!refreshed.project.modified);
+        }
+        assert!(!app.project.modified);
+        assert!(app.dirty_since.is_none());
+    }
+
+    #[test]
     fn missing_corrupt_or_invalid_preferences_preserve_document_display() {
         let ctx = egui::Context::default();
         let mut doc = Document::default();
@@ -343,6 +516,8 @@ mod preference_tests {
             serde_json::from_str(r#"{"display":{"axes":false}}"#).unwrap();
         assert!(older.visible);
         assert!(older.sections.is_empty());
+        assert!(older.camera.is_none());
+        assert!(older.last_seen_release_notes.is_none());
         let display = older.display.unwrap();
         assert!(!display.axes);
         assert_eq!(display.sky, DisplaySettings::default().sky);
@@ -351,13 +526,26 @@ mod preference_tests {
 
     #[test]
     fn original_fixed_array_order_migrates_without_losing_layout() {
-        let mut order = InspectorSection::ALL;
-        order.rotate_left(2);
+        let original = [
+            InspectorSection::Tags,
+            InspectorSection::Display,
+            InspectorSection::Outliner,
+            InspectorSection::EntityInfo,
+            InspectorSection::Components,
+        ];
+        let expected = [
+            InspectorSection::Tags,
+            InspectorSection::Display,
+            InspectorSection::Outliner,
+            InspectorSection::EntityInfo,
+            InspectorSection::Components,
+            InspectorSection::View,
+        ];
         let mut storage = SavedPreferences::default();
-        eframe::set_value(&mut storage, ORDER_PREFERENCE_KEY, &order);
-        assert_eq!(restore_order(Some(&storage)), order);
-        save_order(&order, &mut storage);
-        assert_eq!(restore_order(Some(&storage)), order);
+        eframe::set_value(&mut storage, ORDER_PREFERENCE_KEY, &original);
+        assert_eq!(restore_order(Some(&storage)), expected);
+        save_order(&expected, &mut storage);
+        assert_eq!(restore_order(Some(&storage)), expected);
     }
 
     #[test]
@@ -376,6 +564,7 @@ mod preference_tests {
                 InspectorSection::Outliner,
                 InspectorSection::EntityInfo,
                 InspectorSection::Components,
+                InspectorSection::View,
             ]
         );
     }
@@ -436,30 +625,101 @@ mod preference_tests {
     }
 
     #[test]
+    fn view_preferences_restore_groups_without_copying_another_models_framing() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.doc.camera.projection = Projection::Parallel;
+        app.doc.camera.fov = 70_f64.to_radians();
+        app.doc
+            .camera
+            .set_standard_view(ketchup_core::StandardView::Top);
+        app.doc.camera.target = DVec3::splat(500.);
+        app.doc.camera.distance = 300.;
+        for (key, open) in [
+            ("view", false),
+            ("view_camera", true),
+            ("view_standard_views", true),
+        ] {
+            set_section_open(&ctx, key, open);
+        }
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        let mut doc = Document::default();
+        doc.camera.target = DVec3::new(1., 2., 3.);
+        doc.camera.distance = 42.;
+        let refreshed_ctx = egui::Context::default();
+        let mut refreshed = KetchupApp::with_document(doc.clone(), None, true);
+        refreshed.restore_inspector_preferences(&refreshed_ctx, Some(&storage));
+        assert_eq!(refreshed.doc.camera.target, doc.camera.target);
+        assert_eq!(refreshed.doc.camera.distance, doc.camera.distance);
+        assert_eq!(
+            CameraPreferences::capture(&refreshed.doc.camera),
+            CameraPreferences::capture(&app.doc.camera)
+        );
+        let _ = refreshed_ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.push_id("floating_view", |ui| {
+                assert_eq!(restored_header_open(ui, "view", true), Some(false));
+                assert_eq!(restored_header_open(ui, "view_camera", false), Some(true));
+                assert_eq!(
+                    restored_header_open(ui, "view_standard_views", false),
+                    Some(true)
+                );
+            });
+        });
+        let mut preferences = refreshed.current_inspector_preferences(&refreshed_ctx);
+        preferences.camera.as_mut().unwrap().fov = f64::NAN;
+        // Exercise validation directly: JSON/RON need not preserve non-finite values.
+        let before = refreshed.doc.camera.clone();
+        preferences
+            .camera
+            .unwrap()
+            .restore(&mut refreshed.doc.camera);
+        assert_eq!(refreshed.doc.camera, before);
+    }
+
+    #[test]
     fn new_projects_keep_preferences_and_opened_projects_use_their_own_display() {
         let ctx = egui::Context::default();
         let mut app = KetchupApp::with_document(Document::default(), None, true);
         app.doc.display.axes = false;
         app.doc.display.fog = true;
         app.component_filter = "Cabinet".into();
+        app.doc.camera.projection = Projection::Parallel;
+        app.doc.camera.fov = 60_f64.to_radians();
+        app.doc
+            .camera
+            .set_standard_view(ketchup_core::StandardView::Top);
+        app.doc.camera.target = DVec3::splat(100.);
+        app.doc.camera.distance = 200.;
+        let camera_preferences = CameraPreferences::capture(&app.doc.camera);
         app.new_model(&ctx);
         assert!(!app.doc.display.axes);
         assert!(app.doc.display.fog);
         assert_eq!(app.component_filter, "Cabinet");
+        assert_eq!(
+            CameraPreferences::capture(&app.doc.camera),
+            camera_preferences
+        );
+        assert_eq!(app.doc.camera.target, Camera::default().target);
+        assert_eq!(app.doc.camera.distance, Camera::default().distance);
         assert!(!app.project.modified);
         app.replace_project(Document::default(), Some("opened.ketchup".into()), &ctx);
         assert_eq!(app.doc.display, DisplaySettings::default());
+        assert_eq!(app.doc.camera, Camera::default());
         assert_eq!(app.component_filter, "Cabinet");
     }
 }
 
 impl InspectorSection {
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 6] = [
         Self::Outliner,
         Self::EntityInfo,
         Self::Components,
         Self::Tags,
         Self::Display,
+        Self::View,
     ];
 
     fn title(self) -> &'static str {
@@ -469,6 +729,7 @@ impl InspectorSection {
             Self::Components => "Components",
             Self::Tags => "Tags",
             Self::Display => "Display",
+            Self::View => "View",
         }
     }
 
@@ -479,6 +740,7 @@ impl InspectorSection {
             Self::Components => "components",
             Self::Tags => "tags",
             Self::Display => "display",
+            Self::View => "view",
         }
     }
 
@@ -489,8 +751,8 @@ impl InspectorSection {
 
 #[derive(Default)]
 pub(super) struct InspectorLayout {
-    heights: [f32; 5],
-    header_heights: [f32; 5],
+    heights: [f32; 6],
+    header_heights: [f32; 6],
     drag: Option<InspectorDrag>,
     floating: Option<InspectorSection>,
 }
@@ -498,7 +760,7 @@ pub(super) struct InspectorLayout {
 struct InspectorDrag {
     section: InspectorSection,
     grab_offset: Vec2,
-    order: [InspectorSection; 5],
+    order: [InspectorSection; 6],
 }
 
 impl InspectorLayout {
@@ -660,6 +922,8 @@ fn inspector_icon_color(ui: &egui::Ui, id: &str) -> Color32 {
         "components" => ([126, 83, 183], [188, 153, 239]),
         "tags" => ([160, 111, 22], [230, 190, 104]),
         "display" => ([198, 76, 58], [246, 142, 125]),
+        "view" | "view_camera" => ([48, 111, 173], [131, 185, 239]),
+        "view_standard_views" => ([17, 129, 133], [103, 207, 211]),
         "edge_style" => ([88, 109, 135], [159, 181, 209]),
         "sections" => ([176, 67, 113], [237, 142, 181]),
         "shadows" => ([183, 92, 19], [242, 170, 100]),
@@ -797,7 +1061,7 @@ impl KetchupApp {
         let mut top = 0.;
         for section in order {
             let index = section.index();
-            let id = egui::Id::new(("inspector_section", section.id()));
+            let id = egui::Id::unique(("inspector_section", section.id()));
             let target = egui::vec2(0., top);
             let following = layout.drag.as_ref().filter(|d| d.section == section);
             let mut floating = layout.floating == Some(section);
@@ -857,6 +1121,7 @@ impl KetchupApp {
                         InspectorSection::Components => self.components_contents(ui),
                         InspectorSection::Tags => self.tags_contents(ui),
                         InspectorSection::Display => self.display_contents(ui),
+                        InspectorSection::View => self.view_contents(ui),
                     }
                 });
             let header = panel

@@ -2,11 +2,13 @@
 import hashlib
 import base64
 import contextlib
+import copy
 import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -49,6 +51,59 @@ class DesktopReleaseTests(unittest.TestCase):
         with patch.dict(os.environ, {"VPK_VERSION": "0.0.0"}):
             with self.assertRaisesRegex(ValueError, "workflow vpk version"):
                 release.version(self.tag)
+
+    def test_new_version_requires_notes_before_tagging(self):
+        catalog = json.loads(release.RELEASE_NOTES.read_text())
+        catalog[0]["version"] = "0.0.0"
+        # A valid older catalog must still be rejected for the current version.
+        catalog = catalog[:1]
+        file = self.directory / "release-notes.json"
+        file.write_text(json.dumps(catalog))
+        with patch.object(release, "RELEASE_NOTES", file):
+            with self.assertRaisesRegex(ValueError, "Prepare release notes"):
+                release.version(self.tag)
+
+    def test_missing_release_notes_file_prevents_tag_validation(self):
+        with patch.object(release, "RELEASE_NOTES", self.directory / "missing.json"):
+            with self.assertRaises(FileNotFoundError):
+                release.version(self.tag)
+
+    def test_release_catalog_rejects_invalid_or_empty_content(self):
+        catalog = json.loads(release.RELEASE_NOTES.read_text())
+        cases = [[], {}, [None], [catalog[0], catalog[0]], list(reversed(catalog))]
+        for field, value in (
+            ("version", "01.0.0"), ("version", None), ("date", "2026-02-30"),
+            ("date", "20261025"), ("title", " "), ("sections", []),
+            ("sections", [{"title": "Editor", "changes": []}]),
+            ("sections", [{"title": "Editor", "changes": [" "]}]),
+            ("sections", [{"title": "Editor", "changes": [42]}]),
+            ("sections", [{"changes": ["A change"]}]),
+        ):
+            invalid = copy.deepcopy(catalog)
+            invalid[0][field] = value
+            cases.append(invalid)
+        file = self.directory / "release-notes.json"
+        with patch.object(release, "RELEASE_NOTES", file):
+            for invalid in cases:
+                with self.subTest(catalog=invalid):
+                    file.write_text(json.dumps(invalid))
+                    with self.assertRaises(ValueError):
+                        release.version(self.tag)
+
+    def test_notes_command_uses_the_same_catalog_as_the_app(self):
+        catalog = release.release_notes(self.current)
+        result = subprocess.run(
+            [sys.executable, str(release.ROOT / "scripts/desktop_release.py"), "notes", "--tag", self.tag],
+            check=True, capture_output=True, text=True,
+        )
+        self.assertEqual(result.stdout, release.format_notes(catalog[0]))
+        self.assertIn(f"# KetchUp {self.current}", result.stdout)
+        for section in catalog[0]["sections"]:
+            self.assertIn(f"## {section['title']}", result.stdout)
+            for change in section["changes"]:
+                self.assertIn(f"- {change}", result.stdout)
+        for older in catalog[1:]:
+            self.assertNotIn(older["title"], result.stdout)
 
     def test_all_platforms_can_share_one_release_without_filename_collisions(self):
         for platform in release.PLATFORMS:

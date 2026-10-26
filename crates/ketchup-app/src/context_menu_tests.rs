@@ -30,10 +30,10 @@ fn outliner_shift_click_selects_and_adjusts_ranges_in_both_directions() {
     let e = object(&mut h, "Last", false, DVec3::Y * 8.);
     h.app.doc.model.hidden.insert(c);
     h.app.doc.model.locked.insert(d);
-    let first = outliner_row(&mut h, "Group: First");
-    let second = outliner_row(&mut h, "Group: Second");
-    let hidden = outliner_row(&mut h, "Group: Hidden · Hidden");
-    let last = outliner_row(&mut h, "Group: Last");
+    let first = outliner_row(&mut h, "First");
+    let second = outliner_row(&mut h, "Second");
+    let hidden = outliner_row(&mut h, "Hidden · Hidden");
+    let last = outliner_row(&mut h, "Last");
     let modified_click = |h: &mut Harness, pos, modifiers| {
         h.pointer_with_modifiers(pos, egui::PointerButton::Primary, true, modifiers);
         h.pointer_with_modifiers(pos, egui::PointerButton::Primary, false, modifiers);
@@ -76,10 +76,10 @@ fn outliner_modifier_clicks_toggle_visible_hidden_and_locked_items() {
         let d = object(&mut h, "Locked", false, DVec3::Y * 6.);
         h.app.doc.model.hidden.insert(c);
         h.app.doc.model.locked.insert(d);
-        let first = outliner_row(&mut h, "Group: First");
-        let second = outliner_row(&mut h, "Group: Second");
-        let hidden = outliner_row(&mut h, "Group: Hidden · Hidden");
-        let locked = outliner_row(&mut h, "Group: Locked · Locked");
+        let first = outliner_row(&mut h, "First");
+        let second = outliner_row(&mut h, "Second");
+        let hidden = outliner_row(&mut h, "Hidden · Hidden");
+        let locked = outliner_row(&mut h, "Locked · Locked");
         h.click(first);
         assert_eq!(h.app.selected, BTreeSet::from([a]));
         for (pos, expected) in [
@@ -110,7 +110,7 @@ fn outliner_modifier_clicks_toggle_visible_hidden_and_locked_items() {
 fn outliner_and_viewport_offer_the_same_object_commands() {
     let mut h = Harness::new();
     let id = object(&mut h, "Beam", false, DVec3::ZERO);
-    let row = outliner_row(&mut h, "Group: Beam");
+    let row = outliner_row(&mut h, "Beam");
     let menu = open_context_menu(&mut h, row);
     assert_eq!(h.app.selected, BTreeSet::from([id]));
     let commands = [
@@ -140,12 +140,69 @@ fn outliner_and_viewport_offer_the_same_object_commands() {
 }
 
 #[test]
+fn outliner_context_menu_expands_and_collapses_selected_subtrees() {
+    let mut h = Harness::new();
+    h.ctx
+        .style_mut_of(h.ctx.theme(), |style| style.animation_time = 0.);
+    let child = object(&mut h, "Child", true, DVec3::ZERO);
+    let parent = h
+        .app
+        .doc
+        .model
+        .make_object(&BTreeSet::from([child]), false, "Parent")
+        .unwrap();
+    let child = *h.app.doc.model.objects[&parent].entities.first().unwrap();
+    let edge = *h.app.doc.model.objects[&child].entities.first().unwrap();
+    let other = object(&mut h, "Other", false, DVec3::Y * 4.);
+    let other_edge = *h.app.doc.model.objects[&other].entities.first().unwrap();
+    object(&mut h, "Unrelated", false, DVec3::Y * 6.);
+    h.app.doc.model.hidden.insert(parent);
+    h.app.doc.model.locked.insert(parent);
+    let model = h.app.doc.model.clone();
+    h.app.selected = BTreeSet::from([parent, other]);
+    let label = "Parent · Hidden · Locked";
+    let row = outliner_row(&mut h, label);
+    let menu = open_context_menu(&mut h, row);
+    h.click(text_position(&menu, "Expand Children"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    text_position(&output, "Child · Hidden · Locked");
+    text_position(&output, &format!("#{edge} · Hidden · Locked"));
+    text_position(&output, &format!("#{other_edge}"));
+    assert_eq!(h.app.selected, BTreeSet::from([parent, other]));
+
+    let row = outliner_row(&mut h, label);
+    let menu = open_context_menu(&mut h, row);
+    h.click(text_position(&menu, "Collapse Children"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    text_position(&output, label);
+    fn contains(shape: &egui::Shape, label: &str) -> bool {
+        match shape {
+            egui::Shape::Text(text) => text.galley.job.text == label,
+            egui::Shape::Vec(shapes) => shapes.iter().any(|shape| contains(shape, label)),
+            _ => false,
+        }
+    }
+    for label in ["Child · Hidden · Locked", "Geometry (1)"] {
+        assert!(
+            !output
+                .shapes
+                .iter()
+                .any(|shape| contains(&shape.shape, label))
+        );
+    }
+    assert_eq!(h.app.doc.model, model);
+    assert_eq!(h.app.history.undo_label(), None);
+    assert!(!h.app.project.modified);
+    assert!(h.app.dirty_since.is_none());
+}
+
+#[test]
 fn outliner_context_menu_preserves_multiselection_and_runs_shared_commands() {
     let mut h = Harness::new();
     let a = object(&mut h, "First", false, DVec3::ZERO);
     let b = object(&mut h, "Second", false, DVec3::Y * 2.);
     h.app.selected = BTreeSet::from([a, b]);
-    let row = outliner_row(&mut h, "Group: First");
+    let row = outliner_row(&mut h, "First");
     let menu = open_context_menu(&mut h, row);
     assert_eq!(h.app.selected, BTreeSet::from([a, b]));
     h.click(text_position(&menu, "Hide"));
@@ -153,7 +210,7 @@ fn outliner_context_menu_preserves_multiselection_and_runs_shared_commands() {
     assert!(h.app.selected.is_empty());
     assert_eq!(h.app.history.undo_label(), Some("Hide"));
 
-    let row = outliner_row(&mut h, "Group: First · Hidden");
+    let row = outliner_row(&mut h, "First · Hidden");
     let menu = open_context_menu(&mut h, row);
     assert_eq!(h.app.selected, BTreeSet::from([a]));
     h.click(text_position(&menu, "Unhide"));
@@ -170,12 +227,7 @@ fn renaming_from_either_menu_is_undoable_and_can_be_cancelled() {
     for component in [false, true] {
         let mut h = Harness::new();
         let id = object(&mut h, "Beam", component, DVec3::ZERO);
-        let label = if component {
-            "Component: Beam"
-        } else {
-            "Group: Beam"
-        };
-        let row = outliner_row(&mut h, label);
+        let row = outliner_row(&mut h, "Beam");
         let point = if component { h.at(DVec3::X) } else { row };
         let menu = open_context_menu(&mut h, point);
         h.click(text_position(&menu, "Rename…"));
@@ -213,7 +265,7 @@ fn outliner_context_menu_lock_disables_rename_and_delete_until_unlocked() {
     let mut h = Harness::new();
     let id = object(&mut h, "Beam", false, DVec3::ZERO);
     h.app.doc.model.locked.insert(id);
-    let row = outliner_row(&mut h, "Group: Beam · Locked");
+    let row = outliner_row(&mut h, "Beam · Locked");
     let menu = open_context_menu(&mut h, row);
     assert_eq!(h.app.selected, BTreeSet::from([id]));
     h.click(text_position(&menu, "Rename…"));

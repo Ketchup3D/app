@@ -157,8 +157,9 @@ impl PickingCache {
         let Some(pixel) = view.project(point) else {
             return false;
         };
-        self.nearest(faces, entities, view.ray(pixel), false)
-            .is_none_or(|(_, t, _)| t + 1e-5 >= point.distance(view.eye()))
+        let ray = view.ray(pixel);
+        self.nearest(faces, entities, ray, false)
+            .is_none_or(|(_, t, _)| t + 1e-5 >= point.distance(ray.origin))
     }
     fn nearest_filtered(
         &self,
@@ -255,8 +256,9 @@ impl PickingCache {
             let Some(pixel) = view.project(point) else {
                 continue;
             };
-            let obstruction = self.nearest(faces, entities, view.ray(pixel), false);
-            if obstruction.is_none_or(|(_, t, _)| t + 1e-5 >= point.distance(view.eye())) {
+            let point_ray = view.ray(pixel);
+            let obstruction = self.nearest(faces, entities, point_ray, false);
+            if obstruction.is_none_or(|(_, t, _)| t + 1e-5 >= point.distance(point_ray.origin)) {
                 return entities.get(edge.id).context;
             }
         }

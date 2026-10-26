@@ -7,16 +7,19 @@ use std::collections::BTreeMap;
 pub(super) struct FaceLighting {
     eye: DVec3,
     direction: DVec3,
+    parallel: Option<DVec3>,
 }
 
 impl FaceLighting {
     pub(super) fn new(camera: &Camera) -> Self {
         let eye = camera.eye();
         let toward_eye = (eye - camera.target).normalize();
-        let right = DVec3::Z.cross(toward_eye).normalize();
-        let up = toward_eye.cross(right);
+        let right = camera.right();
+        let up = camera.up();
         Self {
             eye,
+            parallel: (camera.projection == ketchup_core::Projection::Parallel)
+                .then_some(toward_eye),
             direction: (toward_eye * 0.8 - right * 0.45 + up * 0.65).normalize(),
         }
     }
@@ -24,7 +27,7 @@ impl FaceLighting {
     pub(super) fn shade(&self, color: Color32, normal: DVec3, point: DVec3) -> Color32 {
         // Light the visible side of open faces and imported geometry, even
         // when their winding differs. Monochrome keeps its distinct back color.
-        let normal = if normal.dot(self.eye - point) < 0. {
+        let normal = if normal.dot(self.parallel.unwrap_or(self.eye - point)) < 0. {
             -normal
         } else {
             normal
@@ -59,7 +62,7 @@ pub(super) fn profile_edges(
         let facing = cache
             .get(face.id)
             .normal
-            .dot(camera.eye() - model.vertices[&face.vertices[0]].position)
+            .dot(camera.toward_eye(model.vertices[&face.vertices[0]].position))
             > 0.;
         for ring in std::iter::once(&face.vertices).chain(face.holes.iter()) {
             for i in 0..ring.len() {

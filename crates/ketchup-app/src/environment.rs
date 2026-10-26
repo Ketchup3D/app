@@ -1,5 +1,5 @@
 use eframe::egui::{self, Color32, Rect};
-use ketchup_core::{Camera, DisplaySettings};
+use ketchup_core::{Camera, DisplaySettings, Projection};
 
 /// Adapt the default environment without changing saved or custom project colors.
 pub fn for_theme(display: &DisplaySettings, dark: bool) -> DisplaySettings {
@@ -50,14 +50,44 @@ pub fn paint(
 }
 
 fn horizon_fraction(camera: &Camera) -> f64 {
+    if camera.projection == Projection::Parallel {
+        return if camera.pitch < 0. {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        };
+    }
     // With no camera roll, the Z component of an unnormalized camera ray is
     // constant across each row. Its zero gives the true world-space horizon.
-    (1. - camera.pitch.tan() / (Camera::FOV * 0.5).tan()) * 0.5
+    (1. - camera.pitch.tan() / (camera.fov * 0.5).tan()) * 0.5
 }
 
 fn backdrop(rect: Rect, camera: &Camera, display: &DisplaySettings, dark: bool) -> egui::Mesh {
+    if camera.projection == Projection::Parallel {
+        let sky = camera.pitch < 0.;
+        let rgb = if sky && display.sky {
+            display.sky_color
+        } else if !sky && display.ground {
+            display.ground_color
+        } else {
+            display.background
+        };
+        let color = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+        let mut mesh = egui::Mesh::default();
+        for pos in [
+            rect.left_top(),
+            rect.right_top(),
+            rect.left_bottom(),
+            rect.right_bottom(),
+        ] {
+            mesh.colored_vertex(pos, color);
+        }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(1, 3, 2);
+        return mesh;
+    }
     let horizon = horizon_fraction(camera);
-    let elevation_span = 2. * camera.pitch.cos() * (Camera::FOV * 0.5).tan();
+    let elevation_span = 2. * camera.pitch.cos() * (camera.fov * 0.5).tan();
     // Reach the sky color above the horizon, independently of pan and zoom.
     let blue = horizon - 0.45 / elevation_span;
     let sky_base = if dark {
@@ -201,6 +231,37 @@ mod tests {
                 mesh.vertices,
                 backdrop(rect, &moved, &DisplaySettings::default(), false).vertices
             );
+        }
+    }
+
+    #[test]
+    fn parallel_backdrop_is_uniform_and_field_of_view_matches_perspective_horizon() {
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800., 600.));
+        let display = DisplaySettings::default();
+        for standard in ketchup_core::StandardView::ALL {
+            let mut camera = Camera {
+                projection: Projection::Parallel,
+                ..Camera::default()
+            };
+            camera.set_standard_view(standard);
+            let mesh = backdrop(rect, &camera, &display, false);
+            assert!(mesh.is_valid());
+            assert!(
+                mesh.vertices
+                    .iter()
+                    .all(|v| v.pos.is_finite() && v.color == mesh.vertices[0].color)
+            );
+            assert!(!horizon_fraction(&camera).is_finite());
+        }
+        for degrees in [15_f64, 45., 100.] {
+            let camera = Camera {
+                pitch: 0.1,
+                fov: degrees.to_radians(),
+                ..Camera::default()
+            };
+            let horizon = horizon_fraction(&camera);
+            let ray = camera.ray(DVec2::new(400., horizon * 600.), DVec2::new(800., 600.));
+            assert!(ray.direction.z.abs() < 1e-6);
         }
     }
 

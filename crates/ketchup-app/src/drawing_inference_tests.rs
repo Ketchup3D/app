@@ -760,3 +760,184 @@ fn a_typed_formula_keeps_its_length_without_claiming_an_incompatible_reference_a
     h.key(Key::Enter);
     assert!(h.app.line_start.unwrap().distance(preview.point) < 1e-7);
 }
+
+#[test]
+fn lines_snap_to_each_axis_pair_and_three_way_intersections_and_commit_the_preview() {
+    let target = DVec3::new(3., 4., 2.);
+    let start = DVec3::new(-4., -3., 2.);
+    for axes in [
+        vec![Axis::X, Axis::Y],
+        vec![Axis::X, Axis::Z],
+        vec![Axis::Y, Axis::Z],
+        vec![Axis::X, Axis::Y, Axis::Z],
+    ] {
+        let mut h = Harness::new();
+        for axis in &axes {
+            reference(&mut h, target - axis.vector() * 3.);
+        }
+        reference(&mut h, start);
+        h.key(Key::L);
+        h.click(h.at(start));
+        let cursor = h.at(target) + egui::vec2(2., -2.);
+        h.frame(
+            vec![egui::Event::PointerMoved(cursor)],
+            egui::Modifiers::NONE,
+        );
+        let preview = h.app.line_preview_snap().unwrap();
+        assert_eq!(preview.kind, Inference::Aligned, "{axes:?}");
+        assert!(
+            preview.point.distance(target) < 1e-7,
+            "{axes:?}: {preview:?}"
+        );
+        let guides: Vec<_> = h.app.active_drawing_axis_guides().collect();
+        assert_eq!(guides.len(), axes.len(), "{axes:?}");
+        for axis in axes {
+            assert!(guides.iter().any(|guide| guide.axis == axis));
+        }
+        let before = h.app.doc.model.clone();
+        h.click(cursor);
+        assert!(h.app.line_start.unwrap().distance(preview.point) < 1e-7);
+        assert!(h.app.doc.model.edges.values().any(|edge| {
+            let (a, b) = h.app.doc.model.points(edge);
+            (a.distance(start) < 1e-7 && b.distance(target) < 1e-7)
+                || (b.distance(start) < 1e-7 && a.distance(target) < 1e-7)
+        }));
+        h.app.doc.model.validate().unwrap();
+        h.app.undo(&h.ctx, false);
+        assert_eq!(h.app.doc.model, before);
+        assert!(h.app.drawing_axis_guides.is_empty());
+    }
+}
+
+#[test]
+fn combined_line_guides_respect_every_explicit_axis_lock() {
+    let target = DVec3::new(3., 4., 2.);
+    for (axis, key) in PLANE_LOCKS {
+        let mut h = Harness::new();
+        let start = target - axis.vector() * 3.;
+        for other in [Axis::X, Axis::Y, Axis::Z] {
+            reference(&mut h, target - other.vector() * 3.);
+        }
+        h.key(Key::L);
+        h.click(h.at(start));
+        h.key(key);
+        let cursor = h.at(target) + egui::vec2(2., -2.);
+        h.frame(
+            vec![egui::Event::PointerMoved(cursor)],
+            egui::Modifiers::NONE,
+        );
+        let snap = h.app.line_preview_snap().unwrap();
+        assert_eq!(h.app.lock, Some(axis));
+        assert!(snap.point.distance(target) < 1e-7, "{axis:?}: {snap:?}");
+        assert_eq!(h.app.active_drawing_axis_guides().count(), 3);
+
+        // Moving to an incompatible guide crossing must never break the lock.
+        hover(&mut h, target + DVec3::ONE);
+        let snap = h.app.line_preview_snap().unwrap();
+        assert!((snap.point - start).cross(axis.vector()).length() < 1e-7);
+    }
+}
+
+#[test]
+fn combined_line_guides_release_when_snapping_is_disabled_or_a_reference_is_removed() {
+    let target = DVec3::new(3., 4., 2.);
+    for change in 0..4 {
+        let mut h = Harness::new();
+        let edge = reference(&mut h, target - DVec3::X * 3.);
+        reference(&mut h, target - DVec3::Y * 3.);
+        let start = DVec3::new(-4., -3., 2.);
+        reference(&mut h, start);
+        h.key(Key::L);
+        h.click(h.at(start));
+        let cursor = h.at(target) + egui::vec2(2., -2.);
+        h.frame(
+            vec![egui::Event::PointerMoved(cursor)],
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(h.app.active_drawing_axis_guides().count(), 2);
+        match change {
+            0 => h.app.doc.snap_to_geometry = false,
+            1 => h.app.doc.snap_to_axes = false,
+            2 => {
+                h.app.doc.model.hidden.insert(edge);
+            }
+            _ => h.app.doc.model.erase(&BTreeSet::from([edge])),
+        }
+        h.app.update_pointer(cursor);
+        assert!(h.app.drawing_axis_guides.is_empty());
+        assert!(h.app.snap.unwrap().point.distance(target) > 1e-4);
+    }
+}
+
+#[test]
+fn exact_line_geometry_wins_over_combined_axis_guides() {
+    let mut h = Harness::new();
+    let target = DVec3::new(3., 4., 2.);
+    reference(&mut h, target - DVec3::X * 3.);
+    reference(&mut h, target - DVec3::Y * 3.);
+    let endpoint = target + DVec3::new(0.01, 0.01, 0.);
+    reference(&mut h, endpoint);
+    let start = DVec3::new(-4., -3., 2.);
+    reference(&mut h, start);
+    h.key(Key::L);
+    h.click(h.at(start));
+    hover(&mut h, endpoint);
+    assert_eq!(h.app.snap.unwrap().kind, Inference::Endpoint);
+    assert!(h.app.snap.unwrap().point.distance(endpoint) < 1e-5);
+    assert!(h.app.drawing_axis_guides.is_empty());
+}
+
+#[test]
+fn typed_line_length_releases_incompatible_combined_guides_and_commits_the_preview() {
+    let mut h = Harness::new();
+    let target = DVec3::new(3., 4., 2.);
+    reference(&mut h, target - DVec3::X * 3.);
+    reference(&mut h, target - DVec3::Y * 3.);
+    let start = DVec3::new(-4., -3., 2.);
+    reference(&mut h, start);
+    h.key(Key::L);
+    h.click(h.at(start));
+    let cursor = h.at(target) + egui::vec2(2., -2.);
+    h.frame(
+        vec![egui::Event::PointerMoved(cursor)],
+        egui::Modifiers::NONE,
+    );
+    assert_eq!(h.app.active_drawing_axis_guides().count(), 2);
+    h.frame(vec![egui::Event::Text("1m".into())], egui::Modifiers::NONE);
+    let preview = h.app.line_preview_snap().unwrap();
+    assert!((preview.point.distance(start) - 1.).abs() < 1e-7);
+    assert_ne!(preview.kind, Inference::Aligned);
+    assert_eq!(h.app.active_drawing_axis_guides().count(), 0);
+    h.key(Key::Enter);
+    assert!(h.app.line_start.unwrap().distance(preview.point) < 1e-7);
+}
+
+#[test]
+fn line_start_and_world_axis_guides_combine_with_object_snapping_disabled() {
+    let mut h = Harness::new();
+    h.app.doc.snap_to_geometry = false;
+    h.key(Key::L);
+    h.click(h.at(DVec3::new(2., 3., 0.)));
+    let start = h.app.line_start.unwrap();
+    let target = DVec3::new(0., start.y, 0.);
+    let cursor = h.at(target) + egui::vec2(2., -2.);
+    h.frame(
+        vec![egui::Event::PointerMoved(cursor)],
+        egui::Modifiers::NONE,
+    );
+    let snap = h.app.line_preview_snap().unwrap();
+    assert_eq!(snap.kind, Inference::Aligned);
+    assert!(snap.point.distance(target) < 1e-7);
+    let guides: Vec<_> = h.app.active_drawing_axis_guides().collect();
+    assert_eq!(guides.len(), 2);
+    assert!(
+        guides
+            .iter()
+            .any(|g| g.axis == Axis::X && g.origin == start)
+    );
+    assert!(
+        guides
+            .iter()
+            .any(|g| g.axis == Axis::Y && g.origin == DVec3::ZERO)
+    );
+}

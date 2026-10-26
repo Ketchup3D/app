@@ -1,5 +1,5 @@
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke};
-use ketchup_core::Tool;
+use ketchup_core::{Axis, Tool};
 
 // Every icon uses the same theme palette in the rail, flyouts, and cursor.
 // Selection is indicated by the button background and label.
@@ -416,6 +416,68 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, colors: ToolPalette) {
 pub fn logo(p: &egui::Painter, rect: Rect) {
     super::brand_mark::paint(p, rect);
 }
+pub fn axis_lock(
+    p: &egui::Painter,
+    c: Pos2,
+    axis: Axis,
+    locked: bool,
+    color: Color32,
+    muted: Color32,
+) {
+    let origin = c + egui::vec2(-3., 4.);
+    for (candidate, offset) in [
+        (Axis::X, egui::vec2(10., 5.)),
+        (Axis::Y, egui::vec2(-10., 5.)),
+        (Axis::Z, egui::vec2(0., -15.)),
+    ] {
+        let highlighted = axis == candidate;
+        let stroke = Stroke::new(
+            if highlighted { 2.3 } else { 1.2 },
+            if highlighted {
+                color
+            } else {
+                muted.gamma_multiply(0.5)
+            },
+        );
+        let tip = origin + offset;
+        let direction = offset.normalized();
+        let side = egui::vec2(-direction.y, direction.x);
+        p.line_segment([origin, tip], stroke);
+        p.add(egui::Shape::line(
+            vec![
+                tip - direction * 4. + side * 2.5,
+                tip,
+                tip - direction * 4. - side * 2.5,
+            ],
+            stroke,
+        ));
+    }
+    if !locked {
+        return;
+    }
+    // Only the active axis shows a padlock.
+    let at = |x: f32, y: f32| c + egui::vec2(x, y);
+    let stroke = Stroke::new(1.5, color);
+    p.rect_stroke(
+        Rect::from_center_size(at(8., -1.), egui::vec2(8., 7.)),
+        1.5,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    p.add(egui::Shape::line(
+        vec![
+            at(6., -4.5),
+            at(6., -7.5),
+            at(7., -9.),
+            at(9., -9.),
+            at(10., -7.5),
+            at(10., -4.5),
+        ],
+        stroke,
+    ));
+    p.circle_filled(at(8., -1.), 0.8, color);
+}
+
 pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
     let s = Stroke::new(1.5, color);
     match kind {
@@ -440,7 +502,21 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
             p.circle_filled(c + egui::vec2(0., -3.5), 1., color);
             p.line_segment([c + egui::vec2(0., -0.5), c + egui::vec2(0., 4.)], s);
         }
-        "components" => {
+        "group" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.add(egui::Shape::closed_line(
+                vec![
+                    at(-8., -6.),
+                    at(-3., -6.),
+                    at(-1., -3.),
+                    at(8., -3.),
+                    at(8., 6.),
+                    at(-8., 6.),
+                ],
+                s,
+            ));
+        }
+        "components" | "component" => {
             let at = |x: f32, y: f32| c + egui::vec2(x, y);
             p.add(egui::Shape::closed_line(
                 vec![
@@ -457,6 +533,41 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
                 p.line_segment([c, point], s);
             }
         }
+        "geometry" => {
+            let points = [(-7., 5.), (-2., -6.), (7., 4.)].map(|(x, y)| c + egui::vec2(x, y));
+            p.add(egui::Shape::convex_polygon(
+                points.to_vec(),
+                color.gamma_multiply(0.15),
+                s,
+            ));
+            for point in points {
+                p.circle_filled(point, 2., color);
+            }
+        }
+        "edge" => {
+            let ends = [c + egui::vec2(-6., 6.), c + egui::vec2(6., -6.)];
+            p.line_segment(ends, s);
+            for end in ends {
+                p.circle_filled(end, 2., color);
+            }
+        }
+        "face" => {
+            p.add(egui::Shape::convex_polygon(
+                [(-8., 4.), (-3., -5.), (8., -5.), (3., 4.)]
+                    .map(|(x, y)| c + egui::vec2(x, y))
+                    .to_vec(),
+                color.gamma_multiply(0.15),
+                s,
+            ));
+        }
+        "dimension" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.line_segment([at(-6., 0.), at(6., 0.)], s);
+            for x in [-6., 6.] {
+                p.line_segment([at(x, -6.), at(x, 6.)], s);
+                p.line_segment([at(x - 2., 2.), at(x + 2., -2.)], s);
+            }
+        }
         "tags" => {
             let at = |x: f32, y: f32| c + egui::vec2(x, y);
             p.add(egui::Shape::closed_line(
@@ -470,6 +581,33 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
                 s,
             ));
             p.circle_stroke(at(-3., -3.), 1.5, s);
+        }
+        "view" | "view_camera" => {
+            p.rect_stroke(
+                Rect::from_center_size(c, egui::vec2(13., 10.)),
+                2,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            p.circle_stroke(c, 3., s);
+            p.line_segment([c + egui::vec2(-4., -6.), c + egui::vec2(1., -6.)], s);
+        }
+        "view_standard_views" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.add(egui::Shape::closed_line(
+                vec![
+                    at(0., -8.),
+                    at(7., -4.),
+                    at(7., 4.),
+                    at(0., 8.),
+                    at(-7., 4.),
+                    at(-7., -4.),
+                ],
+                s,
+            ));
+            for end in [at(-7., -4.), at(7., -4.), at(0., 8.)] {
+                p.line_segment([c, end], s);
+            }
         }
         "display" => {
             p.rect_stroke(

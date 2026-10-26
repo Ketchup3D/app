@@ -5,6 +5,7 @@ mod icons;
 mod interchange;
 mod picking;
 mod project_files;
+mod release_notes;
 mod renderer;
 mod shadows;
 mod storage;

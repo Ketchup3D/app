@@ -190,6 +190,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
+          python scripts/desktop_release.py notes --tag "$TAG_NAME" > "$RUNNER_TEMP/release-notes.md"
           if gh release view "$TAG_NAME" > /dev/null 2>&1; then
             is_draft=$(gh release view "$TAG_NAME" --json isDraft --jq '.isDraft')
             if [ "$is_draft" != true ]; then
@@ -198,8 +199,8 @@ jobs:
             fi
           else
             gh release create "$TAG_NAME" --verify-tag --draft \
-              --title "$TAG_NAME" --generate-notes
+              --title "$TAG_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
 
           gh release upload "$TAG_NAME" dist/* --clobber
-          gh release edit "$TAG_NAME" --draft=false --latest
+          gh release edit "$TAG_NAME" --notes-file "$RUNNER_TEMP/release-notes.md" --draft=false --latest

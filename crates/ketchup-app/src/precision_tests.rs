@@ -32,17 +32,70 @@ fn type_dimension(h: &mut Harness, input: &str) {
 }
 
 #[test]
+fn space_stops_every_drawing_tool_with_or_without_a_typed_dimension() {
+    for tool in Tool::DRAWING {
+        for input in ["", "2cm"] {
+            let mut h = Harness::new();
+            h.app.set_tool(tool);
+            let start = h.at(DVec3::ZERO);
+            let end = h.at(DVec3::new(2., 1., 0.));
+            if tool == Tool::Freehand {
+                h.pointer(start, egui::PointerButton::Primary, true, false);
+            } else {
+                h.click(start);
+            }
+            h.frame(vec![egui::Event::PointerMoved(end)], egui::Modifiers::NONE);
+            assert!(h.app.line_start.is_some() || h.app.drawing.is_some());
+            type_dimension(&mut h, input);
+            assert_eq!(h.app.length_input, input);
+            let before = h.app.doc.model.clone();
+
+            // Native input delivers both a key and its corresponding text event.
+            type_dimension(&mut h, " ");
+
+            assert_eq!(h.app.tool, Tool::Select, "{tool:?}: {input}");
+            assert!(h.app.line_start.is_none());
+            assert!(h.app.drawing.is_none());
+            assert!(h.app.gesture.is_none());
+            assert!(h.app.lock.is_none());
+            assert!(h.app.length_input.is_empty());
+            h.pointer(end, egui::PointerButton::Primary, false, false);
+            assert_eq!(h.app.doc.model, before);
+            assert!(h.app.history.undo_label().is_none());
+        }
+    }
+}
+
+#[test]
+fn space_ends_a_line_chain_and_keeps_completed_segments() {
+    let mut h = Harness::new();
+    h.key(Key::L);
+    h.click(h.at(DVec3::ZERO));
+    h.click(h.at(DVec3::X * 2.));
+    assert_eq!(h.app.doc.model.edges.len(), 1);
+    assert!(h.app.line_start.is_some());
+    let before = h.app.doc.model.clone();
+    type_dimension(&mut h, "5cm");
+    h.key(Key::Space);
+    assert_eq!(h.app.tool, Tool::Select);
+    assert!(h.app.line_start.is_none());
+    assert!(h.app.length_input.is_empty());
+    assert_eq!(h.app.doc.model, before);
+    h.app.undo(&h.ctx, false);
+    assert!(h.app.doc.model.edges.is_empty());
+}
+
+#[test]
 fn line_units_preserve_direction_and_do_not_trigger_tool_shortcuts() {
     for (input, expected) in [
         ("5", 5.),
         ("5m", 5.),
         ("50mm", 0.05),
         ("5cm", 0.05),
-        ("5 cm", 0.05),
         ("2in", 0.0508),
-        ("60cm - 89mm", 0.511),
-        ("(60cm - 89mm) / 2", 0.2555),
-        ("2 * 5cm", 0.1),
+        ("60cm-89mm", 0.511),
+        ("(60cm-89mm)/2", 0.2555),
+        ("2*5cm", 0.1),
     ] {
         let mut h = Harness::new();
         h.key(Key::L);
@@ -79,7 +132,7 @@ fn rectangles_accept_mixed_units_and_subpixel_dimensions_on_their_drawing_plane(
     for (input, height) in [
         ("5m,50mm", 0.05),
         ("5,0.5mm", 0.0005),
-        ("6m - 100cm,60mm - 10mm", 0.05),
+        ("6m-100cm,60mm-10mm", 0.05),
     ] {
         for vertical in [false, true] {
             let mut h = Harness::new();
@@ -147,8 +200,8 @@ fn circles_and_polygons_accept_a_radius_with_units() {
     for (tool, input, radius) in [
         (Tool::Circle, "5cm", 0.05),
         (Tool::Polygon, "5cm", 0.05),
-        (Tool::Circle, "60cm - 89mm", 0.511),
-        (Tool::Polygon, "60cm - 89mm", 0.511),
+        (Tool::Circle, "60cm-89mm", 0.511),
+        (Tool::Polygon, "60cm-89mm", 0.511),
     ] {
         let mut h = Harness::new();
         h.app.set_tool(tool);
@@ -204,7 +257,7 @@ fn freehand_units_set_total_stroke_length_and_enter_finishes_the_gesture() {
             egui::Modifiers::NONE,
         );
     }
-    type_dimension(&mut h, "60cm - 89mm");
+    type_dimension(&mut h, "60cm-89mm");
     assert_eq!(h.app.tool, Tool::Freehand);
     let preview = h.app.drawing_points();
     let length: f64 = preview.windows(2).map(|p| p[0].distance(p[1])).sum();
@@ -288,7 +341,7 @@ fn modeling_distances_use_the_same_units_in_previews_and_commits() {
             )],
             egui::Modifiers::NONE,
         );
-        type_dimension(&mut h, "60cm - 550mm");
+        type_dimension(&mut h, "60cm-550mm");
         assert_eq!(h.app.tool, tool);
         let check_dimensions = |model: &Model| match tool {
             Tool::Move => assert!(

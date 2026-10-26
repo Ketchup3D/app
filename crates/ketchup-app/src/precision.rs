@@ -230,8 +230,10 @@ impl KetchupApp {
         {
             snap.point = start + direction * length;
             if self
-                .drawing_guide
-                .is_some_and(|g| (snap.point - g.origin).cross(g.axis.vector()).length() > 1e-6)
+                .drawing_axis_guides
+                .iter()
+                .chain(self.drawing_guide.iter())
+                .any(|g| (snap.point - g.origin).cross(g.axis.vector()).length() > 1e-6)
             {
                 snap.kind = self
                     .preview_alignment()

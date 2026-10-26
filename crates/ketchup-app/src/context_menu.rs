@@ -1,4 +1,4 @@
-//! Shared entity context menu and commands for the viewport and Outliner.
+//! Shared entity menu and commands for the app bar, viewport, and Outliner.
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -142,111 +142,126 @@ impl KetchupApp {
         }
     }
     pub(super) fn context_menu(&mut self, response: &egui::Response) {
+        self.context_menu_with(response, |_, _| {});
+    }
+
+    pub(super) fn context_menu_with(
+        &mut self,
+        response: &egui::Response,
+        extra: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) {
+        response.context_menu(|ui| self.entity_menu(ui, extra));
+    }
+
+    pub(super) fn entity_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        extra: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) {
         let mut action = None;
-        response.context_menu(|ui| {
-            ui.set_min_width(230.);
-            ui.spacing_mut().item_spacing.y = 2.;
-            ui.spacing_mut().interact_size.y = 24.;
-            ui.spacing_mut().button_padding = egui::vec2(8., 3.);
-            let selected = !self.selected.is_empty();
-            let editable = selected && !self.doc.model.selection_protected(&self.selected);
-            let objects = self
-                .selected
-                .iter()
-                .any(|id| self.doc.model.objects.contains_key(id));
-            let groups = self.selected.iter().any(|id| {
-                self.doc
-                    .model
-                    .objects
-                    .get(id)
-                    .is_some_and(|o| o.kind == ObjectKind::Group)
-            });
-            let mut item = |ui: &mut egui::Ui, label: &str, enabled, command| {
-                let shortcut = match command {
-                    ContextAction::Cut => Some((egui::Modifiers::COMMAND, Key::X)),
-                    ContextAction::Copy => Some((egui::Modifiers::COMMAND, Key::C)),
-                    ContextAction::Paste => Some((egui::Modifiers::COMMAND, Key::V)),
-                    ContextAction::PasteInPlace => {
-                        Some((egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::V))
-                    }
-                    ContextAction::Delete => Some((egui::Modifiers::NONE, Key::Delete)),
-                    _ => None,
-                };
-                let mut button = egui::Button::new(label);
-                if let Some((modifiers, key)) = shortcut {
-                    button = button.shortcut_text(
-                        ui.ctx()
-                            .format_shortcut(&egui::KeyboardShortcut::new(modifiers, key)),
-                    );
+        ui.set_min_width(230.);
+        ui.spacing_mut().item_spacing.y = 2.;
+        ui.spacing_mut().interact_size.y = 24.;
+        ui.spacing_mut().button_padding = egui::vec2(8., 3.);
+        let selected = !self.selected.is_empty();
+        let editable = selected && !self.doc.model.selection_protected(&self.selected);
+        let objects = self
+            .selected
+            .iter()
+            .any(|id| self.doc.model.objects.contains_key(id));
+        let groups = self.selected.iter().any(|id| {
+            self.doc
+                .model
+                .objects
+                .get(id)
+                .is_some_and(|o| o.kind == ObjectKind::Group)
+        });
+        let mut item = |ui: &mut egui::Ui, label: &str, enabled, command| {
+            let shortcut = match command {
+                ContextAction::Cut => Some((egui::Modifiers::COMMAND, Key::X)),
+                ContextAction::Copy => Some((egui::Modifiers::COMMAND, Key::C)),
+                ContextAction::Paste => Some((egui::Modifiers::COMMAND, Key::V)),
+                ContextAction::PasteInPlace => {
+                    Some((egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::V))
                 }
-                if ui.add_enabled(enabled, button).clicked() {
-                    action = Some(command);
-                    ui.close();
-                }
+                ContextAction::Delete => Some((egui::Modifiers::NONE, Key::Delete)),
+                _ => None,
+            };
+            let mut button = egui::Button::new(label);
+            if let Some((modifiers, key)) = shortcut {
+                button = button.shortcut_text(
+                    ui.ctx()
+                        .format_shortcut(&egui::KeyboardShortcut::new(modifiers, key)),
+                );
+            }
+            if ui.add_enabled(enabled, button).clicked() {
+                action = Some(command);
+                ui.close();
+            }
+        };
+        item(
+            ui,
+            "Rename…",
+            editable && self.selected.len() == 1 && objects,
+            ContextAction::Rename,
+        );
+        if self.selected.len() == 1 && objects {
+            let object = &self.doc.model.objects[self.selected.first().unwrap()];
+            let label = if object.kind == ObjectKind::Group {
+                "Edit Group"
+            } else {
+                "Edit Component"
             };
             item(
                 ui,
-                "Rename…",
-                editable && self.selected.len() == 1 && objects,
-                ContextAction::Rename,
+                label,
+                !self.doc.model.is_locked(object.id) && !self.doc.model.is_hidden(object.id),
+                ContextAction::EditObject,
             );
-            if self.selected.len() == 1 && objects {
-                let object = &self.doc.model.objects[self.selected.first().unwrap()];
-                let label = if object.kind == ObjectKind::Group {
-                    "Edit Group"
-                } else {
-                    "Edit Component"
-                };
-                item(
-                    ui,
-                    label,
-                    !self.doc.model.is_locked(object.id) && !self.doc.model.is_hidden(object.id),
-                    ContextAction::EditObject,
-                );
-                ui.separator();
-            }
-            if self.doc.model.edit_context.is_some() {
-                item(
-                    ui,
-                    "Close Editing Context",
-                    true,
-                    ContextAction::CloseContext,
-                );
-                ui.separator();
-            }
-            item(ui, "Make Group…", editable, ContextAction::Group);
-            item(ui, "Create Component…", editable, ContextAction::Component);
-            item(ui, "Ungroup", editable && groups, ContextAction::Ungroup);
-            item(ui, "Explode", editable && objects, ContextAction::Explode);
             ui.separator();
-            item(ui, "Cut", editable, ContextAction::Cut);
-            item(ui, "Copy", selected, ContextAction::Copy);
-            item(ui, "Paste", self.clipboard.is_some(), ContextAction::Paste);
+        }
+        if self.doc.model.edit_context.is_some() {
             item(
                 ui,
-                "Paste in Place",
-                self.clipboard.is_some(),
-                ContextAction::PasteInPlace,
+                "Close Editing Context",
+                true,
+                ContextAction::CloseContext,
             );
-            item(ui, "Delete", editable, ContextAction::Delete);
             ui.separator();
-            if self
-                .selected
-                .iter()
-                .any(|id| self.doc.model.hidden.contains(id))
-            {
-                item(ui, "Unhide", selected, ContextAction::Unhide);
-            } else {
-                item(ui, "Hide", editable, ContextAction::Hide);
-            }
-            if self.doc.model.selection_locked(&self.selected) {
-                item(ui, "Unlock", selected, ContextAction::Unlock);
-            } else {
-                item(ui, "Lock", selected, ContextAction::Lock);
-            }
-        });
+        }
+        item(ui, "Make Group…", editable, ContextAction::Group);
+        item(ui, "Create Component…", editable, ContextAction::Component);
+        item(ui, "Ungroup", editable && groups, ContextAction::Ungroup);
+        item(ui, "Explode", editable && objects, ContextAction::Explode);
+        ui.separator();
+        item(ui, "Cut", editable, ContextAction::Cut);
+        item(ui, "Copy", selected, ContextAction::Copy);
+        item(ui, "Paste", self.clipboard.is_some(), ContextAction::Paste);
+        item(
+            ui,
+            "Paste in Place",
+            self.clipboard.is_some(),
+            ContextAction::PasteInPlace,
+        );
+        item(ui, "Delete", editable, ContextAction::Delete);
+        ui.separator();
+        if self
+            .selected
+            .iter()
+            .any(|id| self.doc.model.hidden.contains(id))
+        {
+            item(ui, "Unhide", selected, ContextAction::Unhide);
+        } else {
+            item(ui, "Hide", editable, ContextAction::Hide);
+        }
+        if self.doc.model.selection_locked(&self.selected) {
+            item(ui, "Unlock", selected, ContextAction::Unlock);
+        } else {
+            item(ui, "Lock", selected, ContextAction::Lock);
+        }
+        extra(self, ui);
         if let Some(action) = action {
-            self.context_action(&response.ctx, action);
+            self.context_action(ui.ctx(), action);
             self.context_position = None;
         }
     }
@@ -262,7 +277,7 @@ impl KetchupApp {
         let mut save = false;
         let mut cancel = false;
         egui::Window::new("Rename")
-            .id(egui::Id::new("rename_object"))
+            .id(egui::Id::unique("rename_object"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

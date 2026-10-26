@@ -6,6 +6,17 @@
     <meta name="theme-color" content="#d94836" />
     <meta name="description" content="KetchUp — a precise little space for your next big idea. A Rust 3D modeler for desktop and web." />
     <title>KetchUp — 3D workspace</title>
+    <script>
+      // Match theme.rs before the loading screen paints; other values follow the system.
+      try {
+        const preference = localStorage.getItem("ketchup.theme.v1");
+        if (preference === "light" || preference === "dark") {
+          document.documentElement.dataset.theme = preference;
+        }
+      } catch {
+        // Storage may be unavailable; the system color scheme still applies.
+      }
+    </script>
     <link data-trunk rel="rust" href="crates/ketchup-app/Cargo.toml" data-bin="ketchup-app" />
     <link data-trunk rel="copy-dir" href="assets/branding" data-target-path="assets/branding" />
     <link rel="icon" type="image/x-icon" href="assets/branding/favicon.ico" sizes="16x16 32x32 48x48 64x64 128x128 256x256" />
@@ -14,16 +25,58 @@
     <link rel="apple-touch-icon" sizes="180x180" href="assets/branding/apple-touch-icon.png" />
     <link rel="manifest" href="assets/branding/site.webmanifest" />
     <style>
-      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #f0f1eb; font-family: system-ui, sans-serif; }
+      :root { color-scheme: light; --background: #f0f2ea; --ink: #27352e; --accent: #d94836; }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) { color-scheme: dark; --background: #272f29; --ink: #e5eae2; --accent: #f68e7d; }
+      }
+      :root[data-theme="dark"] { color-scheme: dark; --background: #272f29; --ink: #e5eae2; --accent: #f68e7d; }
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: var(--background); font-family: system-ui, sans-serif; }
       canvas { position: absolute; inset: 0; width: 100%; height: 100%; outline: none; }
-      #loading { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; color: #33413c; }
+      #loading { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; color: var(--ink); }
       #loading img { width: 72px; height: 72px; justify-self: center; margin-bottom: 18px; }
       #loading strong { font-size: 32px; letter-spacing: -1.5px; }
+      #loading strong span { color: var(--accent); }
       #loading p { font-size: 14px; opacity: .7; max-width: 420px; line-height: 1.6; padding: 0 24px; }
     </style>
   </head>
   <body>
-    <canvas id="ketchup-canvas" tabindex="0" aria-label="KetchUp 3D modeling workspace"></canvas>
-    <div id="loading"><img src="assets/branding/logo.svg" alt="" width="72" height="72" /><strong>KetchUp<span style="color:#d94836">.</span></strong><p>Making room for your next idea…</p></div>
+    <div id="ketchup-workspace">
+      <canvas id="ketchup-canvas" tabindex="0" aria-label="KetchUp 3D modeling workspace"></canvas>
+    </div>
+    <script id="workspace-shortcuts">
+      (() => {
+        const workspace = document.getElementById("ketchup-workspace");
+        const canvas = document.getElementById("ketchup-canvas");
+        // Keep these in sync with KetchupApp::keyboard in app.rs. eframe only
+        // cancels a subset of browser shortcuts, even with should_prevent_default.
+        const commandKeys = new Set(["a", "n", "o", "s", "y", "z"]);
+        const canvasKeys = new Set([
+          " ", "a", "b", "c", "d", "e", "f", "g", "i", "l", "m",
+          "o", "p", "q", "r", "s", "t", "ArrowDown", "ArrowLeft",
+          "ArrowRight", "ArrowUp", "Backspace", "Delete", "Enter", "Tab",
+        ]);
+        workspace.addEventListener("keydown", (event) => {
+          if (event.isComposing || event.getModifierState("AltGraph")) return;
+          // Match eframe's logical key, with a physical fallback for layouts
+          // whose characters do not map to an egui key.
+          let key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+          if (!/^[a-z]$/.test(key) && /^Key[A-Z]$/.test(event.code)) {
+            key = event.code.slice(3).toLowerCase();
+          }
+          const command = event.ctrlKey || event.metaKey;
+          // Do not cancel C/X/V: their default action delivers the native
+          // clipboard events consumed (and cancelled) by eframe.
+          if ((command && commandKeys.has(key))
+              || (!command && (key === "F1" || key === "Escape"))
+              || (!command && event.target === canvas && canvasKeys.has(key))) {
+            event.preventDefault();
+          }
+          // Leave propagation intact so eframe still receives the shortcut.
+        }, { capture: true, passive: false });
+        // eframe inserts its text input beside the canvas inside this wrapper,
+        // so command shortcuts are also protected while editing app text.
+      })();
+    </script>
+    <div id="loading"><img src="assets/branding/logo.svg" alt="" width="72" height="72" /><strong>KetchUp<span>.</span></strong><p>Making room for your next idea…</p></div>
   </body>
 </html>

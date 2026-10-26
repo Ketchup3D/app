@@ -28,6 +28,19 @@ impl KetchupApp {
         ((point - guide.origin).cross(guide.axis.vector()).length() < 1e-6).then_some(guide)
     }
 
+    pub(super) fn active_drawing_axis_guides(&self) -> impl Iterator<Item = AxisGuide> + '_ {
+        let point = self.line_preview_snap().map(|snap| snap.point);
+        self.drawing_axis_guides
+            .iter()
+            .copied()
+            .filter(move |guide| {
+                self.tool == Tool::Line
+                    && point.is_some_and(|point| {
+                        (point - guide.origin).cross(guide.axis.vector()).length() < 1e-6
+                    })
+            })
+    }
+
     fn reference_edge_contains(&self, edge: u64, point: DVec3) -> bool {
         let Some(edge) = self.doc.model.edges.get(&edge) else {
             return false;
@@ -42,6 +55,7 @@ impl KetchupApp {
 
     pub(super) fn update_drawing_inference(&mut self, pos: Pos2) {
         self.drawing_guide = None;
+        self.drawing_axis_guides.clear();
         self.drawing_projection = None;
         // A dimension lock controls the annotation's alignment. Reference
         // inference must still acquire the original, unconstrained endpoints.
@@ -52,7 +66,6 @@ impl KetchupApp {
         };
         if !(self.tool.is_drawing() || self.tool.is_measuring())
             || self.paste_preview.is_some()
-            || !self.doc.snap_to_geometry
             || !self.doc.snap_to_axes
         {
             self.drawing_reference = None;
@@ -61,6 +74,33 @@ impl KetchupApp {
         let Some(base) = self.snap else {
             return;
         };
+        if self.tool == Tool::Line
+            && let Some(start) = self.line_start
+        {
+            let inference = ketchup_core::inference::infer_axis_alignment_with_face_query(
+                &self.doc.model,
+                &self.doc.camera,
+                dv(self.viewport.size()),
+                dv(pos - self.viewport.min),
+                start,
+                lock,
+                self.doc.snap_to_geometry,
+                base,
+                Some(
+                    &self
+                        .picking_cache
+                        .snap_query(&self.face_cache, &self.entity_cache),
+                ),
+            );
+            if !inference.guides.is_empty() {
+                self.snap = Some(inference.snap);
+                self.drawing_axis_guides = inference.guides;
+            }
+        }
+        if !self.doc.snap_to_geometry {
+            self.drawing_reference = None;
+            return;
+        }
         let geometry = |snap: Snap| {
             matches!(
                 snap.kind,
@@ -164,6 +204,12 @@ impl KetchupApp {
                 })
                 && self.doc.camera.project(point, size).is_some()
             {
+                if self
+                    .snap
+                    .is_some_and(|snap| snap.point.distance(point) > 1e-6)
+                {
+                    self.drawing_axis_guides.clear();
+                }
                 self.snap = Some(Snap {
                     point,
                     kind: Inference::Aligned,
@@ -171,6 +217,9 @@ impl KetchupApp {
                 self.drawing_projection = Some((reference.point, point));
                 return;
             }
+        }
+        if !self.drawing_axis_guides.is_empty() {
+            return;
         }
         let constraint = start.zip(lock.or_else(|| {
             let delta = base.point - start?;

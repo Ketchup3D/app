@@ -13,7 +13,7 @@ pub mod selection;
 pub mod solids;
 pub mod tags;
 
-pub use camera::{Camera, CameraView, Ray};
+pub use camera::{Camera, CameraView, Projection, Ray, StandardView};
 pub use display::{DisplaySettings, FaceStyle};
 pub use document::{Document, Edge, Face, History, Model, Vertex};
 pub use edit_context::InstanceTransform;

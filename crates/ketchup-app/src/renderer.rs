@@ -85,7 +85,7 @@ impl Mesh {
         if !self.display.fog {
             return color;
         }
-        let amount = ((point.distance(self.view.eye()) - self.display.fog_start)
+        let amount = ((self.view.view_distance(point) - self.display.fog_start)
             / (self.display.fog_end - self.display.fog_start))
             .clamp(0., 1.) as f32;
         let bg = self.display.background;
