@@ -1,5 +1,35 @@
 [
   {
+    "version": "0.2.2",
+    "date": "2026-10-26",
+    "title": "More ways to view and align your models",
+    "sections": [
+      {
+        "title": "Viewing and drawing",
+        "changes": [
+          "Switch between perspective and parallel projection, choose standard camera views, and adjust the field of view from the new View sidebar section.",
+          "Camera view preferences and the new sidebar sections persist across sessions.",
+          "Draw lines with improved axis alignment guides and toggle axis or plane locks from the toolbar."
+        ]
+      },
+      {
+        "title": "Editor",
+        "changes": [
+          "Browse release history offline from Help → Release notes, with new notes opening automatically once per release.",
+          "Use the Edit menu for shared selection commands, and expand or collapse an object's descendants from the Outliner context menu.",
+          "Identify Outliner entities with clearer icons and labels, and read keyboard shortcuts in a cleaner layout."
+        ]
+      },
+      {
+        "title": "Browser",
+        "changes": [
+          "App keyboard shortcuts now prevent conflicting browser actions while preserving clipboard commands and text entry.",
+          "The loading screen follows your saved theme or system color scheme."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.2.1",
     "date": "2026-10-25",
     "title": "Smoother modeling and editor workflows",
