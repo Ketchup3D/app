@@ -3,6 +3,7 @@ mod brand_mark;
 mod environment;
 mod icons;
 mod interchange;
+mod modal;
 mod picking;
 mod project_files;
 mod release_notes;

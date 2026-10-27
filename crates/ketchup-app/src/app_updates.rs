@@ -5,16 +5,13 @@ impl KetchupApp {
         if !self.updates.open {
             return;
         }
-        let mut open = true;
         let mut restart = false;
-        egui::Window::new("Software updates")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(430.)
-            .show(ctx, |ui| {
-                ui.label(format!("KetchUp {}", env!("CARGO_PKG_VERSION")));
-                ui.add_space(8.);
+        let response = Modal::new("software_updates", 480.).show(ctx, |modal| {
+            modal.header(|ui| {
+                ui.heading("Software updates");
+                ui.weak(format!("KetchUp {}", env!("CARGO_PKG_VERSION")));
+            });
+            modal.body(|ui| {
                 ui.label(self.updates.status());
                 if self.updates.busy() {
                     ui.spinner();
@@ -31,22 +28,24 @@ impl KetchupApp {
                     ui.add_space(8.);
                     ui.colored_label(ACCENT, error);
                 }
-                ui.add_space(12.);
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(self.updates.available() && !self.updates.busy() && !self.updates.ready(), egui::Button::new("Check now")).clicked() {
-                        self.updates.check(ctx, false);
-                    }
-                    if self.updates.ready() {
-                        restart = ui.add_enabled(self.can_restart_for_update(), egui::Button::new("Restart now")).clicked();
-                    }
-                    ui.hyperlink_to("Release notes", "https://github.com/Ketchup3D/app/releases");
-                });
                 if self.updates.ready() {
                     ui.add_space(8.);
                     ui.label("Restarting saves your model locally and restores it after updating. Finish any drawing or modeling preview first.");
                 }
             });
-        self.updates.open = open;
+            modal.footer(|ui| {
+                if ui.button("Close").clicked() { ui.close(); }
+                if self.updates.ready() {
+                    restart = primary_button(ui, "Restart now", self.can_restart_for_update()).clicked();
+                } else if primary_button(ui, "Check now", self.updates.available() && !self.updates.busy()).clicked() {
+                    self.updates.check(ctx, false);
+                }
+                ui.hyperlink_to("Release notes", "https://github.com/Ketchup3D/app/releases");
+            });
+        });
+        if response.should_close() {
+            self.updates.open = false;
+        }
         if restart {
             self.request_project(projects::Action::RestartForUpdate, ctx);
         }

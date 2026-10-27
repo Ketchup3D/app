@@ -1,4 +1,9 @@
-use crate::{icons, renderer, storage, theme::*};
+use crate::{
+    icons,
+    modal::{Modal, primary_button},
+    renderer, storage,
+    theme::*,
+};
 use eframe::egui::{self, Align2, Color32, FontId, Key, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 #[cfg(test)]
 use ketchup_core::infer_move_with_snapping;
@@ -551,7 +556,7 @@ impl KetchupApp {
     fn request_name_input_focus(ctx: &egui::Context, id: egui::Id) {
         ctx.data_mut(|data| data.insert_temp(id.with("focus_name"), true));
     }
-    fn name_input(ui: &mut egui::Ui, name: &mut String, id: egui::Id) -> egui::Response {
+    fn focus_name_input(ui: &mut egui::Ui, name: &str, id: egui::Id) {
         // A new window first runs an invisible sizing pass. Wait until the field
         // is visible so that pass cannot discard the initial keyboard focus.
         if ui.is_visible()
@@ -567,7 +572,14 @@ impl KetchupApp {
             state.store(ui.ctx(), id);
             ui.memory_mut(|memory| memory.request_focus(id));
         }
-        ui.add(egui::TextEdit::singleline(name).id(id))
+    }
+    fn name_input(ui: &mut egui::Ui, name: &mut String, id: egui::Id) -> egui::Response {
+        Self::focus_name_input(ui, name, id);
+        ui.add(
+            egui::TextEdit::singleline(name)
+                .id(id)
+                .desired_width(ui.available_width()),
+        )
     }
     fn begin_object_creation(&mut self, ctx: &egui::Context, component: bool) {
         if self.selected.is_empty() || self.doc.model.selection_protected(&self.selected) {
@@ -589,37 +601,34 @@ impl KetchupApp {
         else {
             return;
         };
-        let mut open = true;
         let mut create = false;
         let mut cancel = false;
-        egui::Window::new(if component {
-            "Create Component"
-        } else {
-            "Make Group"
-        })
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-        .show(ctx, |ui| {
-            ui.label("Name");
-            let input = Self::name_input(ui, &mut name, egui::Id::unique("create_object_name"));
-            let enter = input.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            if name.len() > 256 {
-                name.truncate(name.floor_char_boundary(256));
-            }
-            ui.add_space(10.);
-            ui.horizontal(|ui| {
-                create = ui
-                    .add_enabled(!name.trim().is_empty(), egui::Button::new("Create"))
-                    .clicked()
-                    || (enter && !name.trim().is_empty());
+        let response = Modal::new("create_object", 360.).show(ctx, |modal| {
+            modal.header(|ui| {
+                ui.heading(if component {
+                    "Create Component"
+                } else {
+                    "Make Group"
+                });
+                ui.weak("Give your selection a name.");
+            });
+            modal.body(|ui| {
+                ui.label("Name");
+                let input = Self::name_input(ui, &mut name, egui::Id::unique("create_object_name"));
+                create = input.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                if name.len() > 256 {
+                    name.truncate(name.floor_char_boundary(256));
+                }
+            });
+            modal.footer(|ui| {
                 cancel = ui.button("Cancel").clicked();
+                let valid = !name.trim().is_empty();
+                create = (primary_button(ui, "Create", valid).clicked() || create) && valid;
             });
         });
         if create {
             self.create_object(ctx, component, &name);
-        } else if open && !cancel {
+        } else if !cancel && !response.should_close() {
             self.object_creation = Some(ObjectCreation { component, name });
         }
     }
@@ -3882,16 +3891,9 @@ impl KetchupApp {
         });
     }
     fn about_window(&mut self, ctx: &egui::Context) {
-        let response = egui::Modal::new(egui::Id::unique("about_ketchup"))
-            .backdrop_color(Color32::TRANSPARENT)
-            .frame(
-                egui::Frame::popup(&ctx.global_style())
-                    .inner_margin(24)
-                    .corner_radius(12),
-            )
-            .show(ctx, |ui| {
+        let response = Modal::new("about_ketchup", 408.).show(ctx, |modal| {
+            modal.header(|ui| {
                 let colors = Palette::for_ui(ui);
-                ui.set_width((ctx.content_rect().width() - 96.).clamp(200., 360.));
                 ui.horizontal(|ui| {
                     let (logo, _) = ui.allocate_exact_size(egui::vec2(48., 48.), Sense::hover());
                     icons::logo(ui.painter(), logo);
@@ -3904,7 +3906,9 @@ impl KetchupApp {
                         );
                     });
                 });
-                ui.add_space(16.);
+            });
+            modal.body(|ui| {
+                let colors = Palette::for_ui(ui);
                 ui.label("KetchUp is a 3D modeling app for turning ideas into shapes. Draw precise geometry, shape surfaces, and organize your model with groups and components.");
                 ui.add_space(8.);
                 ui.label(
@@ -3912,13 +3916,13 @@ impl KetchupApp {
                         .small()
                         .color(colors.muted),
                 );
-                ui.add_space(20.);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Close").clicked() {
-                        ui.close();
-                    }
-                });
             });
+            modal.footer(|ui| {
+                if primary_button(ui, "Close", true).clicked() {
+                    ui.close();
+                }
+            });
+        });
         if response.should_close() {
             self.about = false;
         }

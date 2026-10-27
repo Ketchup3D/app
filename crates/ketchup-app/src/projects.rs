@@ -217,51 +217,58 @@ impl KetchupApp {
 
     pub(super) fn project_dialogs(&mut self, ctx: &egui::Context) {
         if self.project.pending.is_some() {
-            egui::Modal::new(egui::Id::unique("project_file_pending"))
-                .backdrop_color(Color32::TRANSPARENT)
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(match self.project.operation {
-                            Operation::Open => "Opening project…",
-                            Operation::Save => "Saving project…",
-                            Operation::Import => "Importing SketchUp model…",
-                            Operation::Export => "Exporting OBJ…",
+            Modal::new("project_file_pending", 360.)
+                .dismissible(false)
+                .show(ctx, |modal| {
+                    modal.header(|ui| {
+                        ui.heading("Project file");
+                    });
+                    modal.body(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(match self.project.operation {
+                                Operation::Open => "Opening project…",
+                                Operation::Save => "Saving project…",
+                                Operation::Import => "Importing SketchUp model…",
+                                Operation::Export => "Exporting OBJ…",
+                            });
                         });
+                    });
+                    modal.footer(|ui| {
+                        ui.weak("Please wait…");
                     });
                 });
         }
         if let Some(action) = self.project.confirm {
-            let response = egui::Modal::new(egui::Id::unique("project_unsaved"))
-                .backdrop_color(Color32::TRANSPARENT)
-                .show(ctx, |ui| {
-                    ui.set_max_width(400.);
+            let response = Modal::new("project_unsaved", 480.).show(ctx, |modal| {
+                modal.header(|ui| {
                     ui.heading("Save project changes?");
+                });
+                modal.body(|ui| {
                     ui.label(format!(
                         "Save changes to “{}” as a .ketchup file before continuing?",
                         self.doc.name
                     ));
-                    ui.add_space(12.);
-                    ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
-                            Some(0)
-                        } else if ui
-                            .button(match action {
-                                #[cfg(not(target_arch = "wasm32"))]
-                                Action::RestartForUpdate => "Restart with local recovery",
-                                _ => "Discard changes",
-                            })
-                            .clicked()
-                        {
-                            Some(1)
-                        } else if ui.button("Cancel").clicked() {
-                            Some(2)
-                        } else {
-                            None
-                        }
-                    })
-                    .inner
                 });
+                modal.footer(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        Some(2)
+                    } else if primary_button(ui, "Save", true).clicked() {
+                        Some(0)
+                    } else if ui
+                        .button(match action {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            Action::RestartForUpdate => "Restart with local recovery",
+                            _ => "Discard changes",
+                        })
+                        .clicked()
+                    {
+                        Some(1)
+                    } else {
+                        None
+                    }
+                })
+            });
             if let Some(choice) = response.inner {
                 self.project.confirm = None;
                 match choice {
@@ -277,15 +284,15 @@ impl KetchupApp {
             }
         }
         if let Some(error) = &self.project.error {
-            let response = egui::Modal::new(egui::Id::unique("project_file_error"))
-                .backdrop_color(Color32::TRANSPARENT)
-                .show(ctx, |ui| {
-                    ui.set_max_width(440.);
+            let response = Modal::new("project_file_error", 480.).show(ctx, |modal| {
+                modal.header(|ui| {
                     ui.heading("Project file");
-                    ui.label(error);
-                    ui.add_space(12.);
-                    ui.button("OK").clicked()
                 });
+                modal.body(|ui| {
+                    ui.label(error);
+                });
+                modal.footer(|ui| primary_button(ui, "OK", true).clicked())
+            });
             if response.inner || response.should_close() {
                 self.project.error = None;
             }

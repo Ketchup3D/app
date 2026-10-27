@@ -1,4 +1,7 @@
-use crate::theme::Palette;
+use crate::{
+    modal::{Modal, primary_button},
+    theme::Palette,
+};
 use eframe::egui::{self, RichText};
 
 #[derive(serde::Deserialize)]
@@ -63,15 +66,10 @@ impl ReleaseNotes {
         if !self.open {
             return;
         }
-        let response = egui::Modal::new(egui::Id::unique("release_notes"))
-            .frame(
-                egui::Frame::popup(&ctx.global_style())
-                    .inner_margin(24)
-                    .corner_radius(12),
-            )
-            .show(ctx, |ui| {
+        let response = Modal::new("release_notes", 608.).show(ctx, |modal| {
+            let previous = self.selected;
+            modal.header(|ui| {
                 let colors = Palette::for_ui(ui);
-                ui.set_width((ctx.content_rect().width() - 96.).clamp(220., 560.));
                 ui.heading("Release notes");
                 ui.label(
                     RichText::new(format!(
@@ -80,8 +78,7 @@ impl ReleaseNotes {
                     ))
                     .color(colors.muted),
                 );
-                ui.add_space(12.);
-                let previous = self.selected;
+                ui.add_space(8.);
                 ui.horizontal_wrapped(|ui| {
                     if ui
                         .add_enabled(self.selected > 0, egui::Button::new("Newer"))
@@ -111,47 +108,44 @@ impl ReleaseNotes {
                         self.selected += 1;
                     }
                 });
-                ui.add_space(12.);
-                ui.separator();
-                ui.add_space(8.);
-                let release = &self.releases[self.selected];
-                let mut scroll = egui::ScrollArea::vertical()
-                    .id_salt("release_notes_content")
-                    .auto_shrink([false, false])
-                    .max_height((ctx.content_rect().height() - 300.).clamp(80., 480.));
-                if self.reset_scroll || previous != self.selected {
-                    scroll = scroll.vertical_scroll_offset(0.);
-                    self.reset_scroll = false;
-                }
-                scroll.show(ui, |ui| {
-                    ui.heading(&release.title);
-                    let latest = if self.selected == 0 { " · Latest" } else { "" };
-                    ui.label(
-                        RichText::new(format!("v{} · {}{latest}", release.version, release.date))
-                            .color(colors.muted),
-                    );
-                    for section in &release.sections {
-                        ui.add_space(14.);
-                        ui.label(RichText::new(&section.title).strong());
-                        for change in &section.changes {
-                            ui.horizontal_top(|ui| {
-                                ui.label("•");
-                                ui.add(egui::Label::new(change).wrap());
-                            });
-                        }
-                    }
-                });
-                if self.selected == 0 && self.has_unread() {
-                    self.last_seen_version = Some(release.version.clone());
-                    ctx.request_repaint();
-                }
-                ui.add_space(12.);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Close").clicked() {
-                        ui.close();
-                    }
-                });
             });
+            let mut scroll = egui::ScrollArea::vertical()
+                .id_salt("release_notes_content")
+                .auto_shrink([false, true]);
+            if self.reset_scroll || previous != self.selected {
+                scroll = scroll.vertical_scroll_offset(0.);
+                self.reset_scroll = false;
+            }
+            let release = &self.releases[self.selected];
+            modal.body_with_scroll(scroll, |ui| {
+                let colors = Palette::for_ui(ui);
+                ui.heading(&release.title);
+                let latest = if self.selected == 0 { " · Latest" } else { "" };
+                ui.label(
+                    RichText::new(format!("v{} · {}{latest}", release.version, release.date))
+                        .color(colors.muted),
+                );
+                for section in &release.sections {
+                    ui.add_space(14.);
+                    ui.label(RichText::new(&section.title).strong());
+                    for change in &section.changes {
+                        ui.horizontal_top(|ui| {
+                            ui.label("•");
+                            ui.add(egui::Label::new(change).wrap());
+                        });
+                    }
+                }
+            });
+            if self.selected == 0 && self.has_unread() {
+                self.last_seen_version = Some(release.version.clone());
+                ctx.request_repaint();
+            }
+            modal.footer(|ui| {
+                if primary_button(ui, "Close", true).clicked() {
+                    ui.close();
+                }
+            });
+        });
         if response.should_close() {
             self.open = false;
         }

@@ -173,34 +173,13 @@ impl KetchupApp {
                 ],
             ),
         ];
-        let width = (ctx.content_rect().width() - 64.).clamp(240., 900.);
-        let response = egui::Modal::new(egui::Id::unique("keyboard_shortcuts"))
-            .backdrop_color(Color32::TRANSPARENT)
-            .frame(
-                egui::Frame::popup(&ctx.global_style())
-                    .inner_margin(20)
-                    .corner_radius(12),
-            )
-            .show(ctx, |ui| {
-                let colors = Palette::for_ui(ui);
-                ui.set_width(width);
-                ui.horizontal(|ui| {
-                    ui.heading("Keyboard shortcuts");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if Self::icon_button(
-                            ui,
-                            "close",
-                            "Close keyboard shortcuts",
-                            true,
-                            colors.muted,
-                        ) {
-                            ui.close();
-                        }
-                    });
-                });
-                ui.label(RichText::new("Find a tool, command, or gesture.").color(colors.muted));
+        let width = (ctx.content_rect().width() - 72.).clamp(80., 900.);
+        let response = Modal::new("keyboard_shortcuts", 940.).show(ctx, |modal| {
+            let mut filter_changed = false;
+            modal.header(|ui| {
+                ui.heading("Keyboard shortcuts");
+                ui.weak("Find a tool, command, or gesture.");
                 ui.add_space(8.);
-                let mut filter_changed = false;
                 ui.horizontal(|ui| {
                     let clear_width = if self.shortcut_filter.is_empty() {
                         0.
@@ -220,54 +199,50 @@ impl KetchupApp {
                         filter_changed = true;
                     }
                 });
-                ui.add_space(10.);
-                let query = self.shortcut_filter.trim().to_lowercase();
-                let any_matches = sections.iter().any(|section| {
-                    section
-                        .rows
-                        .iter()
-                        .any(|(action, keys)| section.matches(action, keys, &query))
-                });
-                let mut scroll = egui::ScrollArea::vertical()
-                    .id_salt("shortcut_results")
-                    .auto_shrink([false, false])
-                    .max_height((ctx.content_rect().height() - 260.).max(80.));
-                if filter_changed {
-                    scroll = scroll.vertical_scroll_offset(0.);
-                }
-                scroll.show(ui, |ui| {
-                    if !any_matches {
-                        ui.add_space(24.);
-                        ui.label(RichText::new("No shortcuts found").strong());
-                        ui.label(
-                            RichText::new(format!(
-                                "Try a tool name like “orbit” or a key like “{command}”."
-                            ))
-                            .color(colors.muted),
-                        );
-                    } else if width >= 740. {
-                        ui.columns(2, |columns| {
-                            for (index, section) in sections.iter().enumerate() {
-                                section.show(&mut columns[index % 2], &query);
-                            }
-                        });
-                    } else {
-                        for section in &sections {
-                            section.show(ui, &query);
-                        }
-                    }
-                });
-                ui.add_space(8.);
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Esc to close").small().color(colors.muted));
-                    ui.label(
-                        RichText::new("·  Lengths accept units and formulas: (1m + 20cm) / 2")
-                            .small()
-                            .color(colors.muted),
-                    );
-                });
             });
+            let query = self.shortcut_filter.trim().to_lowercase();
+            let any_matches = sections.iter().any(|section| {
+                section
+                    .rows
+                    .iter()
+                    .any(|(action, keys)| section.matches(action, keys, &query))
+            });
+            let mut scroll = egui::ScrollArea::vertical()
+                .id_salt("shortcut_results")
+                .auto_shrink([false, true]);
+            if filter_changed {
+                scroll = scroll.vertical_scroll_offset(0.);
+            }
+            modal.body_with_scroll(scroll, |ui| {
+                let colors = Palette::for_ui(ui);
+                if !any_matches {
+                    ui.add_space(24.);
+                    ui.label(RichText::new("No shortcuts found").strong());
+                    ui.label(
+                        RichText::new(format!(
+                            "Try a tool name like “orbit” or a key like “{command}”."
+                        ))
+                        .color(colors.muted),
+                    );
+                } else if width >= 740. {
+                    ui.columns(2, |columns| {
+                        for (index, section) in sections.iter().enumerate() {
+                            section.show(&mut columns[index % 2], &query);
+                        }
+                    });
+                } else {
+                    for section in &sections {
+                        section.show(ui, &query);
+                    }
+                }
+            });
+            modal.footer(|ui| {
+                if primary_button(ui, "Close", true).clicked() {
+                    ui.close();
+                }
+                ui.weak("Lengths accept units and formulas: (1m + 20cm) / 2");
+            });
+        });
         if response.should_close() {
             self.help = false;
             self.shortcut_filter.clear();

@@ -273,32 +273,30 @@ impl KetchupApp {
         if !self.doc.model.objects.contains_key(&id) {
             return;
         }
-        let mut open = true;
         let mut save = false;
         let mut cancel = false;
-        egui::Window::new("Rename")
-            .id(egui::Id::unique("rename_object"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-            .show(ctx, |ui| {
+        let response = Modal::new("rename_object", 360.).show(ctx, |modal| {
+            modal.header(|ui| {
+                ui.heading("Rename");
+                ui.weak("Choose a name for this object.");
+            });
+            modal.body(|ui| {
                 ui.label("Name");
                 let input = Self::name_input(ui, &mut name, egui::Id::unique("rename_object_name"));
                 if name.len() > 1024 {
                     name.truncate(name.floor_char_boundary(1024));
                 }
-                let valid = !name.trim().is_empty();
-                save = valid && input.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                ui.add_space(10.);
-                ui.horizontal(|ui| {
-                    save |= ui.add_enabled(valid, egui::Button::new("Save")).clicked();
-                    cancel = ui.button("Cancel").clicked();
-                });
+                save = input.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
             });
+            modal.footer(|ui| {
+                cancel = ui.button("Cancel").clicked();
+                let valid = !name.trim().is_empty();
+                save = (primary_button(ui, "Save", valid).clicked() || save) && valid;
+            });
+        });
         if save {
             self.rename_object(id, &name, ctx);
-        } else if open && !cancel {
+        } else if !cancel && !response.should_close() {
             self.object_rename = Some((id, name));
         }
     }

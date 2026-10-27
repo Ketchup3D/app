@@ -58,6 +58,89 @@ fn help_release_notes_navigates_every_release_and_reopens_on_latest() {
 }
 
 #[test]
+fn outside_click_keeps_modal_open_without_editing_the_model() {
+    for outside in [
+        egui::pos2(8., 450.),
+        egui::pos2(1432., 450.),
+        egui::pos2(720., 8.),
+        egui::pos2(720., 892.),
+    ] {
+        let mut h = Harness::new();
+        let output = open_notes(&mut h);
+        let model = h.app.doc.model.clone();
+        h.click(text_position(
+            &output,
+            catalog()[0]["title"].as_str().unwrap(),
+        ));
+        assert!(
+            h.app.release_notes.open,
+            "Clicking inside must keep the modal open"
+        );
+        h.click(outside);
+        assert!(h.app.release_notes.open, "Outside click at {outside:?}");
+        assert_eq!(h.app.doc.model, model);
+        h.key(Key::Escape);
+        assert!(!h.app.release_notes.open);
+    }
+}
+
+#[test]
+fn outside_click_shakes_modal_once_then_returns_to_center() {
+    let mut h = Harness::new();
+    let output = open_notes(&mut h);
+    let releases = catalog();
+    let title = releases[0]["title"].as_str().unwrap();
+    let centered = text_position(&output, title);
+    let outside = egui::pos2(8., 450.);
+    for _ in 0..2 {
+        h.click(outside);
+        let mut moved = false;
+        for frame in 0..50 {
+            let output = h.frame(vec![], egui::Modifiers::NONE);
+            let position = text_position(&output, title);
+            assert!(h.app.release_notes.open);
+            assert!((position.y - centered.y).abs() < 0.1);
+            moved |= (position.x - centered.x).abs() > 0.5;
+            if frame >= 30 {
+                assert!((position.x - centered.x).abs() < 0.1);
+            }
+        }
+        assert!(moved, "Each outside click should trigger a brief shake");
+    }
+    h.click(centered);
+    for _ in 0..30 {
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        assert!(text_position(&output, title).distance(centered) < 0.1);
+    }
+}
+
+#[test]
+fn outside_click_dismisses_picker_but_keeps_modal_open() {
+    let mut h = Harness::new();
+    let output = open_notes(&mut h);
+    h.click(text_position(
+        &output,
+        &format!("v{}", env!("CARGO_PKG_VERSION")),
+    ));
+    h.frame(vec![], egui::Modifiers::NONE);
+    assert!(egui::Popup::is_any_open(&h.ctx));
+    let outside = egui::pos2(8., 450.);
+    h.click(outside);
+    assert!(!egui::Popup::is_any_open(&h.ctx));
+    assert!(h.app.release_notes.open);
+    let title = catalog()[0]["title"].as_str().unwrap().to_owned();
+    let centered = text_position(&output, &title);
+    for _ in 0..30 {
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        assert!(text_position(&output, &title).distance(centered) < 0.1);
+    }
+    h.click(outside);
+    assert!(h.app.release_notes.open);
+    h.key(Key::Escape);
+    assert!(!h.app.release_notes.open);
+}
+
+#[test]
 fn unseen_release_opens_once_at_startup_in_full_and_compact_layouts() {
     fn has_text(shape: &egui::Shape, label: &str) -> bool {
         match shape {
