@@ -205,6 +205,119 @@ fn pulling_an_existing_cap_stretches_walls_without_internal_faces() {
 }
 
 #[test]
+fn pulling_an_offset_inner_face_opens_the_surface_and_preserves_the_rim() {
+    for angle in [0., 0.8] {
+        for depth in [-2., 2.] {
+            let rotation = glam::DQuat::from_rotation_x(angle);
+            let axis = rotation * DVec3::Z;
+            let mut model = Model::default();
+            let rim = rectangle(&mut model, DVec3::ZERO, DVec3::new(6., 6., 0.));
+            model.paint_face(rim, [31, 66, 99]).unwrap();
+            for vertex in model.vertices.values_mut() {
+                vertex.position = rotation * vertex.position;
+            }
+            model.offset_face(rim, 1.).unwrap();
+            let center = rotation * DVec3::new(3., 3., 0.);
+            let inner = model
+                .faces
+                .values()
+                .find(|face| model.face_contains(face, center, false))
+                .unwrap()
+                .id;
+            let before = model.clone();
+            let normal = crate::faces::plane(&model, &model.faces[&inner].vertices)
+                .unwrap()
+                .normal;
+            let cap = model.push_pull(inner, depth * normal.dot(axis)).unwrap();
+
+            assert!(!model.faces.contains_key(&inner));
+            assert_eq!(model.faces[&rim], before.faces[&rim]);
+            for id in model.faces[&rim]
+                .vertices
+                .iter()
+                .chain(model.faces[&rim].holes.iter().flatten())
+            {
+                assert_eq!(model.vertices[id], before.vertices[id]);
+            }
+            assert_eq!(
+                (model.vertices.len(), model.edges.len(), model.faces.len()),
+                (12, 16, 6)
+            );
+            assert!((model.face_area(&model.faces[&cap]) - 16.).abs() < 1e-7);
+            assert_eq!(model.face_colors.len(), 6);
+            assert!(model.face_colors.values().all(|c| *c == [31, 66, 99]));
+            let (hit, _, point) = model
+                .nearest_face(crate::Ray {
+                    origin: center + axis * 10.,
+                    direction: -axis,
+                })
+                .unwrap();
+            assert_eq!(hit, cap, "The original face must not cover the moved floor");
+            assert!(point.distance(center + axis * depth) < 1e-7);
+            model.validate().unwrap();
+
+            let mut history = History::default();
+            history.record("Push/Pull", before.clone(), &model);
+            let after = model.clone();
+            assert!(history.undo(&mut model));
+            assert_eq!(model, before);
+            assert!(history.redo(&mut model));
+            assert_eq!(model, after);
+            let doc = Document {
+                model: model.clone(),
+                ..Document::default()
+            };
+            assert_eq!(
+                Document::from_json(&serde_json::to_string(&doc).unwrap())
+                    .unwrap()
+                    .model,
+                model
+            );
+
+            assert_eq!(model.push_pull(cap, normal.dot(axis) * depth).unwrap(), cap);
+            assert_eq!(model.faces.len(), 6);
+            assert!(model.face_contains(&model.faces[&cap], center + axis * depth * 2., false));
+            model.validate().unwrap();
+        }
+    }
+}
+
+#[test]
+fn pushing_an_inset_into_a_solid_creates_a_closed_recess() {
+    let mut model = Model::default();
+    let base = rectangle(&mut model, DVec3::ZERO, DVec3::new(8., 6., 0.));
+    let normal = crate::faces::plane(&model, &model.faces[&base].vertices)
+        .unwrap()
+        .normal;
+    let top = model.push_pull(base, 4. / normal.z).unwrap();
+    model.offset_face(top, 1.).unwrap();
+    let inner = model
+        .faces
+        .values()
+        .find(|face| model.face_contains(face, DVec3::new(4., 3., 4.), false))
+        .unwrap()
+        .id;
+    let normal = crate::faces::plane(&model, &model.faces[&inner].vertices)
+        .unwrap()
+        .normal;
+    let floor = model.push_pull(inner, -1.5 / normal.z).unwrap();
+
+    assert!(!model.faces.contains_key(&inner));
+    assert_eq!(model.faces.len(), 11);
+    assert_eq!(model.faces[&top].holes.len(), 1);
+    let (hit, _, point) = model
+        .nearest_face(crate::Ray {
+            origin: DVec3::new(4., 3., 10.),
+            direction: -DVec3::Z,
+        })
+        .unwrap();
+    assert_eq!(hit, floor);
+    assert!(point.distance(DVec3::new(4., 3., 2.5)) < 1e-7);
+    assert!((model.solid_volume(base).unwrap() - (8. * 6. * 4. - 6. * 4. * 1.5)).abs() < 1e-6);
+    model.validate().unwrap();
+}
+
+#[test]
 fn transforms_cannot_change_vertices_of_a_locked_neighbor() {
     let mut model = Model::default();
     let face = rectangle(&mut model, DVec3::ZERO, DVec3::new(4., 2., 0.));

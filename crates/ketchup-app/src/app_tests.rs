@@ -2547,6 +2547,52 @@ fn push_pull_pointer_preview_numeric_commit_cancel_and_undo() {
 }
 
 #[test]
+fn offset_then_push_down_previews_and_commits_an_open_recess() {
+    let mut h = Harness::new();
+    let rim = modeling_rectangle(&mut h);
+    h.key(Key::Q);
+    let offset_at = h.at(DVec3::new(2., 0.25, 0.));
+    h.click(offset_at);
+    modeling_number(&mut h, "0.5");
+    let before = h.app.doc.model.clone();
+    assert_eq!(before.faces[&rim].holes.len(), 1);
+
+    h.key(Key::P);
+    let at = h.at(DVec3::new(2., 2., 0.));
+    h.click(at);
+    let inner = h.app.modeling.as_ref().unwrap().face.unwrap();
+    let end = h.at(DVec3::new(2., 2., -1.));
+    h.frame(vec![egui::Event::PointerMoved(end)], egui::Modifiers::NONE);
+    let preview = h.app.modeling.as_ref().unwrap().preview.as_ref().unwrap();
+    assert!(!preview.faces.contains_key(&inner));
+    let ray = ketchup_core::Ray {
+        origin: DVec3::new(2., 2., 10.),
+        direction: -DVec3::Z,
+    };
+    let (_, _, point) = preview.nearest_face(ray).unwrap();
+    assert!(point.distance(DVec3::new(2., 2., -1.)) < 1e-6);
+    assert_eq!(h.app.doc.model, before);
+    h.key(Key::Escape);
+    assert_eq!(h.app.doc.model, before);
+
+    h.click(at);
+    modeling_number(&mut h, "-1");
+    assert!(h.app.modeling.is_none());
+    assert!(!h.app.doc.model.faces.contains_key(&inner));
+    assert_eq!(h.app.doc.model.faces.len(), 6);
+    let (floor, _, point) = h.app.doc.model.nearest_face(ray).unwrap();
+    assert!(point.distance(DVec3::new(2., 2., -1.)) < 1e-6);
+    assert_eq!(h.app.selected, BTreeSet::from([floor]));
+    assert_eq!(h.app.history.undo_label(), Some("Push/Pull"));
+    h.app.doc.model.validate().unwrap();
+    let after = h.app.doc.model.clone();
+    h.app.undo(&h.ctx, false);
+    assert_eq!(h.app.doc.model, before);
+    h.app.undo(&h.ctx, true);
+    assert_eq!(h.app.doc.model, after);
+}
+
+#[test]
 fn move_and_scale_real_pointer_clicks_and_axis_locked_numeric_distance() {
     let mut h = Harness::new();
     let face = modeling_rectangle(&mut h);

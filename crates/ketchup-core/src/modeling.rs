@@ -233,7 +233,8 @@ impl Model {
         id
     }
 
-    /// Extrude a planar face, including its hole walls. Keep the original as the base.
+    /// Extrude a planar face, including its hole walls. Keep a base only when the
+    /// face is not joined to a coplanar surface, so inset regions open into recesses.
     pub fn push_pull(&mut self, face_id: u64, distance: f64) -> Result<u64, &'static str> {
         if self.edit_context.is_some() {
             return self.edit_in_context(|model| model.push_pull(face_id, distance));
@@ -256,25 +257,41 @@ impl Model {
             .chain(face.holes.iter())
             .flat_map(|ring| (0..ring.len()).map(move |i| (ring[i], ring[(i + 1) % ring.len()])))
             .collect();
+        let shares_edge = |other: &Face, a, b| {
+            std::iter::once(&other.vertices)
+                .chain(other.holes.iter())
+                .any(|ring| {
+                    (0..ring.len()).any(|i| {
+                        let (c, d) = (ring[i], ring[(i + 1) % ring.len()]);
+                        (a == c && b == d) || (a == d && b == c)
+                    })
+                })
+        };
         if boundary.iter().all(|&(a, b)| {
             self.faces.values().any(|other| {
                 other.id != face_id
+                    && self.parent(other.id).is_none()
                     && faces::plane(self, &other.vertices)
                         .is_some_and(|p| p.normal.cross(normal).length() > EPS)
-                    && std::iter::once(&other.vertices)
-                        .chain(other.holes.iter())
-                        .any(|ring| {
-                            (0..ring.len()).any(|i| {
-                                let (c, d) = (ring[i], ring[(i + 1) % ring.len()]);
-                                (a == c && b == d) || (a == d && b == c)
-                            })
-                        })
+                    && shares_edge(other, a, b)
             })
         }) {
             self.move_selection(&BTreeSet::from([face_id]), normal * distance)?;
             return Ok(face_id);
         }
         let mut next = self.clone();
+        let joined_surface = self.faces.values().any(|other| {
+            other.id != face_id
+                && self.parent(other.id).is_none()
+                && faces::plane(self, &other.vertices)
+                    .is_some_and(|p| p.normal.cross(normal).length() <= EPS)
+                && boundary.iter().any(|&(a, b)| shares_edge(other, a, b))
+        });
+        if joined_surface {
+            // The surrounding surface already supplies the opening's boundary.
+            // Leaving this face behind would cover the recess and add an internal cap.
+            next.erase(&BTreeSet::from([face_id]));
+        }
         let mut top = BTreeMap::new();
         for id in std::iter::once(&face.vertices)
             .chain(face.holes.iter())
