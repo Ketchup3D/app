@@ -222,6 +222,37 @@ impl Model {
         Ok(())
     }
 
+    /// Paint all descendant faces as one atomic edit, preserving component materials.
+    pub fn paint_object(&mut self, object: u64, color: [u8; 3]) -> Result<(), &'static str> {
+        if self.edit_context.is_some() {
+            return self.edit_in_context(|model| model.paint_object(object, color));
+        }
+        let object = self
+            .objects
+            .get(&object)
+            .ok_or("Click a face in a group or component to paint it")?;
+        if self.is_locked(object.id) {
+            return Err("Unlock the group or component before painting it");
+        }
+        let faces: Vec<_> = self
+            .expand_entities(&object.entities)
+            .into_iter()
+            .filter(|id| self.faces.contains_key(id))
+            .collect();
+        if faces.is_empty() {
+            return Err("The group or component has no faces to paint");
+        }
+        if faces.iter().any(|id| self.is_locked(*id)) {
+            return Err("Unlock all faces in the group or component before painting it");
+        }
+        let mut next = self.clone();
+        for face in faces {
+            next.paint_face(face, color)?;
+        }
+        *self = next;
+        Ok(())
+    }
+
     fn editable_surface(&self, face: u64) -> Result<(), &'static str> {
         if self.is_locked(face) {
             return Err("Unlock the object before editing it");

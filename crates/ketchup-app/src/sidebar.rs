@@ -22,6 +22,7 @@ pub(super) struct InspectorPreferences {
     component_filter: String,
     outliner_filter: String,
     paint_color: [u8; 3],
+    paint_target: PaintTarget,
     tools: ToolPreferences,
     last_seen_release_notes: Option<String>,
     display: Option<DisplaySettings>,
@@ -38,6 +39,7 @@ impl Default for InspectorPreferences {
             component_filter: String::new(),
             outliner_filter: String::new(),
             paint_color: [195, 96, 67],
+            paint_target: PaintTarget::default(),
             tools: ToolPreferences::default(),
             last_seen_release_notes: None,
             display: None,
@@ -237,6 +239,7 @@ impl KetchupApp {
         self.component_filter = preferences.component_filter.clone();
         self.outliner_filter = preferences.outliner_filter.clone();
         self.paint_color = preferences.paint_color;
+        self.paint_target = preferences.paint_target;
         self.screenshot.settings = preferences.screenshot.clone();
         self.release_notes.last_seen_version = preferences.last_seen_release_notes.clone();
         if let Some(display) = &preferences.display
@@ -263,6 +266,7 @@ impl KetchupApp {
             component_filter: self.component_filter.clone(),
             outliner_filter: self.outliner_filter.clone(),
             paint_color: self.paint_color,
+            paint_target: self.paint_target,
             tools: ToolPreferences::capture(self),
             last_seen_release_notes: self.release_notes.last_seen_version.clone(),
             display: Some(self.doc.display.clone()),
@@ -436,6 +440,7 @@ mod preference_tests {
         }
         app.move_copy = true;
         app.paint_color = [10, 20, 30];
+        app.paint_target = PaintTarget::Group;
         app.line_start = Some(DVec3::X);
         app.solid_first = Some(123);
         app.selected.insert(123);
@@ -450,6 +455,7 @@ mod preference_tests {
         assert_eq!(restored.tool, Tool::Move);
         assert!(restored.move_copy);
         assert_eq!(restored.paint_color, [10, 20, 30]);
+        assert_eq!(restored.paint_target, PaintTarget::Group);
         assert!(restored.line_start.is_none());
         assert!(restored.solid_first.is_none());
         assert!(restored.selected.is_empty());
@@ -498,6 +504,26 @@ mod preference_tests {
             assert_eq!(app.solid_tool, Tool::Union);
             assert_eq!(app.polygon_sides, expected);
         }
+    }
+
+    #[test]
+    fn paint_target_persists_immediately_and_older_preferences_default_to_face() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        assert_eq!(app.paint_target, PaintTarget::Face);
+        for target in [PaintTarget::Group, PaintTarget::Face] {
+            storage.flushed = false;
+            app.paint_target = target;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.paint_target, target);
+        }
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.paint_target, PaintTarget::Face);
     }
 
     #[test]

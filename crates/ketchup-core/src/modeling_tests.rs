@@ -183,6 +183,95 @@ fn paint_survives_serialization_clipboard_and_grouping_and_respects_locks() {
 }
 
 #[test]
+fn painting_a_group_includes_nested_faces_and_rejects_locks_atomically() {
+    let mut model = Model::default();
+    let face = rectangle(&mut model, DVec3::ZERO, DVec3::new(4., 2., 0.));
+    model.push_pull(face, 2.).unwrap();
+    model
+        .make_object(&model.selectable_entities(), false, "Inner")
+        .unwrap();
+    let loose = rectangle(&mut model, DVec3::X * 6., DVec3::new(8., 2., 0.));
+    let group = model
+        .make_object(&model.selectable_entities(), false, "Outer")
+        .unwrap();
+    let outside = rectangle(&mut model, DVec3::X * 10., DVec3::new(12., 2., 0.));
+    let inside: Vec<_> = model
+        .expand_entities(&model.objects[&group].entities)
+        .into_iter()
+        .filter(|id| model.faces.contains_key(id))
+        .collect();
+    assert_eq!(inside.len(), 7);
+    assert!(!model.faces.contains_key(&loose)); // Grouping remaps source IDs.
+    let color = [40, 90, 160];
+    model.paint_object(group, color).unwrap();
+    assert!(
+        inside
+            .iter()
+            .all(|id| model.face_colors.get(id) == Some(&color))
+    );
+    assert!(!model.face_colors.contains_key(&outside));
+    let saved = Document::from_json(
+        &serde_json::to_string(&Document {
+            model: model.clone(),
+            ..Document::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved.model, model);
+    for locked in [group, *inside.last().unwrap()] {
+        model.locked.insert(locked);
+        let before = model.clone();
+        assert!(model.paint_object(group, [1, 2, 3]).is_err());
+        assert_eq!(model, before);
+        model.locked.remove(&locked);
+    }
+    let before = model.clone();
+    assert!(model.paint_object(outside, color).is_err());
+    assert_eq!(model, before);
+    model.validate().unwrap();
+}
+
+#[test]
+fn painting_a_nested_group_in_component_context_updates_instances_only_in_that_group() {
+    let mut model = Model::default();
+    let face = rectangle(&mut model, DVec3::ZERO, DVec3::new(4., 2., 0.));
+    model.push_pull(face, 2.).unwrap();
+    model
+        .make_object(&model.selectable_entities(), false, "Nested")
+        .unwrap();
+    rectangle(&mut model, DVec3::X * 6., DVec3::new(8., 2., 0.));
+    let component = model
+        .make_object(&model.selectable_entities(), true, "Component")
+        .unwrap();
+    let copy = model.copy_entities(&BTreeSet::from([component]));
+    let peer = *model.paste_entities(&copy, DVec3::X * 12.).first().unwrap();
+    assert!(model.enter_object(component));
+    let group = *model.objects[&component]
+        .entities
+        .iter()
+        .find(|id| model.objects.contains_key(id))
+        .unwrap();
+    let color = [40, 90, 160];
+    model.paint_object(group, color).unwrap();
+    assert_eq!(model.edit_context, Some(component));
+    for id in [component, peer] {
+        let contents = model.object_contents(id).unwrap();
+        assert_eq!(contents.faces.len(), 7);
+        assert_eq!(contents.face_colors.len(), 6);
+        assert!(contents.face_colors.values().all(|rgb| *rgb == color));
+    }
+    model.edit_context = None;
+    model.paint_object(component, [1, 2, 3]).unwrap();
+    for id in [component, peer] {
+        let contents = model.object_contents(id).unwrap();
+        assert_eq!(contents.face_colors.len(), 7);
+        assert!(contents.face_colors.values().all(|rgb| *rgb == [1, 2, 3]));
+    }
+    model.validate().unwrap();
+}
+
+#[test]
 fn pulling_an_existing_cap_stretches_walls_without_internal_faces() {
     let mut model = Model::default();
     let face = rectangle(&mut model, DVec3::ZERO, DVec3::new(4., 2., 0.));

@@ -68,6 +68,13 @@ mod text_tools;
 use context_menu::ContextAction;
 use move_tool::{CopyArray, MoveCopy};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum PaintTarget {
+    #[default]
+    Face,
+    Group,
+}
+
 enum GestureKind {
     Navigate { pivot: Option<DVec3> },
     DrawingNavigate,
@@ -228,6 +235,7 @@ pub struct KetchupApp {
     measurement: Option<measurement_tools::Measurement>,
     text_editor: Option<text_tools::TextEditor>,
     paint_color: [u8; 3],
+    paint_target: PaintTarget,
     gesture: Option<Gesture>,
     drawing_orbit_down: bool,
     drawing_orbit_pivot: Option<DVec3>,
@@ -349,6 +357,7 @@ impl KetchupApp {
             measurement: None,
             text_editor: None,
             paint_color: [195, 96, 67],
+            paint_target: PaintTarget::default(),
             gesture: None,
             drawing_orbit_down: false,
             drawing_orbit_pivot: None,
@@ -941,12 +950,25 @@ impl KetchupApp {
         if self.tool == Tool::Paint {
             if let Some((face, _, _)) = self.doc.model.nearest_context_face(ray) {
                 let before = self.doc.model.clone();
-                match self.doc.model.paint_face(face, self.paint_color) {
-                    Ok(()) => self.finish_edit("Paint face", before, ctx),
+                let (result, label) = match self.paint_target {
+                    PaintTarget::Face => (
+                        self.doc.model.paint_face(face, self.paint_color),
+                        "Paint face",
+                    ),
+                    PaintTarget::Group => {
+                        let target = self.doc.model.entity_in_context(face).unwrap();
+                        (
+                            self.doc.model.paint_object(target, self.paint_color),
+                            "Paint group",
+                        )
+                    }
+                };
+                match result {
+                    Ok(()) => self.finish_edit(label, before, ctx),
                     Err(message) => self.say(ctx, message),
                 }
             } else {
-                self.say(ctx, "Click a filled face to paint it");
+                self.say(ctx, self.paint_instructions());
             }
             return;
         }
@@ -1932,6 +1954,8 @@ impl KetchupApp {
                         self.solid_status()
                     } else if self.tool.is_measuring() {
                         self.measurement_status()
+                    } else if self.tool == Tool::Paint {
+                        self.paint_instructions()
                     } else if self.tool == Tool::Line && self.line_start.is_some() {
                         "Click to finish · Type length + Enter · Esc to stop"
                     } else if self.drawing.is_some() && self.tool == Tool::Rectangle {
@@ -2240,13 +2264,25 @@ impl KetchupApp {
                     });
             });
     }
+    fn paint_instructions(&self) -> &'static str {
+        match self.paint_target {
+            PaintTarget::Face => "Click a face to apply this color.",
+            PaintTarget::Group => "Click a face in a group or component to paint all its faces.",
+        }
+    }
+
     fn entity_info_contents(&mut self, ui: &mut egui::Ui) {
         let colors = Palette::for_ui(ui);
         self.solid_inspector(ui);
         self.measurement_inspector(ui);
         self.text_entity_info(ui);
         if self.tool == Tool::Paint {
-            ui.heading("Face color");
+            ui.heading("Paint");
+            ui.horizontal(|ui| {
+                ui.label("Paint by");
+                ui.selectable_value(&mut self.paint_target, PaintTarget::Face, "Face");
+                ui.selectable_value(&mut self.paint_target, PaintTarget::Group, "Group");
+            });
             ui.horizontal(|ui| {
                 ui.color_edit_button_srgb(&mut self.paint_color);
                 ui.label("Choose paint");
@@ -2275,7 +2311,7 @@ impl KetchupApp {
                     }
                 }
             });
-            ui.label("Click a face to apply this color.");
+            ui.label(self.paint_instructions());
             ui.add_space(12.);
         }
         if self.selected.is_empty() {
@@ -2586,7 +2622,16 @@ impl KetchupApp {
                     self.doc.camera.ray(local, size),
                     self.tool != Tool::Paint,
                 )
-                .map(|(id, _, _)| id)
+                .and_then(|(id, _, _)| {
+                    if self.tool == Tool::Paint && self.paint_target == PaintTarget::Group {
+                        self.doc
+                            .model
+                            .entity_in_context(id)
+                            .filter(|id| self.doc.model.objects.contains_key(id))
+                    } else {
+                        Some(id)
+                    }
+                })
         } else if matches!(self.tool, Tool::Select | Tool::Move | Tool::Scale)
             || self.tool.is_solid()
         {

@@ -769,6 +769,53 @@ color!(color_ground_picker, "ground_color");
 color!(color_horizon_picker, "horizon_color");
 
 #[test]
+fn paint_target_buttons_apply_to_a_face_or_whole_group_with_one_undo_step() {
+    let mut h = Harness::new();
+    let face = modeling_rectangle(&mut h);
+    h.app.doc.model.push_pull(face, 2.).unwrap();
+    let group = h
+        .app
+        .doc
+        .model
+        .make_object(
+            &h.app.doc.model.selectable_entities(),
+            false,
+            "Paint target",
+        )
+        .unwrap();
+    h.key(Key::B);
+    assert_eq!(h.app.paint_target, PaintTarget::Face);
+    let at = h.at(DVec3::new(2., 2., 2.));
+    h.click(at);
+    assert_eq!(h.app.doc.model.face_colors.len(), 1);
+    h.app.undo(&h.ctx, false);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(sidebar_position(&h, &output, "Group"));
+    assert_eq!(h.app.paint_target, PaintTarget::Group);
+    h.app.update_pointer(at);
+    assert_eq!(h.app.hover, Some(group));
+    h.click(at);
+    assert_eq!(h.app.doc.model.face_colors.len(), 6);
+    assert!(
+        h.app
+            .doc
+            .model
+            .face_colors
+            .values()
+            .all(|color| *color == h.app.paint_color)
+    );
+    assert_eq!(h.app.history.undo_label(), Some("Paint group"));
+    let painted = h.app.doc.model.clone();
+    h.app.undo(&h.ctx, false);
+    assert!(h.app.doc.model.face_colors.is_empty());
+    h.app.undo(&h.ctx, true);
+    assert_eq!(h.app.doc.model, painted);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(sidebar_position(&h, &output, "Face"));
+    assert_eq!(h.app.paint_target, PaintTarget::Face);
+}
+
+#[test]
 fn all_paint_swatches_apply_the_selected_color_to_a_face() {
     let mut h = Harness::new();
     let face = modeling_rectangle(&mut h);

@@ -242,7 +242,9 @@ impl Tool {
             Self::Move => {
                 "Select geometry · Click a base point and destination · Arrow keys lock axes"
             }
-            Self::Paint => "Choose a color in the inspector · Click a face to paint",
+            Self::Paint => {
+                "Choose a color and Face or Group in the inspector · Click a face to paint"
+            }
             Self::TapeMeasure => "Click two points to measure their distance · Esc to clear",
             Self::Protractor => {
                 "Click a center, a baseline point, then an angle point · Esc to clear"
