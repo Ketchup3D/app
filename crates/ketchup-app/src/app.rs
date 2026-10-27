@@ -666,8 +666,6 @@ impl KetchupApp {
             camera: Camera {
                 projection: self.doc.camera.projection,
                 fov: self.doc.camera.fov,
-                yaw: self.doc.camera.yaw,
-                pitch: self.doc.camera.pitch,
                 ..Camera::default()
             },
             ..Document::default()

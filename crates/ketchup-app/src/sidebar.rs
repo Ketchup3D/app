@@ -1547,17 +1547,16 @@ mod preference_tests {
             .set_standard_view(ketchup_core::StandardView::Top);
         app.doc.camera.target = DVec3::splat(100.);
         app.doc.camera.distance = 200.;
-        let camera_preferences = CameraPreferences::capture(&app.doc.camera);
+        let expected_camera = Camera {
+            projection: app.doc.camera.projection,
+            fov: app.doc.camera.fov,
+            ..Camera::default()
+        };
         app.new_model(&ctx);
         assert!(!app.doc.display.axes);
         assert!(app.doc.display.fog);
         assert_eq!(app.component_filter, "Cabinet");
-        assert_eq!(
-            CameraPreferences::capture(&app.doc.camera),
-            camera_preferences
-        );
-        assert_eq!(app.doc.camera.target, Camera::default().target);
-        assert_eq!(app.doc.camera.distance, Camera::default().distance);
+        assert_eq!(app.doc.camera, expected_camera);
         assert!(!app.project.modified);
         app.replace_project(Document::default(), Some("opened.ketchup".into()), &ctx);
         assert_eq!(app.doc.display, DisplaySettings::default());
