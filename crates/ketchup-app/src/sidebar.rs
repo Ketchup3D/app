@@ -22,6 +22,7 @@ pub(super) struct InspectorPreferences {
     component_filter: String,
     outliner_filter: String,
     paint_color: [u8; 3],
+    tools: ToolPreferences,
     last_seen_release_notes: Option<String>,
     display: Option<DisplaySettings>,
     camera: Option<CameraPreferences>,
@@ -37,12 +38,76 @@ impl Default for InspectorPreferences {
             component_filter: String::new(),
             outliner_filter: String::new(),
             paint_color: [195, 96, 67],
+            tools: ToolPreferences::default(),
             last_seen_release_notes: None,
             display: None,
             camera: None,
             screenshot: Default::default(),
             sections: Default::default(),
         }
+    }
+}
+
+// Remember tool choices and reusable options, never an in-progress operation or
+// model-specific selection. Defaults also apply to partially saved settings.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct ToolPreferences {
+    active: Tool,
+    drawing: Tool,
+    measurement: Tool,
+    solid: Tool,
+    polygon_sides: usize,
+    move_copy: bool,
+}
+
+impl Default for ToolPreferences {
+    fn default() -> Self {
+        Self {
+            active: Tool::Select,
+            drawing: Tool::Line,
+            measurement: Tool::Dimensions,
+            solid: Tool::Union,
+            polygon_sides: 6,
+            move_copy: false,
+        }
+    }
+}
+
+impl ToolPreferences {
+    fn capture(app: &KetchupApp) -> Self {
+        Self {
+            active: app.tool,
+            drawing: app.drawing_tool,
+            measurement: app.measurement_tool,
+            solid: app.solid_tool,
+            polygon_sides: app.polygon_sides,
+            move_copy: app.move_copy,
+        }
+    }
+
+    fn restore(&self, app: &mut KetchupApp) {
+        let defaults = Self::default();
+        app.drawing_tool = if self.drawing.is_drawing() {
+            self.drawing
+        } else {
+            defaults.drawing
+        };
+        app.measurement_tool = if self.measurement.is_measuring() {
+            self.measurement
+        } else {
+            defaults.measurement
+        };
+        app.solid_tool = if self.solid.is_solid() {
+            self.solid
+        } else {
+            defaults.solid
+        };
+        app.polygon_sides = self.polygon_sides.clamp(3, 64);
+        // This resets transient state without executing the tool (solid tools
+        // can otherwise act immediately on selected geometry).
+        app.set_tool(self.active);
+        app.move_copy = self.move_copy;
     }
 }
 
@@ -162,6 +227,7 @@ impl KetchupApp {
         let preferences = storage
             .and_then(|storage| eframe::get_value::<InspectorPreferences>(storage, PREFERENCE_KEY))
             .unwrap_or_default();
+        preferences.tools.restore(self);
         self.inspector = preferences.visible;
         self.inspector_width = if preferences.width.is_finite() {
             preferences.width.clamp(260., 2000.)
@@ -197,6 +263,7 @@ impl KetchupApp {
             component_filter: self.component_filter.clone(),
             outliner_filter: self.outliner_filter.clone(),
             paint_color: self.paint_color,
+            tools: ToolPreferences::capture(self),
             last_seen_release_notes: self.release_notes.last_seen_version.clone(),
             display: Some(self.doc.display.clone()),
             camera: Some(CameraPreferences::capture(&self.doc.camera)),
@@ -316,6 +383,121 @@ mod preference_tests {
         let mut refreshed = KetchupApp::with_document(Document::default(), None, true);
         refreshed.inspector_order = restore_order(Some(&storage));
         assert_eq!(refreshed.inspector_order, order);
+    }
+
+    #[test]
+    fn every_active_tool_persists_immediately_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        // Select also needs to save after another tool, rather than only being
+        // restored by the default for an empty preference store.
+        for tool in Tool::ALL.into_iter().rev() {
+            storage.flushed = false;
+            app.set_tool(tool);
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed, "{tool:?}");
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.tool, tool);
+            assert_eq!(
+                ToolPreferences::capture(&restored),
+                ToolPreferences::capture(&app)
+            );
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+            assert!(!restored.project.modified);
+            assert!(restored.dirty_since.is_none());
+        }
+    }
+
+    #[test]
+    fn tool_menu_choices_and_options_restore_without_transient_state() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.set_tool(Tool::Polygon);
+        app.set_tool(Tool::Text);
+        app.set_tool(Tool::Trim);
+        app.set_tool(Tool::Move);
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        for sides in [3, 17, 64] {
+            storage.flushed = false;
+            app.polygon_sides = sides;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.polygon_sides, sides);
+            assert_eq!(restored.drawing_tool, Tool::Polygon);
+            assert_eq!(restored.measurement_tool, Tool::Text);
+            assert_eq!(restored.solid_tool, Tool::Trim);
+        }
+        app.move_copy = true;
+        app.paint_color = [10, 20, 30];
+        app.line_start = Some(DVec3::X);
+        app.solid_first = Some(123);
+        app.selected.insert(123);
+        app.length_input = "2m".into();
+        storage.flushed = false;
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        assert!(app.dirty_since.is_none());
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!(restored.tool, Tool::Move);
+        assert!(restored.move_copy);
+        assert_eq!(restored.paint_color, [10, 20, 30]);
+        assert!(restored.line_start.is_none());
+        assert!(restored.solid_first.is_none());
+        assert!(restored.selected.is_empty());
+        assert!(restored.length_input.is_empty());
+        assert_eq!(
+            serde_json::to_value(&restored.doc).unwrap(),
+            serde_json::to_value(Document::default()).unwrap()
+        );
+
+        // Turning an option back off must save just as promptly as enabling it.
+        storage.flushed = false;
+        app.move_copy = false;
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert!(!restored.move_copy);
+    }
+
+    #[test]
+    fn older_tool_preferences_keep_defaults_and_invalid_options_are_normalized() {
+        for json in ["{}", r#"{"tools":{}}"#] {
+            let preferences: InspectorPreferences = serde_json::from_str(json).unwrap();
+            let mut storage = SavedPreferences::default();
+            eframe::set_value(&mut storage, PREFERENCE_KEY, &preferences);
+            let mut app = KetchupApp::with_document(Document::default(), None, true);
+            app.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(ToolPreferences::capture(&app), ToolPreferences::default());
+        }
+        for (sides, expected) in [(0, 3), (usize::MAX, 64)] {
+            let mut preferences = InspectorPreferences::default();
+            preferences.tools = ToolPreferences {
+                active: Tool::Polygon,
+                drawing: Tool::Paint,
+                measurement: Tool::Line,
+                solid: Tool::Select,
+                polygon_sides: sides,
+                ..Default::default()
+            };
+            let mut storage = SavedPreferences::default();
+            eframe::set_value(&mut storage, PREFERENCE_KEY, &preferences);
+            let mut app = KetchupApp::with_document(Document::default(), None, true);
+            app.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(app.tool, Tool::Polygon);
+            assert_eq!(app.drawing_tool, Tool::Polygon);
+            assert_eq!(app.measurement_tool, Tool::Dimensions);
+            assert_eq!(app.solid_tool, Tool::Union);
+            assert_eq!(app.polygon_sides, expected);
+        }
     }
 
     #[test]
