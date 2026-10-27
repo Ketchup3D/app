@@ -236,6 +236,7 @@ impl KetchupApp {
                 self.say(ctx, "Project opened");
             }
             Ok(Outcome::Saved(path)) => {
+                let downloaded = cfg!(target_arch = "wasm32") && path.is_none();
                 let modified = serde_json::to_string(&self.doc).ok() != snapshot;
                 if let Some(path) = &path {
                     project_files::set_document_name(&mut self.doc, path);
@@ -245,7 +246,7 @@ impl KetchupApp {
                 self.project.modified = modified;
                 self.say(
                     ctx,
-                    if cfg!(target_arch = "wasm32") {
+                    if downloaded {
                         "Project download started"
                     } else {
                         "Project saved"

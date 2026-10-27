@@ -1100,14 +1100,16 @@ mod preference_tests {
                 let _ = ctx.run_ui(
                     egui::RawInput {
                         screen_rect,
-                        modifiers,
-                        events: vec![egui::Event::Key {
-                            key: Key::F,
-                            physical_key: None,
-                            pressed: true,
-                            repeat: false,
-                            modifiers,
-                        }],
+                        events: vec![
+                            egui::Event::ModifiersChanged(modifiers),
+                            egui::Event::Key {
+                                key: Key::F,
+                                physical_key: None,
+                                pressed: true,
+                                repeat: false,
+                                modifiers,
+                            },
+                        ],
                         ..Default::default()
                     },
                     |ui| {

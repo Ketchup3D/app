@@ -190,15 +190,50 @@ pub fn save(
     contents: String,
 ) -> Pending {
     let (sender, receiver) = mpsc::channel();
-    let result = download(&file_name(&name), &contents)
-        .map(|_| Outcome::Saved(None))
-        .map_err(|e| {
-            e.as_string()
-                .unwrap_or_else(|| "The browser could not download this project".into())
-        });
-    let _ = sender.send(result);
-    ctx.request_repaint();
+    let name = file_name(&name);
+    let launch = js_sys::Function::new_with_args("name, contents", include_str!("project_save.js"));
+    // Open the picker before spawning the async task, while the save action
+    // still has the browser's user activation.
+    let result = launch.call2(
+        &eframe::wasm_bindgen::JsValue::NULL,
+        &eframe::wasm_bindgen::JsValue::from_str(&name),
+        &eframe::wasm_bindgen::JsValue::from_str(&contents),
+    );
+    match result {
+        Ok(value) if !value.is_null() => {
+            let ctx = ctx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&value))
+                    .await
+                    .map(|value| match value.as_string() {
+                        // Browsers expose the chosen filename, not its full path.
+                        Some(name) => Outcome::Saved(Some(PathBuf::from(name))),
+                        None => Outcome::Cancelled,
+                    })
+                    .map_err(browser_save_error);
+                let _ = sender.send(result);
+                ctx.request_repaint();
+            });
+        }
+        result => {
+            let result = result
+                .and_then(|_| download(&name, &contents))
+                .map(|_| Outcome::Saved(None))
+                .map_err(browser_save_error);
+            let _ = sender.send(result);
+            ctx.request_repaint();
+        }
+    }
     receiver
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_save_error(error: eframe::wasm_bindgen::JsValue) -> String {
+    js_sys::Reflect::get(&error, &"message".into())
+        .ok()
+        .and_then(|message| message.as_string())
+        .or_else(|| error.as_string())
+        .unwrap_or_else(|| "The browser could not save this project".into())
 }
 
 #[cfg(target_arch = "wasm32")]

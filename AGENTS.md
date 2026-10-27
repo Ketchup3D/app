@@ -15,8 +15,9 @@ Whenever the user asks to push a new version tag:
 
 1. Prepare user-facing release notes for the new version in `assets/release-notes.json` first, using the changes since the previous release. Keep releases newest first, preserve older entries, and include the version, release date, title, and categorized changes. This file powers Help → Release notes and the GitHub Release description.
 2. Update the workspace version and lockfile as needed. Validate the matching tag and notes with `python3 scripts/desktop_release.py version --tag vX.Y.Z`, and preview the published text with `python3 scripts/desktop_release.py notes --tag vX.Y.Z`.
-3. Commit and push the release notes and version changes, together with the changes intended for that release.
-4. Only after the changes have been pushed successfully, create and push the matching version tag. Never push the tag before its release notes and release changes.
+3. Before creating any version tag, test the exact release changes with a real release build. Follow the current commands in `.github/workflows/build.yml` and `.github/workflows/pages.yml`: run `cargo build -p ketchup-app --bin ketchup-app --release --locked --target <native-target>`, the workflow's release tests, the packaging-helper tests, and `trunk build --release --locked --dist dist/site/play --public-url ./`. Use the native target supported by the local host; report any platform-specific checks that could not be run locally. Fix build or test failures and rerun the affected checks before proceeding. If a required local build or test cannot run or fails, do not create or push the tag; report the blocker. This release preflight is explicitly required even though the routine compilation check below uses existing processes only.
+4. Commit and push the release notes and version changes, together with the tested changes intended for that release. If release changes are modified after validation, rerun the affected checks before tagging.
+5. Only after the build and tests have passed and the changes have been pushed successfully, create and push the matching version tag. Never push the tag before its release notes and tested release changes.
 
 # Compilation checks
 
