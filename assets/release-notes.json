@@ -1,5 +1,38 @@
 [
   {
+    "version": "0.3.0",
+    "date": "2026-10-27",
+    "title": "From models to workshop plans",
+    "sections": [
+      {
+        "title": "Plans and exports",
+        "changes": [
+          "Generate woodworking cut lists and suggested board or sheet layouts as PDFs, using selected parts or the whole visible project.",
+          "Export current and standard camera views as PNG, WebP, or PDF, with previews, paper sizes, resolution choices, and combined or separate views."
+        ]
+      },
+      {
+        "title": "Modeling and annotations",
+        "changes": [
+          "Attach editable text labels to model geometry, with labels following their attachment as the model changes.",
+          "Paint individual faces or all faces in a group or component, and see paint colors in Outliner icons.",
+          "Inset Push/Pull operations now leave recesses open instead of covering them with the original face.",
+          "Dimensions and text labels respect geometry depth, and orbiting uses visible geometry for more natural pivots."
+        ]
+      },
+      {
+        "title": "Editor and preferences",
+        "changes": [
+          "Search objects and control their visibility directly in the Outliner.",
+          "Tool choices, polygon sides, Move copy mode, axis locks, snapping options, group emphasis, searches, and export settings now persist across restarts.",
+          "Sidebars and the Outliner remember their scroll positions across restarts.",
+          "Dialogs use consistent layouts and action placement, grid contrast is tuned for light and dark themes, and context-menu checkboxes respond across the full row.",
+          "Offset now uses the F shortcut; Fit view remains available from its toolbar button."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.2.2",
     "date": "2026-10-26",
     "title": "More ways to view and align your models",
