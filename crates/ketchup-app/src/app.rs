@@ -4167,7 +4167,7 @@ impl eframe::App for KetchupApp {
         );
         #[cfg(target_arch = "wasm32")]
         if let Some(document) = web_sys::window().and_then(|window| window.document()) {
-            let title = format!("{} — KetchUp", self.doc.name);
+            let title = format!("{} - KetchUp", self.doc.name);
             if document.title() != title {
                 document.set_title(&title);
             }
