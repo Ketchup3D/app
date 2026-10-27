@@ -31,6 +31,7 @@ pub(super) struct Project {
     pub after_save: Option<Action>,
     pub error: Option<String>,
     pub cutting_plan_selection: Option<bool>,
+    pub cutting_plan_selection_preference: Option<bool>,
     pub cutting_plan_group_stock: bool,
     pub cutting_plan_layout: crate::cutting_layout::Settings,
 }
@@ -46,6 +47,7 @@ impl Default for Project {
             after_save: None,
             error: None,
             cutting_plan_selection: None,
+            cutting_plan_selection_preference: None,
             cutting_plan_group_stock: true,
             cutting_plan_layout: crate::cutting_layout::Settings::default(),
         }
@@ -71,13 +73,13 @@ impl KetchupApp {
         if let Some(path) = &path {
             project_files::set_document_name(&mut doc, path);
         }
+        doc.display.group_emphasis = self.doc.display.group_emphasis;
         self.set_tool(Tool::Select);
         egui::DragAndDrop::clear_payload(ctx);
         self.doc = doc;
         self.history = History::default();
         self.selected.clear();
         self.outliner_anchor = None;
-        self.group_emphasis = true;
         self.hover = None;
         self.context_position = None;
         self.object_creation = None;
@@ -156,7 +158,13 @@ impl KetchupApp {
 
     pub(super) fn prepare_cutting_plan(&mut self) {
         if !self.project.blocked() {
-            self.project.cutting_plan_selection = Some(!self.selected.is_empty());
+            self.project.cutting_plan_selection = Some(
+                !self.selected.is_empty()
+                    && self
+                        .project
+                        .cutting_plan_selection_preference
+                        .unwrap_or(true),
+            );
         }
     }
 
@@ -278,6 +286,7 @@ impl KetchupApp {
 
     pub(super) fn project_dialogs(&mut self, ctx: &egui::Context) {
         if let Some(mut selection) = self.project.cutting_plan_selection {
+            let selection_before = selection;
             let response = Modal::new("woodworking_cutting_plan", 480.).show(ctx, |modal| {
                 modal.header(|ui| {
                     ui.heading("Woodworking cutting plan");
@@ -324,6 +333,9 @@ impl KetchupApp {
                 })
             });
             self.project.cutting_plan_selection = Some(selection);
+            if selection != selection_before {
+                self.project.cutting_plan_selection_preference = Some(selection);
+            }
             if let Some(generate) = response.inner {
                 self.project.cutting_plan_selection = None;
                 if generate {

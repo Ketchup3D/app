@@ -214,7 +214,6 @@ pub struct KetchupApp {
     drawing: Option<Drawing>,
     polygon_sides: usize,
     selected: BTreeSet<u64>,
-    group_emphasis: bool,
     hover: Option<u64>,
     outliner_hover: BTreeSet<u64>,
     outliner_anchor: Option<u64>,
@@ -336,7 +335,6 @@ impl KetchupApp {
             drawing: None,
             polygon_sides: 6,
             selected: BTreeSet::new(),
-            group_emphasis: true,
             hover: None,
             outliner_hover: BTreeSet::new(),
             outliner_anchor: None,
@@ -662,6 +660,8 @@ impl KetchupApp {
     }
     fn new_model(&mut self, ctx: &egui::Context) {
         let doc = Document {
+            snap_to_geometry: self.doc.snap_to_geometry,
+            snap_to_axes: self.doc.snap_to_axes,
             display: self.doc.display.clone(),
             camera: Camera {
                 projection: self.doc.camera.projection,
@@ -1278,7 +1278,6 @@ impl KetchupApp {
                 self.help = false;
                 self.about = false;
                 self.release_notes.open = false;
-                self.shortcut_filter.clear();
                 ctx.memory_mut(|m| {
                     if let Some(id) = m.focused() {
                         m.surrender_focus(id);
@@ -1388,7 +1387,7 @@ impl KetchupApp {
                     {
                         consumed = true;
                         if !repeat {
-                            self.group_emphasis = !self.group_emphasis;
+                            self.doc.display.group_emphasis = !self.doc.display.group_emphasis;
                         }
                         false
                     } else {
@@ -3271,7 +3270,7 @@ impl KetchupApp {
         } else {
             model.expand_entities(&self.selected)
         };
-        let emphasized_entities = if self.group_emphasis
+        let emphasized_entities = if self.doc.display.group_emphasis
             && let Some(context) = model.edit_context
         {
             model.expand_entities(&BTreeSet::from([context]))
@@ -4040,20 +4039,20 @@ impl KetchupApp {
         let response = ui.add(
             egui::Button::new("")
                 .min_size(egui::vec2(32., 32.))
-                .selected(self.group_emphasis),
+                .selected(self.doc.display.group_emphasis),
         );
         response.widget_info(|| {
             egui::WidgetInfo::selected(
                 egui::Role::Button,
                 ui.is_enabled(),
-                self.group_emphasis,
+                self.doc.display.group_emphasis,
                 "Emphasize group",
             )
         });
         icons::group_emphasis(
             ui.painter(),
             response.rect.center(),
-            if self.group_emphasis {
+            if self.doc.display.group_emphasis {
                 colors.accent
             } else {
                 colors.muted
@@ -4061,7 +4060,7 @@ impl KetchupApp {
             colors.muted,
         );
         if response.on_hover_text("Emphasize group (Tab): emphasize the group/component currently being edited and show everything else in muted wireframe. Has no visual effect outside a group/component.").clicked() {
-            self.group_emphasis = !self.group_emphasis;
+            self.doc.display.group_emphasis = !self.doc.display.group_emphasis;
             ui.ctx().request_repaint();
         }
     }

@@ -433,7 +433,7 @@ impl Capture {
         source.display.background = [255; 3];
         let current = source.camera.clone();
         let mut app = KetchupApp::with_document(source, None, true);
-        app.group_emphasis = false;
+        app.doc.display.group_emphasis = false;
         let mut views = Vec::new();
         for view in settings.selected() {
             let logical = egui::vec2(size[0] as f32, size[1] as f32) / scale;

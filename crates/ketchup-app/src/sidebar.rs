@@ -21,9 +21,12 @@ pub(super) struct InspectorPreferences {
     width: f32,
     component_filter: String,
     outliner_filter: String,
+    shortcut_filter: String,
     paint_color: [u8; 3],
     paint_target: PaintTarget,
     tools: ToolPreferences,
+    snapping: Option<SnappingPreferences>,
+    cutting_plan: CuttingPlanPreferences,
     last_seen_release_notes: Option<String>,
     display: Option<DisplaySettings>,
     camera: Option<CameraPreferences>,
@@ -38,9 +41,12 @@ impl Default for InspectorPreferences {
             width: 300.,
             component_filter: String::new(),
             outliner_filter: String::new(),
+            shortcut_filter: String::new(),
             paint_color: [195, 96, 67],
             paint_target: PaintTarget::default(),
             tools: ToolPreferences::default(),
+            snapping: None,
+            cutting_plan: CuttingPlanPreferences::default(),
             last_seen_release_notes: None,
             display: None,
             camera: None,
@@ -61,6 +67,7 @@ struct ToolPreferences {
     solid: Tool,
     polygon_sides: usize,
     move_copy: bool,
+    axis_lock: Option<Axis>,
 }
 
 impl Default for ToolPreferences {
@@ -72,6 +79,7 @@ impl Default for ToolPreferences {
             solid: Tool::Union,
             polygon_sides: 6,
             move_copy: false,
+            axis_lock: None,
         }
     }
 }
@@ -85,6 +93,7 @@ impl ToolPreferences {
             solid: app.solid_tool,
             polygon_sides: app.polygon_sides,
             move_copy: app.move_copy,
+            axis_lock: app.lock,
         }
     }
 
@@ -110,6 +119,41 @@ impl ToolPreferences {
         // can otherwise act immediately on selected geometry).
         app.set_tool(self.active);
         app.move_copy = self.move_copy;
+        app.lock = self.axis_lock;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct SnappingPreferences {
+    geometry: bool,
+    axes: bool,
+}
+
+impl Default for SnappingPreferences {
+    fn default() -> Self {
+        Self {
+            geometry: true,
+            axes: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct CuttingPlanPreferences {
+    group_stock: bool,
+    layout: crate::cutting_layout::Settings,
+    selection: Option<bool>,
+}
+
+impl Default for CuttingPlanPreferences {
+    fn default() -> Self {
+        Self {
+            group_stock: true,
+            layout: Default::default(),
+            selection: None,
+        }
     }
 }
 
@@ -238,9 +282,21 @@ impl KetchupApp {
         };
         self.component_filter = preferences.component_filter.clone();
         self.outliner_filter = preferences.outliner_filter.clone();
+        self.shortcut_filter = preferences.shortcut_filter.clone();
         self.paint_color = preferences.paint_color;
         self.paint_target = preferences.paint_target;
         self.screenshot.settings = preferences.screenshot.clone();
+        self.project.cutting_plan_group_stock = preferences.cutting_plan.group_stock;
+        self.project.cutting_plan_layout = if preferences.cutting_plan.layout.validate().is_ok() {
+            preferences.cutting_plan.layout
+        } else {
+            Default::default()
+        };
+        self.project.cutting_plan_selection_preference = preferences.cutting_plan.selection;
+        if let Some(snapping) = &preferences.snapping {
+            self.doc.snap_to_geometry = snapping.geometry;
+            self.doc.snap_to_axes = snapping.axes;
+        }
         self.release_notes.last_seen_version = preferences.last_seen_release_notes.clone();
         if let Some(display) = &preferences.display
             && display.valid()
@@ -265,9 +321,19 @@ impl KetchupApp {
             width: self.inspector_width,
             component_filter: self.component_filter.clone(),
             outliner_filter: self.outliner_filter.clone(),
+            shortcut_filter: self.shortcut_filter.clone(),
             paint_color: self.paint_color,
             paint_target: self.paint_target,
             tools: ToolPreferences::capture(self),
+            snapping: Some(SnappingPreferences {
+                geometry: self.doc.snap_to_geometry,
+                axes: self.doc.snap_to_axes,
+            }),
+            cutting_plan: CuttingPlanPreferences {
+                group_stock: self.project.cutting_plan_group_stock,
+                layout: self.project.cutting_plan_layout,
+                selection: self.project.cutting_plan_selection_preference,
+            },
             last_seen_release_notes: self.release_notes.last_seen_version.clone(),
             display: Some(self.doc.display.clone()),
             camera: Some(CameraPreferences::capture(&self.doc.camera)),
@@ -414,6 +480,175 @@ mod preference_tests {
             assert!(!restored.project.modified);
             assert!(restored.dirty_since.is_none());
         }
+    }
+
+    #[test]
+    fn group_emphasis_survives_immediate_reload_and_project_changes() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        for enabled in [false, true] {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    events: [true, false]
+                        .map(|pressed| egui::Event::Key {
+                            key: Key::Tab,
+                            physical_key: None,
+                            pressed,
+                            repeat: false,
+                            modifiers: egui::Modifiers::NONE,
+                        })
+                        .to_vec(),
+                    ..Default::default()
+                },
+                |_| app.keyboard(&ctx),
+            );
+            assert_eq!(app.doc.display.group_emphasis, enabled);
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.doc.display.group_emphasis, enabled);
+            restored.new_model(&ctx);
+            assert_eq!(restored.doc.display.group_emphasis, enabled);
+            restored.replace_project(Document::default(), None, &ctx);
+            assert_eq!(restored.doc.display.group_emphasis, enabled);
+        }
+        let old: DisplaySettings = serde_json::from_str("{}").unwrap();
+        assert!(old.group_emphasis);
+    }
+
+    #[test]
+    fn each_additional_option_saves_independently_without_a_model_edit() {
+        let options: [(&str, fn(&mut KetchupApp)); 12] = [
+            ("object snapping", |app| app.doc.snap_to_geometry = false),
+            ("axis snapping", |app| app.doc.snap_to_axes = false),
+            ("axis lock", |app| app.lock = Some(Axis::Y)),
+            ("shortcut filter", |app| app.shortcut_filter = "Move".into()),
+            ("stock grouping", |app| {
+                app.project.cutting_plan_group_stock = false
+            }),
+            ("stock rotation", |app| {
+                app.project.cutting_plan_layout.allow_rotation = false
+            }),
+            ("sheet width", |app| {
+                app.project.cutting_plan_layout.sheet_width_mm = 600.
+            }),
+            ("sheet length", |app| {
+                app.project.cutting_plan_layout.sheet_length_mm = 1200.
+            }),
+            ("board length", |app| {
+                app.project.cutting_plan_layout.board_length_mm = 3600.
+            }),
+            ("saw kerf", |app| {
+                app.project.cutting_plan_layout.kerf_mm = 4.5
+            }),
+            ("whole project scope", |app| {
+                app.project.cutting_plan_selection_preference = Some(false)
+            }),
+            ("selected parts scope", |app| {
+                app.project.cutting_plan_selection_preference = Some(true)
+            }),
+        ];
+        for (name, change) in options {
+            let ctx = egui::Context::default();
+            let mut storage = SavedPreferences::default();
+            let mut app = KetchupApp::with_document(Document::default(), None, true);
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            storage.flushed = false;
+            change(&mut app);
+            let expected = app.current_inspector_preferences(&ctx);
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed, "{name}");
+            assert!(!app.project.modified, "{name}");
+            assert!(app.dirty_since.is_none(), "{name}");
+            let restored_ctx = egui::Context::default();
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+            assert_eq!(
+                restored.current_inspector_preferences(&restored_ctx),
+                expected,
+                "{name}"
+            );
+            assert!(!restored.project.modified, "{name}");
+            assert!(
+                restored.project.cutting_plan_selection.is_none(),
+                "restoring scope must not open a modal"
+            );
+            storage.flushed = false;
+            restored.persist_inspector_changes(&restored_ctx, Some(&mut storage), false);
+            assert!(
+                !storage.flushed,
+                "{name}: unchanged settings must not write every frame"
+            );
+        }
+    }
+
+    #[test]
+    fn older_and_invalid_export_preferences_keep_safe_defaults() {
+        let ctx = egui::Context::default();
+        for json in ["{}", r#"{"cutting_plan":{"layout":{"kerf_mm":5.0}}}"#] {
+            let preferences: InspectorPreferences = serde_json::from_str(json).unwrap();
+            assert!(preferences.snapping.is_none());
+            assert!(preferences.shortcut_filter.is_empty());
+            assert!(preferences.cutting_plan.group_stock);
+            assert!(preferences.cutting_plan.selection.is_none());
+            assert!(preferences.cutting_plan.layout.validate().is_ok());
+            let mut storage = SavedPreferences::default();
+            eframe::set_value(&mut storage, PREFERENCE_KEY, &preferences);
+            let mut doc = Document::default();
+            doc.snap_to_geometry = false;
+            doc.snap_to_axes = false;
+            let mut restored = KetchupApp::with_document(doc, None, true);
+            restored.restore_inspector_preferences(&ctx, Some(&storage));
+            assert!(!restored.doc.snap_to_geometry);
+            assert!(!restored.doc.snap_to_axes);
+            assert_eq!(
+                restored.project.cutting_plan_layout,
+                preferences.cutting_plan.layout
+            );
+        }
+        let mut preferences = InspectorPreferences::default();
+        preferences.cutting_plan.layout.sheet_width_mm = -1.;
+        let mut storage = SavedPreferences::default();
+        eframe::set_value(&mut storage, PREFERENCE_KEY, &preferences);
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&ctx, Some(&storage));
+        assert_eq!(
+            restored.project.cutting_plan_layout,
+            crate::cutting_layout::Settings::default()
+        );
+    }
+
+    #[test]
+    fn closing_shortcuts_keeps_the_saved_search_filter() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.help = true;
+        app.shortcut_filter = "Move".into();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |_| app.keyboard(&ctx),
+        );
+        assert!(!app.help);
+        assert_eq!(app.shortcut_filter, "Move");
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!(restored.shortcut_filter, "Move");
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Deterministic, kerf-aware guillotine sheet packing and first-fit board cutting.
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct Settings {
     pub sheet_width_mm: f64,
     pub sheet_length_mm: f64,

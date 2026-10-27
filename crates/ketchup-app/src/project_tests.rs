@@ -24,7 +24,7 @@ fn new_project_clears_geometry_history_and_previous_file() {
     assert_eq!(app.doc.model, Model::default());
     assert_eq!(app.doc.camera, Camera::default());
     assert_eq!(app.doc.name, Document::default().name);
-    assert!(app.doc.snap_to_axes);
+    assert!(!app.doc.snap_to_axes);
     assert!(app.selected.is_empty());
     assert!(app.history.undo_label().is_none());
     assert!(app.project.path.is_none());
@@ -240,6 +240,28 @@ fn cutting_plan_defaults_to_selection_and_blocks_other_file_actions_until_cancel
     app.request_project(projects::Action::New, &ctx);
     assert_eq!(app.doc.model, before);
     assert_eq!(app.project.cutting_plan_selection, Some(true));
+}
+
+#[test]
+fn cutting_plan_remembers_scope_and_falls_back_when_no_parts_are_selected() {
+    let ctx = egui::Context::default();
+    let mut app = KetchupApp::with_document(Document::default(), None, true);
+    app.project.cutting_plan_selection_preference = Some(true);
+    app.prepare_cutting_plan();
+    assert_eq!(app.project.cutting_plan_selection, Some(false));
+    assert_eq!(app.project.cutting_plan_selection_preference, Some(true));
+    app.project.cutting_plan_selection = None;
+    let edge = app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    app.selected.insert(edge);
+    app.prepare_cutting_plan();
+    assert_eq!(app.project.cutting_plan_selection, Some(true));
+    app.project.cutting_plan_selection = None;
+    app.project.cutting_plan_selection_preference = Some(false);
+    app.prepare_cutting_plan();
+    assert_eq!(app.project.cutting_plan_selection, Some(false));
+    app.project.cutting_plan_selection = None;
+    app.new_model(&ctx);
+    assert_eq!(app.project.cutting_plan_selection_preference, Some(false));
 }
 
 #[test]

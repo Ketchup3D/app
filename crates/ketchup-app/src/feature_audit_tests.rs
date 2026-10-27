@@ -29,6 +29,7 @@ pub(super) fn render_cases() -> Vec<RenderCase> {
                 "dimensions" => "dimensions",
                 "hidden_geometry" => "hidden_geometry",
                 "hidden_objects" => "hidden_objects",
+                "group_emphasis" => "group_emphasis",
                 "x_ray" => "x_ray",
                 "edges" => "edges",
                 "back_edges" => "back_edges",
@@ -132,6 +133,7 @@ pub(super) fn render_workspace(name: &str) -> KetchupApp {
     app.doc.camera.target = DVec3::new(1., 0., 1.);
     app.doc.camera.distance = 22.;
     match case.key {
+        "group_emphasis" => assert!(app.doc.model.enter_object(first)),
         "guides" => {
             app.set_tool(Tool::Line);
             app.line_start = Some(DVec3::new(-2., -2., 0.));

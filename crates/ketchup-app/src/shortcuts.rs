@@ -245,7 +245,6 @@ impl KetchupApp {
         });
         if response.should_close() {
             self.help = false;
-            self.shortcut_filter.clear();
         }
     }
 }
