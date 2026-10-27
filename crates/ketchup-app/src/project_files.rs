@@ -167,12 +167,10 @@ pub fn open(ctx: &eframe::egui::Context) -> Pending {
             .await
         {
             match wasm_bindgen_futures::JsFuture::from(file.inner().array_buffer()).await {
-                Ok(buffer) => {
-                    decode(&js_sys::Uint8Array::new(&buffer).to_vec()).map(|mut doc| {
-                        set_document_name(&mut doc, std::path::Path::new(&file.file_name()));
-                        Outcome::Opened(Box::new(doc), None)
-                    })
-                }
+                Ok(buffer) => decode(&js_sys::Uint8Array::new(&buffer).to_vec()).map(|mut doc| {
+                    set_document_name(&mut doc, std::path::Path::new(&file.file_name()));
+                    Outcome::Opened(Box::new(doc), None)
+                }),
                 Err(_) => Err("The browser could not read this project".into()),
             }
         } else {
@@ -205,6 +203,23 @@ pub fn save(
 
 #[cfg(target_arch = "wasm32")]
 fn download(name: &str, contents: &str) -> Result<(), eframe::wasm_bindgen::JsValue> {
+    download_bytes(
+        name,
+        contents.as_bytes(),
+        if name.ends_with(".obj") {
+            "text/plain"
+        } else {
+            "application/json"
+        },
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn download_bytes(
+    name: &str,
+    contents: &[u8],
+    mime: &str,
+) -> Result<(), eframe::wasm_bindgen::JsValue> {
     use eframe::wasm_bindgen::{JsCast, JsValue, closure::Closure};
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("No browser window"))?;
     let document = window
@@ -213,19 +228,10 @@ fn download(name: &str, contents: &str) -> Result<(), eframe::wasm_bindgen::JsVa
     let body = document
         .body()
         .ok_or_else(|| JsValue::from_str("No browser document body"))?;
-    let parts = js_sys::Array::new();
-    parts.push(&JsValue::from_str(contents));
-    let options = web_sys::BlobPropertyBag::new();
-    options.set_type(if name.ends_with(".obj") {
-        "text/plain"
-    } else {
-        "application/json"
-    });
-    let blob = web_sys::Blob::new_with_str_sequence_and_options(&parts, &options)?;
     let anchor = document
         .create_element("a")?
         .dyn_into::<web_sys::HtmlAnchorElement>()?;
-    let url = web_sys::Url::create_object_url_with_blob(&blob)?;
+    let url = blob_url(contents, mime)?;
     anchor.set_href(&url);
     anchor.set_download(name);
     if let Err(error) = body.append_child(&anchor) {
@@ -240,6 +246,82 @@ fn download(name: &str, contents: &str) -> Result<(), eframe::wasm_bindgen::JsVa
     });
     let _ = window
         .set_timeout_with_callback_and_timeout_and_arguments_0(cleanup.unchecked_ref(), 10_000);
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn blob_url(contents: &[u8], mime: &str) -> Result<String, eframe::wasm_bindgen::JsValue> {
+    let parts = js_sys::Array::new();
+    parts.push(&js_sys::Uint8Array::from(contents));
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type(mime);
+    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options)?;
+    web_sys::Url::create_object_url_with_blob(&blob)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn open_pdf(contents: &[u8]) -> Result<(), eframe::wasm_bindgen::JsValue> {
+    use eframe::wasm_bindgen::JsValue;
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("No browser window"))?;
+    let url = blob_url(contents, "application/pdf")?;
+    // Keep this synchronous with Generate PDF so user activation is available.
+    let opened = window.open_with_url_and_target(&url, "_blank");
+    match opened {
+        Ok(Some(tab)) => {
+            let _ = tab.set_opener(&JsValue::NULL);
+            release_pdf_when_closed(window, tab, url);
+            Ok(())
+        }
+        result => {
+            let _ = web_sys::Url::revoke_object_url(&url);
+            match result {
+                Err(error) => Err(error),
+                _ => Err(JsValue::from_str(
+                    "Allow pop-ups for KetchUp, then generate the PDF again.",
+                )),
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn release_pdf_when_closed(window: web_sys::Window, tab: web_sys::Window, url: String) {
+    use eframe::wasm_bindgen::{JsCast, closure::Closure};
+    // A download's short timeout is unsuitable for a viewer: keep its URL valid
+    // for reload/save, then release the PDF bytes after the viewer tab closes.
+    let timer_window = window.clone();
+    let cleanup = Closure::once_into_js(move || {
+        if tab.closed().unwrap_or(false) {
+            let _ = web_sys::Url::revoke_object_url(&url);
+        } else {
+            release_pdf_when_closed(window, tab, url);
+        }
+    });
+    let _ = timer_window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(cleanup.unchecked_ref(), 1_000);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn open_pdf(path: &std::path::Path) -> Result<(), String> {
+    // Use the OS file association, passing the absolute path as one argument.
+    // No shell interpolation: spaces and metacharacters remain part of the name.
+    let path = std::path::absolute(path).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("rundll32.exe");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("/usr/bin/open");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut command = std::process::Command::new("xdg-open");
+    let mut child = command.arg(path).spawn().map_err(|e| e.to_string())?;
+    // Some viewers stay running. Finish the export immediately and reap the
+    // launcher separately rather than keeping the file-operation modal open.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 
@@ -351,4 +433,69 @@ pub fn prepare_import(
     }
     model.validate().map_err(str::to_owned)?;
     Ok(Outcome::Imported(Box::new(model), selected))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn export_cutting_plan(
+    ctx: &eframe::egui::Context,
+    name: String,
+    model: ketchup_core::Model,
+    selected: std::collections::BTreeSet<u64>,
+    group_stock: bool,
+    layout_settings: crate::cutting_layout::Settings,
+) -> Pending {
+    run(ctx, move || {
+        if group_stock {
+            layout_settings.validate()?;
+        }
+        let plan = crate::cutting_plan::CuttingPlan::collect(&model, &selected)?;
+        let contents =
+            plan.pdf_with_layout(&name, !selected.is_empty(), group_stock, layout_settings);
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Export woodworking cutting plan")
+            .add_filter("PDF document", &["pdf"])
+            .set_file_name(exchange_name(&format!("{name} - cutting plan"), "pdf"))
+            .save_file()
+        else {
+            return Ok(Outcome::Cancelled);
+        };
+        let path = extension_path(path, "pdf")?;
+        write(&path, &contents)?;
+        open_pdf(&path).map_err(|error| {
+            format!(
+                "PDF saved to {}, but its viewer could not be opened: {error}",
+                path.display()
+            )
+        })?;
+        Ok(Outcome::Exported)
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn export_cutting_plan(
+    ctx: &eframe::egui::Context,
+    name: String,
+    model: ketchup_core::Model,
+    selected: std::collections::BTreeSet<u64>,
+    group_stock: bool,
+    layout_settings: crate::cutting_layout::Settings,
+) -> Pending {
+    let (sender, receiver) = mpsc::channel();
+    let result = (if group_stock {
+        layout_settings.validate()
+    } else {
+        Ok(())
+    })
+    .and_then(|()| crate::cutting_plan::CuttingPlan::collect(&model, &selected))
+    .and_then(|plan| {
+        open_pdf(&plan.pdf_with_layout(&name, !selected.is_empty(), group_stock, layout_settings))
+            .map(|_| Outcome::Exported)
+            .map_err(|e| {
+                e.as_string()
+                    .unwrap_or_else(|| "The browser could not open this PDF".into())
+            })
+    });
+    let _ = sender.send(result);
+    ctx.request_repaint();
+    receiver
 }

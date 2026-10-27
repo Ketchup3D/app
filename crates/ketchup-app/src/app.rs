@@ -1817,6 +1817,17 @@ impl KetchupApp {
                             self.context_position = None;
                             self.entity_menu(ui, |_, _| {});
                         });
+                        Self::app_bar_menu(ui, "Generate", |ui| {
+                            ui.visuals_mut().override_text_color = Some(colors.ink);
+                            ui.menu_button("Woodworking", |ui| {
+                                if ui.add_enabled(!self.project.blocked(), egui::Button::new("Prepare cutting plan…"))
+                                    .on_hover_text("Summarize matching parts and export finished cutting dimensions for the selection or whole project.")
+                                    .clicked() {
+                                    self.prepare_cutting_plan();
+                                    ui.close();
+                                }
+                            });
+                        });
                         Self::app_bar_menu(ui, "Help", |ui| {
                             ui.visuals_mut().override_text_color = Some(colors.ink);
                             if ui.button("Keyboard shortcuts").clicked() {

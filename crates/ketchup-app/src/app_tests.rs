@@ -4542,3 +4542,25 @@ fn view_sidebar_buttons_set_projection_and_all_standard_views_without_resizing()
     }
     assert!(h.app.project.modified);
 }
+
+#[test]
+fn generate_menu_is_next_to_edit_and_woodworking_opens_cancellable_scope_dialog() {
+    let mut h = Harness::new();
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let edit = text_position(&output, "Edit");
+    let generate = text_position(&output, "Generate");
+    let help = text_position(&output, "Help");
+    assert!(edit.x < generate.x && generate.x < help.x);
+    let output = h.click(generate);
+    let output = h.click(text_position(&output, "Woodworking"));
+    h.click(text_position(&output, "Prepare cutting plan…"));
+    assert_eq!(h.app.project.cutting_plan_selection, Some(false));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    text_position(&output, "Woodworking cutting plan");
+    let output = h.click(text_position(&output, "Cancel"));
+    assert!(h.app.project.cutting_plan_selection.is_none());
+    assert!(h.app.project.pending.is_none());
+    assert!(!h.app.project.modified);
+    assert!(h.app.history.undo_label().is_none());
+    drop(output);
+}

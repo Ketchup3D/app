@@ -221,3 +221,61 @@ fn invalid_import_keeps_current_geometry_selection_and_history() {
     assert!(app.history.undo_label().is_none());
     assert!(app.project.error.is_some());
 }
+
+#[test]
+fn cutting_plan_defaults_to_selection_and_blocks_other_file_actions_until_cancelled() {
+    let ctx = egui::Context::default();
+    let mut app = KetchupApp::with_document(Document::default(), None, true);
+    assert!(app.project.cutting_plan_group_stock);
+    assert!(app.project.cutting_plan_layout.allow_rotation);
+    app.prepare_cutting_plan();
+    assert_eq!(app.project.cutting_plan_selection, Some(false));
+    assert!(app.project.blocked());
+    app.project.cutting_plan_selection = None;
+    let edge = app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    app.selected.insert(edge);
+    app.prepare_cutting_plan();
+    assert_eq!(app.project.cutting_plan_selection, Some(true));
+    let before = app.doc.model.clone();
+    app.request_project(projects::Action::New, &ctx);
+    assert_eq!(app.doc.model, before);
+    assert_eq!(app.project.cutting_plan_selection, Some(true));
+}
+
+#[test]
+fn cutting_plan_export_failure_preserves_project_selection_and_history() {
+    let ctx = egui::Context::default();
+    let mut app = KetchupApp::with_document(Document::default(), None, true);
+    let edge = app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    app.selected.insert(edge);
+    app.project.path = Some("original.ketchup".into());
+    app.project.modified = true;
+    let before = app.doc.model.clone();
+    app.project.operation = projects::Operation::CuttingPlan;
+    app.project.pending = Some(crate::project_files::export_cutting_plan(
+        &ctx,
+        app.doc.name.clone(),
+        app.doc.model.clone(),
+        app.selected.clone(),
+        false,
+        crate::cutting_layout::Settings::default(),
+    ));
+    for _ in 0..100 {
+        app.poll_project(&ctx);
+        if app.project.pending.is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        app.project
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("No three-dimensional parts"))
+    );
+    assert_eq!(app.doc.model, before);
+    assert_eq!(app.selected, BTreeSet::from([edge]));
+    assert_eq!(app.project.path, Some("original.ketchup".into()));
+    assert!(app.project.modified);
+    assert!(app.history.undo_label().is_none());
+}

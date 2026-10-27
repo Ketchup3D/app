@@ -17,9 +17,9 @@ pub(super) enum Operation {
     Save,
     Import,
     Export,
+    CuttingPlan,
 }
 
-#[derive(Default)]
 pub(super) struct Project {
     pub path: Option<PathBuf>,
     pub modified: bool,
@@ -29,10 +29,34 @@ pub(super) struct Project {
     pub confirm: Option<Action>,
     pub after_save: Option<Action>,
     pub error: Option<String>,
+    pub cutting_plan_selection: Option<bool>,
+    pub cutting_plan_group_stock: bool,
+    pub cutting_plan_layout: crate::cutting_layout::Settings,
 }
+impl Default for Project {
+    fn default() -> Self {
+        Self {
+            path: None,
+            modified: false,
+            pending: None,
+            operation: Operation::default(),
+            snapshot: None,
+            confirm: None,
+            after_save: None,
+            error: None,
+            cutting_plan_selection: None,
+            cutting_plan_group_stock: true,
+            cutting_plan_layout: crate::cutting_layout::Settings::default(),
+        }
+    }
+}
+
 impl Project {
     pub fn blocked(&self) -> bool {
-        self.pending.is_some() || self.confirm.is_some() || self.error.is_some()
+        self.pending.is_some()
+            || self.confirm.is_some()
+            || self.error.is_some()
+            || self.cutting_plan_selection.is_some()
     }
 }
 
@@ -71,6 +95,7 @@ impl KetchupApp {
         self.project.confirm = None;
         self.project.after_save = None;
         self.project.error = None;
+        self.project.cutting_plan_selection = None;
         self.save_error = None;
         self.storage_recovery = false;
         ctx.memory_mut(|m| {
@@ -125,6 +150,34 @@ impl KetchupApp {
         }
     }
 
+    pub(super) fn prepare_cutting_plan(&mut self) {
+        if !self.project.blocked() {
+            self.project.cutting_plan_selection = Some(!self.selected.is_empty());
+        }
+    }
+
+    fn export_cutting_plan(&mut self, ctx: &egui::Context, selection: bool) {
+        let selected = if selection {
+            self.selected.clone()
+        } else {
+            BTreeSet::new()
+        };
+        if selection && selected.is_empty() {
+            self.project.error =
+                Some("Select at least one part, or choose the whole project.".into());
+            return;
+        }
+        self.project.operation = Operation::CuttingPlan;
+        self.project.pending = Some(project_files::export_cutting_plan(
+            ctx,
+            self.doc.name.clone(),
+            self.doc.model.clone(),
+            selected,
+            self.project.cutting_plan_group_stock,
+            self.project.cutting_plan_layout,
+        ));
+    }
+
     pub(super) fn save_project(&mut self, ctx: &egui::Context, save_as: bool) {
         if self.project.blocked() {
             return;
@@ -162,6 +215,7 @@ impl KetchupApp {
             Err(TryRecvError::Disconnected) => Err("The file operation did not complete".into()),
         };
         self.project.pending = None;
+        let operation = self.project.operation;
         self.project.operation = Operation::Open;
         let snapshot = self.project.snapshot.take();
         match result {
@@ -201,10 +255,11 @@ impl KetchupApp {
             }
             Ok(Outcome::Exported) => self.say(
                 ctx,
-                if cfg!(target_arch = "wasm32") {
-                    "OBJ download started"
-                } else {
-                    "OBJ exported"
+                match (operation, cfg!(target_arch = "wasm32")) {
+                    (Operation::CuttingPlan, true) => "Cutting plan PDF opened in a new tab",
+                    (Operation::CuttingPlan, false) => "Cutting plan PDF saved and opened",
+                    (_, true) => "OBJ download started",
+                    (_, false) => "OBJ exported",
                 },
             ),
             Ok(Outcome::Cancelled) => self.project.after_save = None,
@@ -216,6 +271,62 @@ impl KetchupApp {
     }
 
     pub(super) fn project_dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(mut selection) = self.project.cutting_plan_selection {
+            let response = Modal::new("woodworking_cutting_plan", 480.).show(ctx, |modal| {
+                modal.header(|ui| {
+                    ui.heading("Woodworking cutting plan");
+                    ui.weak("Create a PDF with quantities and finished cut sizes.");
+                });
+                modal.body(|ui| {
+                    ui.add_enabled_ui(!self.selected.is_empty(), |ui| {
+                        ui.radio_value(&mut selection, true, "Selected parts / assemblies (visible only)");
+                    });
+                    ui.radio_value(&mut selection, false, "Whole project (visible only)");
+                    ui.add_space(10.);
+                    ui.checkbox(&mut self.project.cutting_plan_group_stock, "Auto-detect and group by buyable stock");
+                    if self.project.cutting_plan_group_stock {
+                        let settings = &mut self.project.cutting_plan_layout;
+                        egui::Grid::new("woodworking_stock_dimensions").num_columns(2).show(ui, |ui| {
+                            for (label, value) in [
+                                ("Sheet width", &mut settings.sheet_width_mm),
+                                ("Sheet length", &mut settings.sheet_length_mm),
+                                ("Board length", &mut settings.board_length_mm),
+                            ] {
+                                ui.label(label);
+                                ui.add(egui::DragValue::new(value).speed(1.).range(1. ..=1_000_000.).suffix(" mm"));
+                                ui.end_row();
+                            }
+                            ui.label("Saw kerf (cut width)");
+                            ui.add(egui::DragValue::new(&mut settings.kerf_mm).speed(0.1).range(0. ..=100.).suffix(" mm"));
+                            ui.end_row();
+                        });
+                        ui.checkbox(&mut settings.allow_rotation, "Allow rotating plywood pieces 90 degrees")
+                            .on_hover_text("Leave off when the length must follow the sheet grain.");
+                        ui.weak("Layouts use these stock sizes and saw kerf. Colors and mark codes identify each cut. Confirm material and grain; this is a practical layout, not a guaranteed minimum.");
+                    }
+                    ui.add_space(10.);
+                    ui.label("Each separate group/component or connected body is a part. Selecting an edge or face includes its connected body.");
+                    ui.label("Sizes are in mm, with nominal lumber hints where recognized. Check grain, joinery and irregular shapes against the model.");
+                    if !self.project.cutting_plan_group_stock {
+                        ui.weak("Enable stock grouping to include kerf-aware cutting layouts.");
+                    }
+                });
+                modal.footer(|ui| {
+                    if ui.button("Cancel").clicked() { Some(false) }
+                    else if primary_button(ui, "Generate PDF…", true).clicked() { Some(true) }
+                    else { None }
+                })
+            });
+            self.project.cutting_plan_selection = Some(selection);
+            if let Some(generate) = response.inner {
+                self.project.cutting_plan_selection = None;
+                if generate {
+                    self.export_cutting_plan(ctx, selection);
+                }
+            } else if response.should_close() {
+                self.project.cutting_plan_selection = None;
+            }
+        }
         if self.project.pending.is_some() {
             Modal::new("project_file_pending", 360.)
                 .dismissible(false)
@@ -231,6 +342,7 @@ impl KetchupApp {
                                 Operation::Save => "Saving project…",
                                 Operation::Import => "Importing SketchUp model…",
                                 Operation::Export => "Exporting OBJ…",
+                                Operation::CuttingPlan => "Preparing cutting plan PDF…",
                             });
                         });
                     });
