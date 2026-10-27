@@ -613,19 +613,28 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
             p.circle_filled(c + egui::vec2(0., -3.5), 1., color);
             p.line_segment([c + egui::vec2(0., -0.5), c + egui::vec2(0., 4.)], s);
         }
-        "group" => {
+        "group" | "group_filled" => {
             let at = |x: f32, y: f32| c + egui::vec2(x, y);
-            p.add(egui::Shape::closed_line(
-                vec![
-                    at(-8., -6.),
-                    at(-3., -6.),
-                    at(-1., -3.),
-                    at(8., -3.),
-                    at(8., 6.),
-                    at(-8., 6.),
-                ],
-                s,
-            ));
+            if kind == "group_filled" {
+                p.rect_filled(Rect::from_min_max(at(-8., -3.), at(8., 6.)), 0, color);
+                p.add(egui::Shape::convex_polygon(
+                    vec![at(-8., -6.), at(-3., -6.), at(-1., -3.), at(-8., -3.)],
+                    color,
+                    Stroke::NONE,
+                ));
+            } else {
+                p.add(egui::Shape::closed_line(
+                    vec![
+                        at(-8., -6.),
+                        at(-3., -6.),
+                        at(-1., -3.),
+                        at(8., -3.),
+                        at(8., 6.),
+                        at(-8., 6.),
+                    ],
+                    s,
+                ));
+            }
         }
         "components" | "component" => {
             let at = |x: f32, y: f32| c + egui::vec2(x, y);

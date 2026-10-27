@@ -27,6 +27,7 @@ struct OutlinerDragHover {
 
 struct Outliner<'a> {
     model: &'a Model,
+    paint: std::collections::BTreeMap<u64, OutlinerPaint>,
     filtered_objects: Option<&'a BTreeSet<u64>>,
     selected: &'a BTreeSet<u64>,
     entities: &'a renderer::EntityCache,
@@ -37,6 +38,63 @@ struct Outliner<'a> {
     drop: Option<OutlinerDrop>,
     drop_hover: Option<u64>,
     drag_hover: Option<OutlinerDragHover>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutlinerPaint {
+    Empty,
+    Unpainted,
+    Color([u8; 3]),
+    Mixed,
+}
+
+impl OutlinerPaint {
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Empty, paint) | (paint, Self::Empty) => paint,
+            (a, b) if a == b => a,
+            _ => Self::Mixed,
+        }
+    }
+}
+
+// Aggregate the hierarchy once, including collapsed and hidden descendants.
+// Derive colors from document materials so face edits and undo cannot leave a
+// stale group color, and avoid rescanning every descendant for each visible row.
+fn outliner_paint(
+    model: &Model,
+    roots: &BTreeSet<u64>,
+) -> std::collections::BTreeMap<u64, OutlinerPaint> {
+    fn visit(
+        model: &Model,
+        id: u64,
+        colors: &mut std::collections::BTreeMap<u64, OutlinerPaint>,
+    ) -> OutlinerPaint {
+        if let Some(object) = model.objects.get(&id) {
+            let paint = object
+                .entities
+                .iter()
+                .fold(OutlinerPaint::Empty, |paint, id| {
+                    paint.merge(visit(model, *id, colors))
+                });
+            colors.insert(id, paint);
+            paint
+        } else if model.faces.contains_key(&id) {
+            model
+                .face_colors
+                .get(&id)
+                .copied()
+                .map(OutlinerPaint::Color)
+                .unwrap_or(OutlinerPaint::Unpainted)
+        } else {
+            OutlinerPaint::Empty
+        }
+    }
+    let mut colors = std::collections::BTreeMap::new();
+    for id in model.objects.keys().filter(|id| roots.contains(id)) {
+        visit(model, *id, &mut colors);
+    }
+    colors
 }
 
 // Include ancestors so a match remains reachable even inside collapsed objects.
@@ -76,6 +134,7 @@ impl Outliner<'_> {
     fn row(&mut self, ui: &mut egui::Ui, id: u64) -> egui::Response {
         let state = self.entities.get(id);
         let object = self.model.objects.get(&id);
+        let paint = self.paint.get(&id).copied().unwrap_or(OutlinerPaint::Empty);
         let (kind, icon) = if let Some(object) = object {
             match object.kind {
                 ObjectKind::Group => ("Group", "group"),
@@ -114,17 +173,41 @@ impl Outliner<'_> {
         } else {
             text
         };
+        let paint_color = match paint {
+            OutlinerPaint::Color([r, g, b]) => Some(Color32::from_rgb(r, g, b)),
+            _ => None,
+        };
+        let icon = if icon == "group" && paint_color.is_some() {
+            "group_filled"
+        } else {
+            icon
+        };
         let icon = egui::Atom::paint(egui::vec2(18., 18.), move |ui, args| {
+            let color = paint_color.unwrap_or(args.fallback_text_color);
             icons::line_icon(
                 ui.painter(),
                 args.rect.center(),
                 icon,
                 if state.hidden {
-                    hidden_color
+                    paint_color
+                        .map(|color| color.gamma_multiply(0.5))
+                        .unwrap_or(hidden_color)
                 } else {
-                    args.fallback_text_color
+                    color
                 },
             );
+            if icon == "group_filled" {
+                icons::line_icon(
+                    ui.painter(),
+                    args.rect.center(),
+                    "group",
+                    if state.hidden {
+                        hidden_color
+                    } else {
+                        args.fallback_text_color
+                    },
+                );
+            }
         });
         let button = egui::Button::selectable(
             self.selected.contains(&id),
@@ -180,7 +263,12 @@ impl Outliner<'_> {
             .inner
             .accessible_name(format!("{kind}: {label}"))
             .on_hover_text(format!(
-                "{kind}: {label}\nEntity #{id}\n{}",
+                "{kind}: {label}\nEntity #{id}{}\n{}",
+                match paint {
+                    OutlinerPaint::Color([r, g, b]) => format!("\nPaint: #{r:02X}{g:02X}{b:02X}"),
+                    OutlinerPaint::Mixed => "\nPaint: Mixed face colors".to_owned(),
+                    _ => String::new(),
+                },
                 if state.hidden {
                     "Click to select · Shift-click to select a range · Ctrl/Cmd-click to toggle selection · Use the eye button to toggle visibility; check parent objects and Tags for inherited visibility"
                 } else {
@@ -480,6 +568,129 @@ mod tests {
             additive: false,
             range: false,
             open: false,
+        }
+    }
+
+    fn paintable_model() -> (Model, u64, u64) {
+        let mut model = Model::default();
+        let points = [
+            DVec3::ZERO,
+            DVec3::X * 2.,
+            DVec3::new(2., 2., 0.),
+            DVec3::Y * 2.,
+        ];
+        for i in 0..4 {
+            model.add_edge(points[i], points[(i + 1) % 4]).unwrap();
+        }
+        let face = *model.faces.keys().next().unwrap();
+        model.push_pull(face, 2.).unwrap();
+        model
+            .make_object(&model.selectable_entities(), true, "Painted component")
+            .unwrap();
+        let group = model
+            .make_object(&model.selectable_entities(), false, "Painted group")
+            .unwrap();
+        let component = *model.objects[&group].entities.first().unwrap();
+        (model, group, component)
+    }
+
+    #[test]
+    fn group_paint_tracks_nested_faces_mixed_colors_and_undo() {
+        let (mut model, group, component) = paintable_model();
+        let roots = model.root_entities();
+        let before = model.clone();
+        let unpainted = outliner_paint(&model, &roots);
+        for id in [group, component] {
+            assert_eq!(unpainted[&id], OutlinerPaint::Unpainted);
+        }
+        let rgb = [31, 82, 149];
+        model.paint_object(group, rgb).unwrap();
+        let mut history = History::default();
+        history.record("Paint group", before, &model);
+        // Hidden descendants still belong to the object's material summary.
+        model.hidden.insert(component);
+        let painted = outliner_paint(&model, &roots);
+        for id in [group, component] {
+            assert_eq!(painted[&id], OutlinerPaint::Color(rgb));
+        }
+        assert!(history.undo(&mut model));
+        assert_eq!(outliner_paint(&model, &roots), unpainted);
+        assert!(history.redo(&mut model));
+        assert_eq!(outliner_paint(&model, &roots), painted);
+        let face = *model.faces.keys().next().unwrap();
+        model.paint_face(face, [201, 91, 67]).unwrap();
+        for id in [group, component] {
+            assert_eq!(outliner_paint(&model, &roots)[&id], OutlinerPaint::Mixed);
+        }
+        model.face_colors.remove(&face);
+        assert_eq!(outliner_paint(&model, &roots)[&group], OutlinerPaint::Mixed);
+        let (app, edge_group, edge_component, _) = nested_model();
+        let colors = outliner_paint(&app.doc.model, &app.doc.model.root_entities());
+        assert_eq!(colors[&edge_group], OutlinerPaint::Empty);
+        assert_eq!(colors[&edge_component], OutlinerPaint::Empty);
+    }
+
+    #[test]
+    fn painted_outliner_icons_fill_folders_keep_selection_color_and_dim_when_hidden() {
+        fn has_icon_color(shape: &egui::Shape, color: Color32, filled: bool) -> bool {
+            match shape {
+                egui::Shape::Rect(rect) => filled && rect.fill == color,
+                egui::Shape::Path(path) => {
+                    !filled && path.stroke.color == egui::epaint::ColorMode::Solid(color)
+                }
+                egui::Shape::Vec(shapes) => shapes
+                    .iter()
+                    .any(|shape| has_icon_color(shape, color, filled)),
+                _ => false,
+            }
+        }
+        let (mut model, group, component) = paintable_model();
+        let rgb = [31, 82, 149];
+        model.paint_object(group, rgb).unwrap();
+        let mut app = KetchupApp::with_document(
+            Document {
+                model,
+                ..Default::default()
+            },
+            None,
+            true,
+        );
+        let ctx = egui::Context::default();
+        ctx.memory_mut(|memory| memory.set_everything_is_visible(true));
+        for id in [group, component] {
+            app.outliner_filter = app.doc.model.objects[&id].name.clone();
+            app.selected = BTreeSet::from([id]);
+            for hidden in [false, true] {
+                if hidden {
+                    app.doc.model.hidden.insert(group);
+                } else {
+                    app.doc.model.hidden.remove(&group);
+                }
+                let mut output = None;
+                for _ in 0..2 {
+                    output = Some(ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(
+                                Pos2::ZERO,
+                                egui::vec2(600., 900.),
+                            )),
+                            ..Default::default()
+                        },
+                        |ui| app.outliner_contents(ui),
+                    ));
+                }
+                let color = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                let expected = if hidden {
+                    color.gamma_multiply(0.5)
+                } else {
+                    color
+                };
+                assert!(output.unwrap().shapes.iter().any(|shape| has_icon_color(
+                    &shape.shape,
+                    expected,
+                    id == group
+                )));
+            }
         }
     }
 
@@ -890,6 +1101,11 @@ impl KetchupApp {
         let hover_id = ui.scope_id().with("outliner_drag_hover");
         let mut tree = Outliner {
             model: &self.doc.model,
+            paint: if self.doc.model.face_colors.is_empty() {
+                Default::default()
+            } else {
+                outliner_paint(&self.doc.model, &roots)
+            },
             filtered_objects: filtered_objects.as_ref(),
             selected: &self.selected,
             entities: &self.entity_cache,
