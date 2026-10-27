@@ -210,8 +210,11 @@ To enable publishing for `Ketchup3D/app`:
    [GitHub Pages setup guide](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site#publishing-with-a-custom-github-actions-workflow).
 2. Push a `v*` tag (for example, `git push origin v0.1.0`), or run
    **Deploy GitHub Pages** from the Actions tab with `main` selected. Version
-   tag pushes trigger both Pages deployment and the separate desktop release
-   workflow. Ordinary branch pushes do not trigger either workflow.
+   tag pushes start the desktop release workflow. Pages builds and deploys the
+   same commit only after that workflow succeeds, including publishing the
+   desktop release. The updated Pages workflow must be on the default branch
+   for this automatic trigger to work. Ordinary branch pushes do not trigger
+   either workflow.
 3. After the deployment succeeds, the landing page is at
    <https://ketchup3d.github.io/app/> and its **Try in browser** links open
    <https://ketchup3d.github.io/app/play/>. The workflow's environment link shows

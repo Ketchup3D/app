@@ -1,9 +1,9 @@
 name: Deploy GitHub Pages
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_run:
+    workflows: ['Build desktop']
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -20,11 +20,14 @@ env:
 jobs:
   build:
     name: Package website and browser app
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
+          # workflow_run defaults to the default branch; use the desktop release commit.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
       - name: Configure GitHub Pages
@@ -82,7 +85,7 @@ jobs:
   deploy:
     name: Publish GitHub Pages
     needs: build
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'workflow_run' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
