@@ -2126,141 +2126,141 @@ impl KetchupApp {
                     .inner_margin(egui::Margin::symmetric(10, 18)),
             )
             .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("tool_scroll")
-                    .show(ui, |ui| {
-                        for rail_tool in Tool::RAIL {
-                            let tool = if rail_tool == Tool::Line {
-                                self.drawing_tool
-                            } else if rail_tool == Tool::Dimensions {
-                                self.measurement_tool
-                            } else if rail_tool == Tool::Union {
-                                self.solid_tool
-                            } else {
-                                rail_tool
-                            };
-                            let active = self.tool == tool;
-                            let nested =
-                                matches!(rail_tool, Tool::Line | Tool::Dimensions | Tool::Union);
-                            let tooltip = if tool.shortcut().is_empty() {
-                                tool.label().to_owned()
-                            } else {
-                                format!("{} ({})", tool.label(), tool.shortcut())
-                            };
-                            let (rect, response) =
-                                ui.allocate_exact_size(egui::vec2(56., 55.), Sense::click());
-                            response.widget_info(|| {
-                                egui::WidgetInfo::selected(
-                                    if nested {
-                                        egui::Role::ComboBox
-                                    } else {
-                                        egui::Role::RadioButton
-                                    },
-                                    true,
-                                    active,
-                                    tooltip.clone(),
-                                )
-                            });
-                            if active || response.hovered() {
-                                ui.painter().rect_filled(
-                                    rect.shrink2(egui::vec2(0., 3.)),
-                                    8,
-                                    if active {
-                                        colors.selected
-                                    } else {
-                                        colors.hovered
-                                    },
-                                );
-                            }
-                            if active {
-                                ui.painter().rect_filled(
-                                    Rect::from_min_size(
-                                        rect.left_center() - egui::vec2(10., 12.),
-                                        egui::vec2(3., 24.),
-                                    ),
-                                    2,
-                                    colors.accent,
-                                );
-                            }
-                            let color = if active { colors.accent } else { colors.ink };
-                            icons::ui_tool(
-                                ui.painter(),
-                                Rect::from_center_size(
-                                    rect.center() - egui::vec2(if nested { 4. } else { 0. }, 8.),
-                                    egui::vec2(27., 27.),
-                                ),
-                                tool,
-                            );
-                            ui.painter().text(
-                                rect.center() + egui::vec2(0., 17.),
-                                Align2::CENTER_CENTER,
-                                if tool == Tool::TapeMeasure {
-                                    "Tape"
+                let scroll = sidebar::restored_scroll_area(
+                    ui,
+                    "sidebar_left",
+                    egui::ScrollArea::vertical().id_salt("tool_scroll"),
+                )
+                .show(ui, |ui| {
+                    for rail_tool in Tool::RAIL {
+                        let tool = if rail_tool == Tool::Line {
+                            self.drawing_tool
+                        } else if rail_tool == Tool::Dimensions {
+                            self.measurement_tool
+                        } else if rail_tool == Tool::Union {
+                            self.solid_tool
+                        } else {
+                            rail_tool
+                        };
+                        let active = self.tool == tool;
+                        let nested =
+                            matches!(rail_tool, Tool::Line | Tool::Dimensions | Tool::Union);
+                        let tooltip = if tool.shortcut().is_empty() {
+                            tool.label().to_owned()
+                        } else {
+                            format!("{} ({})", tool.label(), tool.shortcut())
+                        };
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::vec2(56., 55.), Sense::click());
+                        response.widget_info(|| {
+                            egui::WidgetInfo::selected(
+                                if nested {
+                                    egui::Role::ComboBox
                                 } else {
-                                    tool.label()
+                                    egui::Role::RadioButton
                                 },
-                                FontId::proportional(
-                                    if matches!(
-                                        tool,
-                                        Tool::Protractor | Tool::Dimensions | Tool::OuterShell
-                                    ) {
-                                        9.
-                                    } else {
-                                        10.
-                                    },
-                                ),
-                                color,
+                                true,
+                                active,
+                                tooltip.clone(),
+                            )
+                        });
+                        if active || response.hovered() {
+                            ui.painter().rect_filled(
+                                rect.shrink2(egui::vec2(0., 3.)),
+                                8,
+                                if active {
+                                    colors.selected
+                                } else {
+                                    colors.hovered
+                                },
                             );
-                            if nested {
-                                let tip = rect.right_center() + egui::vec2(-5., -8.);
-                                ui.painter().add(egui::Shape::line(
-                                    vec![
-                                        tip + egui::vec2(-4., -4.),
-                                        tip,
-                                        tip + egui::vec2(-4., 4.),
-                                    ],
-                                    Stroke::new(1.8, color),
-                                ));
-                                egui::Popup::menu(&response)
-                                    .align(egui::RectAlign::RIGHT_START)
-                                    .width(190.)
-                                    .show(|ui| {
-                                        let options: &[Tool] = match rail_tool {
-                                            Tool::Line => &Tool::DRAWING,
-                                            Tool::Dimensions => &Tool::MEASURING,
-                                            Tool::Union => &Tool::SOLID,
-                                            _ => unreachable!(),
-                                        };
-                                        for &option in options {
-                                            if Self::tool_menu_item(ui, option, self.tool == option)
-                                                .clicked()
-                                            {
-                                                if option.is_solid() {
-                                                    self.start_solid_tool(option, ui.ctx());
-                                                } else {
-                                                    self.set_tool(option);
-                                                }
-                                                ui.close();
-                                            }
-                                        }
-                                        if rail_tool == Tool::Line {
-                                            ui.separator();
-                                            ui.horizontal(|ui| {
-                                                ui.label("Polygon sides");
-                                                ui.add(
-                                                    egui::DragValue::new(&mut self.polygon_sides)
-                                                        .range(3..=64),
-                                                );
-                                            });
-                                        }
-                                    });
-                            }
-                            if Self::tool_tooltip(response, tool).clicked() && !nested {
-                                self.set_tool(tool);
-                            }
-                            ui.add_space(5.);
                         }
-                    });
+                        if active {
+                            ui.painter().rect_filled(
+                                Rect::from_min_size(
+                                    rect.left_center() - egui::vec2(10., 12.),
+                                    egui::vec2(3., 24.),
+                                ),
+                                2,
+                                colors.accent,
+                            );
+                        }
+                        let color = if active { colors.accent } else { colors.ink };
+                        icons::ui_tool(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                rect.center() - egui::vec2(if nested { 4. } else { 0. }, 8.),
+                                egui::vec2(27., 27.),
+                            ),
+                            tool,
+                        );
+                        ui.painter().text(
+                            rect.center() + egui::vec2(0., 17.),
+                            Align2::CENTER_CENTER,
+                            if tool == Tool::TapeMeasure {
+                                "Tape"
+                            } else {
+                                tool.label()
+                            },
+                            FontId::proportional(
+                                if matches!(
+                                    tool,
+                                    Tool::Protractor | Tool::Dimensions | Tool::OuterShell
+                                ) {
+                                    9.
+                                } else {
+                                    10.
+                                },
+                            ),
+                            color,
+                        );
+                        if nested {
+                            let tip = rect.right_center() + egui::vec2(-5., -8.);
+                            ui.painter().add(egui::Shape::line(
+                                vec![tip + egui::vec2(-4., -4.), tip, tip + egui::vec2(-4., 4.)],
+                                Stroke::new(1.8, color),
+                            ));
+                            egui::Popup::menu(&response)
+                                .align(egui::RectAlign::RIGHT_START)
+                                .width(190.)
+                                .show(|ui| {
+                                    let options: &[Tool] = match rail_tool {
+                                        Tool::Line => &Tool::DRAWING,
+                                        Tool::Dimensions => &Tool::MEASURING,
+                                        Tool::Union => &Tool::SOLID,
+                                        _ => unreachable!(),
+                                    };
+                                    for &option in options {
+                                        if Self::tool_menu_item(ui, option, self.tool == option)
+                                            .clicked()
+                                        {
+                                            if option.is_solid() {
+                                                self.start_solid_tool(option, ui.ctx());
+                                            } else {
+                                                self.set_tool(option);
+                                            }
+                                            ui.close();
+                                        }
+                                    }
+                                    if rail_tool == Tool::Line {
+                                        ui.separator();
+                                        ui.horizontal(|ui| {
+                                            ui.label("Polygon sides");
+                                            ui.add(
+                                                egui::DragValue::new(&mut self.polygon_sides)
+                                                    .range(3..=64),
+                                            );
+                                        });
+                                    }
+                                });
+                        }
+                        if Self::tool_tooltip(response, tool).clicked() && !nested {
+                            self.set_tool(tool);
+                        }
+                        ui.add_space(5.);
+                    }
+                });
+                sidebar::remember_scroll(ui.ctx(), "sidebar_left", scroll.state.clamped_offset());
             });
     }
     fn paint_instructions(&self) -> &'static str {
@@ -2470,10 +2470,19 @@ impl KetchupApp {
                 .frame(egui::Frame::new().fill(colors.paper))
                 .show(ui, |ui| {
                     ui.spacing_mut().scroll.bar_outer_margin = 0.;
-                    egui::ScrollArea::vertical()
-                        .content_margin(18)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| self.inspector_contents(ui));
+                    let scroll = sidebar::restored_scroll_area(
+                        ui,
+                        "sidebar_right",
+                        egui::ScrollArea::vertical()
+                            .content_margin(18)
+                            .auto_shrink([false, false]),
+                    )
+                    .show(ui, |ui| self.inspector_contents(ui));
+                    sidebar::remember_scroll(
+                        ui.ctx(),
+                        "sidebar_right",
+                        scroll.state.clamped_offset(),
+                    );
                 });
             self.inspector_width = panel.response.rect.width();
         } else {
@@ -2482,8 +2491,19 @@ impl KetchupApp {
                 .open(&mut open)
                 .default_width(280.)
                 .default_pos(egui::pos2(90., 120.))
-                .vscroll(true)
-                .show(ui.ctx(), |ui| self.inspector_contents(ui));
+                .show(ui.ctx(), |ui| {
+                    let scroll = sidebar::restored_scroll_area(
+                        ui,
+                        "sidebar_right",
+                        egui::ScrollArea::vertical().id_salt("inspector_scroll"),
+                    )
+                    .show(ui, |ui| self.inspector_contents(ui));
+                    sidebar::remember_scroll(
+                        ui.ctx(),
+                        "sidebar_right",
+                        scroll.state.clamped_offset(),
+                    );
+                });
             if !open {
                 self.inspector = false;
             }

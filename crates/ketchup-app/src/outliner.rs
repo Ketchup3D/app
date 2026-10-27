@@ -507,18 +507,24 @@ impl Outliner<'_> {
                 .show(ui, |ui| {
                     // Virtualize geometry rows; imported meshes can contain millions of entities.
                     let height = ui.spacing().interact_size.y;
-                    egui::ScrollArea::vertical()
-                        .id_salt(("outliner_geometry_rows", parent))
-                        .max_height(180.)
-                        .auto_shrink([false, true])
-                        .show_rows(ui, height, geometry.len(), |ui, range| {
-                            for index in range {
-                                let id = geometry[index];
-                                ui.push_id(id, |ui| {
-                                    self.row(ui, id);
-                                });
-                            }
-                        });
+                    let scroll_key = format!("outliner_geometry_rows/{parent:?}");
+                    let scroll = restored_scroll_area(
+                        ui,
+                        &scroll_key,
+                        egui::ScrollArea::vertical()
+                            .id_salt(("outliner_geometry_rows", parent))
+                            .max_height(180.)
+                            .auto_shrink([false, true]),
+                    )
+                    .show_rows(ui, height, geometry.len(), |ui, range| {
+                        for index in range {
+                            let id = geometry[index];
+                            ui.push_id(id, |ui| {
+                                self.row(ui, id);
+                            });
+                        }
+                    });
+                    remember_scroll(ui.ctx(), &scroll_key, scroll.state.clamped_offset());
                 });
             icons::line_icon(
                 ui.painter(),
@@ -1121,14 +1127,19 @@ impl KetchupApp {
                 .flatten(),
         };
         // Let the inspector handle vertical scrolling as the tree expands.
-        egui::ScrollArea::horizontal()
-            .id_salt("outliner_tree")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.spacing_mut().indent = 16.;
-                tree.level(ui, &roots, None);
-                tree.root_drop_target(ui);
-            });
+        let scroll = restored_scroll_area(
+            ui,
+            "outliner_tree",
+            egui::ScrollArea::horizontal()
+                .id_salt("outliner_tree")
+                .auto_shrink([false, true]),
+        )
+        .show(ui, |ui| {
+            ui.spacing_mut().indent = 16.;
+            tree.level(ui, &roots, None);
+            tree.root_drop_target(ui);
+        });
+        remember_scroll(ui.ctx(), "outliner_tree", scroll.state.clamped_offset());
         let Outliner {
             action,
             toggle_visibility,

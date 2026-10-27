@@ -32,6 +32,7 @@ pub(super) struct InspectorPreferences {
     camera: Option<CameraPreferences>,
     screenshot: crate::screenshots::Settings,
     sections: std::collections::BTreeMap<String, bool>,
+    scroll_positions: std::collections::BTreeMap<String, [f32; 2]>,
 }
 
 impl Default for InspectorPreferences {
@@ -52,6 +53,7 @@ impl Default for InspectorPreferences {
             camera: None,
             screenshot: Default::default(),
             sections: Default::default(),
+            scroll_positions: Default::default(),
         }
     }
 }
@@ -204,6 +206,49 @@ struct SectionMemory(
     std::collections::BTreeMap<String, egui::Id>,
 );
 
+#[derive(Clone, Default)]
+struct ScrollMemory {
+    positions: std::collections::BTreeMap<String, [f32; 2]>,
+    scopes: std::collections::BTreeMap<String, egui::Id>,
+}
+
+fn scroll_memory_id() -> egui::Id {
+    egui::Id::unique((PREFERENCE_KEY, "scroll_positions"))
+}
+
+fn valid_scroll_position(position: [f32; 2]) -> [f32; 2] {
+    position.map(|value| if value.is_finite() { value.max(0.) } else { 0. })
+}
+
+// Restore only when entering a new UI scope, so normal wheel input, dragging,
+// and kinetic scrolling remain owned by egui. Keys are independent of layout.
+pub(super) fn restored_scroll_area(
+    ui: &egui::Ui,
+    key: &str,
+    area: egui::ScrollArea,
+) -> egui::ScrollArea {
+    let position = ui.ctx().data_mut(|data| {
+        let memory = data.get_temp_mut_or_default::<ScrollMemory>(scroll_memory_id());
+        let previous_scope = memory.scopes.insert(key.to_owned(), ui.scope_id());
+        (previous_scope != Some(ui.scope_id()))
+            .then(|| memory.positions.get(key).copied())
+            .flatten()
+    });
+    if let Some(position) = position {
+        area.scroll_offset(egui::vec2(position[0], position[1]))
+    } else {
+        area
+    }
+}
+
+pub(super) fn remember_scroll(ctx: &egui::Context, key: &str, offset: Vec2) {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<ScrollMemory>(scroll_memory_id())
+            .positions
+            .insert(key.to_owned(), valid_scroll_position([offset.x, offset.y]));
+    });
+}
+
 fn section_memory_id() -> egui::Id {
     egui::Id::unique(PREFERENCE_KEY)
 }
@@ -270,9 +315,12 @@ impl KetchupApp {
         storage: Option<&dyn eframe::Storage>,
     ) {
         self.inspector_order = restore_order(storage);
-        let preferences = storage
+        let mut preferences = storage
             .and_then(|storage| eframe::get_value::<InspectorPreferences>(storage, PREFERENCE_KEY))
             .unwrap_or_default();
+        for position in preferences.scroll_positions.values_mut() {
+            *position = valid_scroll_position(*position);
+        }
         preferences.tools.restore(self);
         self.inspector = preferences.visible;
         self.inspector_width = if preferences.width.is_finite() {
@@ -308,6 +356,13 @@ impl KetchupApp {
         }
         ctx.data_mut(|data| {
             data.insert_temp(
+                scroll_memory_id(),
+                ScrollMemory {
+                    positions: preferences.scroll_positions.clone(),
+                    scopes: Default::default(),
+                },
+            );
+            data.insert_temp(
                 section_memory_id(),
                 SectionMemory(preferences.sections.clone(), Default::default()),
             )
@@ -341,6 +396,11 @@ impl KetchupApp {
             sections: ctx.data_mut(|data| {
                 data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
                     .0
+                    .clone()
+            }),
+            scroll_positions: ctx.data_mut(|data| {
+                data.get_temp_mut_or_default::<ScrollMemory>(scroll_memory_id())
+                    .positions
                     .clone()
             }),
         }
@@ -437,6 +497,201 @@ mod preference_tests {
         fn flush(&mut self) {
             self.flushed = true;
         }
+    }
+
+    fn scroll_frame(
+        ctx: &egui::Context,
+        key: &str,
+        scope: &str,
+        requested: Vec2,
+        content: Vec2,
+    ) -> Vec2 {
+        let mut offset = Vec2::ZERO;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(500., 400.))),
+                ..Default::default()
+            },
+            |ui| {
+                ui.push_id(scope, |ui| {
+                    let scroll = restored_scroll_area(
+                        ui,
+                        key,
+                        egui::ScrollArea::both()
+                            .id_salt("test_scroll")
+                            .max_width(120.)
+                            .max_height(80.)
+                            .auto_shrink([false, false])
+                            .scroll_offset(requested),
+                    )
+                    .show(ui, |ui| {
+                        ui.allocate_exact_size(content, Sense::hover());
+                    });
+                    offset = scroll.state.clamped_offset();
+                    remember_scroll(ui.ctx(), key, offset);
+                });
+            },
+        );
+        offset
+    }
+
+    #[test]
+    fn sidebar_and_outliner_scroll_positions_save_immediately_and_restore_independently() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let mut storage = SavedPreferences::default();
+        let positions = [
+            ("sidebar_left", egui::vec2(0., 110.)),
+            ("sidebar_right", egui::vec2(0., 260.)),
+            ("outliner_tree", egui::vec2(70., 0.)),
+            ("outliner_geometry_rows/None", egui::vec2(0., 180.)),
+            ("outliner_geometry_rows/Some(42)", egui::vec2(0., 340.)),
+        ];
+        let content = Vec2::splat(1500.);
+        for (key, position) in positions {
+            assert_eq!(scroll_frame(&ctx, key, key, position, content), position);
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed, "{key}");
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+        }
+
+        let restored_ctx = egui::Context::default();
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+        for (key, position) in positions {
+            // Each area has a new egui scope, just as after an app restart or
+            // when moving the inspector between docked and floating layouts.
+            assert_eq!(
+                scroll_frame(&restored_ctx, key, "floating", Vec2::ZERO, content),
+                position
+            );
+            assert_eq!(
+                scroll_frame(&restored_ctx, key, "docked", Vec2::ZERO, content),
+                position
+            );
+        }
+        storage.flushed = false;
+        restored.persist_inspector_changes(&restored_ctx, Some(&mut storage), false);
+        assert!(
+            !storage.flushed,
+            "unchanged positions must not save every frame"
+        );
+    }
+
+    #[test]
+    fn scroll_restoration_allows_further_scrolling_and_clamps_shorter_content() {
+        let ctx = egui::Context::default();
+        let content = Vec2::splat(1500.);
+        let key = "sidebar_right";
+        remember_scroll(&ctx, key, egui::vec2(0., 400.));
+        assert_eq!(
+            scroll_frame(&ctx, key, "docked", Vec2::ZERO, content).y,
+            400.
+        );
+        // Restoration must not keep forcing the saved offset in an existing
+        // scope: egui must remain free to process subsequent scrolling.
+        assert_eq!(
+            scroll_frame(&ctx, key, "docked", egui::vec2(0., 200.), content).y,
+            200.
+        );
+        assert_eq!(
+            scroll_frame(&ctx, key, "floating", Vec2::ZERO, content).y,
+            200.
+        );
+        let shorter = scroll_frame(
+            &ctx,
+            key,
+            "floating",
+            egui::vec2(0., 200.),
+            Vec2::splat(20.),
+        );
+        assert_eq!(shorter, Vec2::ZERO);
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        let restored_ctx = egui::Context::default();
+        restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+        assert_eq!(
+            scroll_frame(&restored_ctx, key, "docked", Vec2::ZERO, content),
+            Vec2::ZERO
+        );
+    }
+
+    #[test]
+    fn scroll_positions_default_for_older_preferences_and_reject_invalid_offsets() {
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert!(old.scroll_positions.is_empty());
+        assert_eq!(valid_scroll_position([f32::NAN, f32::INFINITY]), [0., 0.]);
+        assert_eq!(valid_scroll_position([-15., f32::NEG_INFINITY]), [0., 0.]);
+        let ctx = egui::Context::default();
+        let mut preferences = InspectorPreferences::default();
+        preferences
+            .scroll_positions
+            .insert("sidebar_left".into(), [-10., 75.]);
+        let mut storage = SavedPreferences::default();
+        eframe::set_value(&mut storage, PREFERENCE_KEY, &preferences);
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&ctx, Some(&storage));
+        assert_eq!(
+            restored
+                .current_inspector_preferences(&ctx)
+                .scroll_positions["sidebar_left"],
+            [0., 75.]
+        );
+        assert_eq!(
+            scroll_frame(&ctx, "sidebar_left", "left", Vec2::ZERO, Vec2::splat(1500.)),
+            egui::vec2(0., 75.)
+        );
+    }
+
+    #[test]
+    fn outliner_virtualized_geometry_lists_restore_their_own_scroll_positions() {
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.);
+        let mut doc = Document::default();
+        let mut grouped = BTreeSet::new();
+        for index in 0..100 {
+            let point = DVec3::Y * index as f64 * 2.;
+            let edge = doc.model.add_edge(point, point + DVec3::X).unwrap();
+            if index < 50 {
+                grouped.insert(edge);
+            }
+        }
+        let group = doc.model.make_object(&grouped, false, "Group").unwrap();
+        let child_key = format!("outliner_geometry_rows/{:?}", Some(group));
+        set_section_open(&ctx, "outliner_geometry/None", true);
+        set_section_open(&ctx, &format!("outliner_object/{group}"), true);
+        set_section_open(&ctx, &format!("outliner_geometry/{:?}", Some(group)), true);
+        remember_scroll(&ctx, "outliner_geometry_rows/None", egui::vec2(0., 120.));
+        remember_scroll(&ctx, &child_key, egui::vec2(0., 240.));
+        let mut app = KetchupApp::with_document(doc.clone(), None, true);
+        let render = |ctx: &egui::Context, app: &mut KetchupApp| {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(300., 900.))),
+                    ..Default::default()
+                },
+                |ui| app.outliner_contents(ui),
+            );
+        };
+        render(&ctx, &mut app);
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        let restored_ctx = egui::Context::default();
+        restored_ctx.style_mut_of(restored_ctx.theme(), |style| style.animation_time = 0.);
+        let mut restored = KetchupApp::with_document(doc, None, true);
+        restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+        render(&restored_ctx, &mut restored);
+        let positions = restored
+            .current_inspector_preferences(&restored_ctx)
+            .scroll_positions;
+        assert_eq!(positions["outliner_geometry_rows/None"], [0., 120.]);
+        assert_eq!(positions[&child_key], [0., 240.]);
+        assert!(restored.dirty_since.is_none());
     }
 
     #[test]
