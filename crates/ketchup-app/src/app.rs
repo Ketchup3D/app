@@ -1878,7 +1878,12 @@ impl KetchupApp {
                                 ui.close();
                             }
                         });
-                        ui.add_space(18.);
+                        let (separator, _) = ui.allocate_exact_size(egui::vec2(32., 24.), Sense::hover());
+                        ui.painter().vline(
+                            separator.center().x,
+                            separator.y_range(),
+                            Stroke::new(1., if dark { colors.border } else { colors.muted.gamma_multiply(0.8) }),
+                        );
                         ui.add(egui::Label::new(RichText::new(&self.doc.name).color(foreground)).truncate())
                             .on_hover_text(&self.doc.name);
                     });
