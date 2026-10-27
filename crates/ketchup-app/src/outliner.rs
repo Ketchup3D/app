@@ -134,7 +134,18 @@ impl Outliner<'_> {
     fn row(&mut self, ui: &mut egui::Ui, id: u64) -> egui::Response {
         let state = self.entities.get(id);
         let object = self.model.objects.get(&id);
-        let paint = self.paint.get(&id).copied().unwrap_or(OutlinerPaint::Empty);
+        let paint = self
+            .paint
+            .get(&id)
+            .copied()
+            .or_else(|| {
+                self.model
+                    .face_colors
+                    .get(&id)
+                    .copied()
+                    .map(OutlinerPaint::Color)
+            })
+            .unwrap_or(OutlinerPaint::Empty);
         let (kind, icon) = if let Some(object) = object {
             match object.kind {
                 ObjectKind::Group => ("Group", "group"),
@@ -183,30 +194,27 @@ impl Outliner<'_> {
             icon
         };
         let icon = egui::Atom::paint(egui::vec2(18., 18.), move |ui, args| {
-            let color = paint_color.unwrap_or(args.fallback_text_color);
-            icons::line_icon(
-                ui.painter(),
-                args.rect.center(),
-                icon,
-                if state.hidden {
-                    paint_color
-                        .map(|color| color.gamma_multiply(0.5))
-                        .unwrap_or(hidden_color)
-                } else {
-                    color
-                },
-            );
-            if icon == "group_filled" {
-                icons::line_icon(
-                    ui.painter(),
-                    args.rect.center(),
-                    "group",
+            let outline = if state.hidden {
+                hidden_color
+            } else {
+                args.fallback_text_color
+            };
+            let color = paint_color
+                .map(|color| {
                     if state.hidden {
-                        hidden_color
+                        color.gamma_multiply(0.5)
                     } else {
-                        args.fallback_text_color
-                    },
-                );
+                        color
+                    }
+                })
+                .unwrap_or(outline);
+            if icon == "face" && paint_color.is_some() {
+                icons::face_icon(ui.painter(), args.rect.center(), color, outline);
+            } else {
+                icons::line_icon(ui.painter(), args.rect.center(), icon, color);
+                if icon == "group_filled" {
+                    icons::line_icon(ui.painter(), args.rect.center(), "group", outline);
+                }
             }
         });
         let button = egui::Button::selectable(

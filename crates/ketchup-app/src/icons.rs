@@ -528,6 +528,16 @@ pub fn group_emphasis(p: &egui::Painter, c: Pos2, solid: Color32, wireframe: Col
     cube(c + egui::vec2(0., 4.), 5.5, true);
 }
 
+pub fn face_icon(p: &egui::Painter, c: Pos2, fill: Color32, outline: Color32) {
+    p.add(egui::Shape::convex_polygon(
+        [(-8., 4.), (-3., -5.), (8., -5.), (3., 4.)]
+            .map(|(x, y)| c + egui::vec2(x, y))
+            .to_vec(),
+        fill,
+        Stroke::new(1.5, outline),
+    ));
+}
+
 pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
     let s = Stroke::new(1.5, color);
     match kind {
@@ -672,13 +682,7 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
             }
         }
         "face" => {
-            p.add(egui::Shape::convex_polygon(
-                [(-8., 4.), (-3., -5.), (8., -5.), (3., 4.)]
-                    .map(|(x, y)| c + egui::vec2(x, y))
-                    .to_vec(),
-                color.gamma_multiply(0.15),
-                s,
-            ));
+            face_icon(p, c, color.gamma_multiply(0.15), color);
         }
         "text" => {
             p.text(
