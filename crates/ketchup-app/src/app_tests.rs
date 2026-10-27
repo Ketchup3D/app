@@ -4564,3 +4564,31 @@ fn generate_menu_is_next_to_edit_and_woodworking_opens_cancellable_scope_dialog(
     assert!(h.app.history.undo_label().is_none());
     drop(output);
 }
+
+#[test]
+fn generate_screenshot_dialog_supports_multiple_views_and_cancels_without_editing() {
+    let mut h = Harness::new();
+    let before = h.app.doc.clone();
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let output = h.click(text_position(&output, "Generate"));
+    h.click(text_position(&output, "Screenshot"));
+    assert!(h.app.screenshot.open);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    text_position(&output, "Generate screenshot");
+    text_position(&output, "Preview viewport");
+    assert!(h.app.screenshot.settings.views[1]);
+    assert!(h.app.screenshot.settings.views[2]);
+    assert!(!h.app.screenshot.settings.views[3]);
+    h.click(text_position(&output, "Back"));
+    assert!(h.app.screenshot.settings.views[3]);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "One image per view"));
+    assert!(!h.app.screenshot.settings.combined);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "Cancel"));
+    assert!(!h.app.screenshot.open);
+    assert!(h.app.screenshot.settings.views[3]);
+    assert_eq!(h.app.doc, before);
+    assert!(h.app.project.pending.is_none());
+    assert!(h.app.history.undo_label().is_none());
+}

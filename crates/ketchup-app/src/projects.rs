@@ -18,6 +18,7 @@ pub(super) enum Operation {
     Import,
     Export,
     CuttingPlan,
+    Screenshot,
 }
 
 pub(super) struct Project {
@@ -96,6 +97,9 @@ impl KetchupApp {
         self.project.after_save = None;
         self.project.error = None;
         self.project.cutting_plan_selection = None;
+        let screenshot_settings = std::mem::take(&mut self.screenshot.settings);
+        self.screenshot = screenshot_dialog::ScreenshotDialog::default();
+        self.screenshot.settings = screenshot_settings;
         self.save_error = None;
         self.storage_recovery = false;
         ctx.memory_mut(|m| {
@@ -258,6 +262,8 @@ impl KetchupApp {
                 match (operation, cfg!(target_arch = "wasm32")) {
                     (Operation::CuttingPlan, true) => "Cutting plan PDF opened in a new tab",
                     (Operation::CuttingPlan, false) => "Cutting plan PDF saved and opened",
+                    (Operation::Screenshot, true) => "Screenshot download started",
+                    (Operation::Screenshot, false) => "Screenshot exported",
                     (_, true) => "OBJ download started",
                     (_, false) => "OBJ exported",
                 },
@@ -343,6 +349,7 @@ impl KetchupApp {
                                 Operation::Import => "Importing SketchUp model…",
                                 Operation::Export => "Exporting OBJ…",
                                 Operation::CuttingPlan => "Preparing cutting plan PDF…",
+                                Operation::Screenshot => "Exporting screenshot…",
                             });
                         });
                     });

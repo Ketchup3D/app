@@ -55,6 +55,8 @@ mod move_tool;
 mod precision;
 #[path = "projects.rs"]
 mod projects;
+#[path = "screenshot_dialog.rs"]
+mod screenshot_dialog;
 #[path = "shortcuts.rs"]
 mod shortcuts;
 #[path = "sidebar.rs"]
@@ -193,6 +195,8 @@ pub struct KetchupApp {
     updates: crate::updates::Updater,
     doc: Document,
     project: projects::Project,
+    screenshot: screenshot_dialog::ScreenshotDialog,
+    screenshot_gpu: Option<(eframe::wgpu::Device, eframe::wgpu::Queue)>,
     history: History,
     tool: Tool,
     drawing_tool: Tool,
@@ -270,6 +274,10 @@ impl KetchupApp {
             Err(e) => (Document::default(), Some(e)),
         };
         let mut app = Self::with_document(doc, error, renderer::install(cc));
+        app.screenshot_gpu = cc
+            .wgpu_render_state
+            .as_ref()
+            .map(|state| (state.device.clone(), state.queue.clone()));
         app.restore_inspector_preferences(&cc.egui_ctx, cc.storage);
         app.release_notes.open_if_unread();
         #[cfg(not(target_arch = "wasm32"))]
@@ -309,6 +317,8 @@ impl KetchupApp {
                 ..Default::default()
             },
             history: History::default(),
+            screenshot: screenshot_dialog::ScreenshotDialog::default(),
+            screenshot_gpu: None,
             tool: Tool::Select,
             drawing_tool: Tool::Line,
             measurement_tool: Tool::Dimensions,
@@ -1230,7 +1240,7 @@ impl KetchupApp {
             return;
         }
 
-        if self.project.blocked() {
+        if self.project.blocked() || self.screenshot.open {
             return;
         }
         if self.help || self.about || self.release_notes.open {
@@ -1827,6 +1837,10 @@ impl KetchupApp {
                                     ui.close();
                                 }
                             });
+                            if ui.add_enabled(!self.project.blocked(), egui::Button::new("Screenshot")).clicked() {
+                                self.screenshot.open = true;
+                                ui.close();
+                            }
                         });
                         Self::app_bar_menu(ui, "Help", |ui| {
                             ui.visuals_mut().override_text_color = Some(colors.ink);
@@ -2738,7 +2752,7 @@ impl KetchupApp {
             return;
         }
 
-        if self.project.blocked() {
+        if self.project.blocked() || self.screenshot.open {
             return;
         }
         if self.help
@@ -3169,6 +3183,10 @@ impl KetchupApp {
     }
 
     fn paint_scene(&mut self, ui: &egui::Ui, rect: Rect) {
+        self.paint_scene_with_background(ui, rect, true);
+    }
+
+    fn paint_scene_with_background(&mut self, ui: &egui::Ui, rect: Rect, background: bool) {
         let colors = Palette::for_ui(ui);
         let faces = FacePalette::for_ui(ui);
         let model = self
@@ -3226,7 +3244,9 @@ impl KetchupApp {
             themed_display.section_fill = false;
         }
         let display = &themed_display;
-        crate::environment::paint(&p, rect, camera, display, ui.visuals().dark_mode);
+        if background {
+            crate::environment::paint(&p, rect, camera, display, ui.visuals().dark_mode);
+        }
         let mut mesh = renderer::Mesh::cached(camera, size, &mut self.scene_cache);
         mesh.set_pixels_per_point(ui.ctx().pixels_per_point());
         mesh.set_display(display);
@@ -4102,7 +4122,7 @@ impl eframe::App for KetchupApp {
             }
         }
         self.keyboard(&ctx);
-        if self.project.blocked() {
+        if self.project.blocked() || self.screenshot.open {
             let opacity = ui.opacity();
             ui.disable();
             ui.set_opacity(opacity);
@@ -4132,6 +4152,7 @@ impl eframe::App for KetchupApp {
         #[cfg(not(target_arch = "wasm32"))]
         self.update_window(&ctx);
         self.project_dialogs(&ctx);
+        self.screenshot_dialog(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
         Self::window_resize_handles(ui);
         self.persist_inspector_changes(

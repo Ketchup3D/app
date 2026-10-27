@@ -499,3 +499,53 @@ pub fn export_cutting_plan(
     ctx.request_repaint();
     receiver
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn export_screenshots(
+    ctx: &eframe::egui::Context,
+    name: String,
+    settings: crate::screenshots::Settings,
+    pages: Vec<image::RgbaImage>,
+) -> Pending {
+    run(ctx, move || {
+        let export = crate::screenshots::encode(&settings, &pages)?;
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Export screenshot")
+            .add_filter("Screenshot", &[export.extension])
+            .set_file_name(exchange_name(
+                &format!("{name} - screenshot"),
+                export.extension,
+            ))
+            .save_file()
+        else {
+            return Ok(Outcome::Cancelled);
+        };
+        write(&extension_path(path, export.extension)?, &export.bytes)?;
+        Ok(Outcome::Exported)
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn export_screenshots(
+    ctx: &eframe::egui::Context,
+    name: String,
+    settings: crate::screenshots::Settings,
+    pages: Vec<image::RgbaImage>,
+) -> Pending {
+    let (sender, receiver) = mpsc::channel();
+    let result = crate::screenshots::encode(&settings, &pages).and_then(|export| {
+        download_bytes(
+            &exchange_name(&format!("{name} - screenshot"), export.extension),
+            &export.bytes,
+            export.mime,
+        )
+        .map(|_| Outcome::Exported)
+        .map_err(|e| {
+            e.as_string()
+                .unwrap_or_else(|| "The browser could not download this screenshot".into())
+        })
+    });
+    let _ = sender.send(result);
+    ctx.request_repaint();
+    receiver
+}

@@ -25,6 +25,7 @@ pub(super) struct InspectorPreferences {
     last_seen_release_notes: Option<String>,
     display: Option<DisplaySettings>,
     camera: Option<CameraPreferences>,
+    screenshot: crate::screenshots::Settings,
     sections: std::collections::BTreeMap<String, bool>,
 }
 
@@ -39,6 +40,7 @@ impl Default for InspectorPreferences {
             last_seen_release_notes: None,
             display: None,
             camera: None,
+            screenshot: Default::default(),
             sections: Default::default(),
         }
     }
@@ -169,6 +171,7 @@ impl KetchupApp {
         self.component_filter = preferences.component_filter.clone();
         self.outliner_filter = preferences.outliner_filter.clone();
         self.paint_color = preferences.paint_color;
+        self.screenshot.settings = preferences.screenshot.clone();
         self.release_notes.last_seen_version = preferences.last_seen_release_notes.clone();
         if let Some(display) = &preferences.display
             && display.valid()
@@ -197,6 +200,7 @@ impl KetchupApp {
             last_seen_release_notes: self.release_notes.last_seen_version.clone(),
             display: Some(self.doc.display.clone()),
             camera: Some(CameraPreferences::capture(&self.doc.camera)),
+            screenshot: self.screenshot.settings.clone(),
             sections: ctx.data_mut(|data| {
                 data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
                     .0
@@ -312,6 +316,29 @@ mod preference_tests {
         let mut refreshed = KetchupApp::with_document(Document::default(), None, true);
         refreshed.inspector_order = restore_order(Some(&storage));
         assert_eq!(refreshed.inspector_order, order);
+    }
+
+    #[test]
+    fn screenshot_options_persist_immediately_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let settings = crate::screenshots::Settings {
+            views: [true, false, false, true, true, false, false, false],
+            combined: false,
+            paper: crate::screenshots::Paper::Tabloid,
+            landscape: false,
+            format: crate::screenshots::Format::Pdf,
+            dpi: 300,
+        };
+        app.screenshot.settings = settings.clone();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(!app.project.modified);
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!(restored.screenshot.settings, settings);
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.screenshot, crate::screenshots::Settings::default());
     }
 
     #[test]

@@ -1215,12 +1215,21 @@ pub fn install(cc: &eframe::CreationContext<'_>) -> bool {
         return false;
     };
     let device = &state.device;
+    install_resources(device, state.target_format, &mut state.renderer.write());
+    true
+}
+
+pub(crate) fn install_resources(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    renderer: &mut egui_wgpu::Renderer,
+) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("KetchUp edges"),
         source: wgpu::ShaderSource::Wgsl(include_str!("edges.wgsl").into()),
     });
-    let face_pipeline = create_pipeline(device, &shader, state.target_format, true);
-    let edge_pipeline = create_pipeline(device, &shader, state.target_format, false);
+    let face_pipeline = create_pipeline(device, &shader, format, true);
+    let edge_pipeline = create_pipeline(device, &shader, format, false);
     let capacity = 4096;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("KetchUp vertices"),
@@ -1234,7 +1243,7 @@ pub fn install(cc: &eframe::CreationContext<'_>) -> bool {
         usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    state.renderer.write().callback_resources.insert(Resources {
+    renderer.callback_resources.insert(Resources {
         face_pipeline,
         edge_pipeline,
         buffer,
@@ -1242,7 +1251,6 @@ pub fn install(cc: &eframe::CreationContext<'_>) -> bool {
         index_buffer,
         index_capacity: capacity,
     });
-    true
 }
 fn create_pipeline(
     device: &wgpu::Device,

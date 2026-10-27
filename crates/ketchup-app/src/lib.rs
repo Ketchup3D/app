@@ -10,6 +10,7 @@ mod picking;
 mod project_files;
 mod release_notes;
 mod renderer;
+mod screenshots;
 mod shadows;
 mod storage;
 mod theme;
