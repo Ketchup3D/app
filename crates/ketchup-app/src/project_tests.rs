@@ -19,6 +19,9 @@ fn new_project_clears_geometry_history_and_previous_file() {
     app.project.path = Some("old.ketchup".into());
     app.doc.snap_to_axes = false;
     app.doc.camera.yaw += 1.;
+    app.doc.camera.pitch -= 0.4;
+    app.doc.camera.target = DVec3::splat(100.);
+    app.doc.camera.distance = 200.;
     app.line_start = Some(DVec3::X);
     app.new_model(&ctx);
     assert_eq!(app.doc.model, Model::default());

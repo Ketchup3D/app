@@ -1,5 +1,20 @@
 [
   {
+    "version": "0.3.1",
+    "date": "2026-10-27",
+    "title": "Choose where browser projects are saved",
+    "sections": [
+      {
+        "title": "Browser saving",
+        "changes": [
+          "Save and Save As now let you choose a filename and location in supported browsers, remembering the last save directory and updating the model name after the file is written.",
+          "Browsers without file-system picker support continue to download project files using their download settings.",
+          "Cancelling the save picker leaves the project unchanged, and failed writes report an error without marking the project as saved."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.3.0",
     "date": "2026-10-27",
     "title": "From models to workshop plans",

@@ -1799,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "ketchup-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytemuck",
  "cc",
@@ -1824,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "ketchup-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "earcutr",
  "glam",
