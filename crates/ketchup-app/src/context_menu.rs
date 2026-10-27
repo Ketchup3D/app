@@ -171,13 +171,24 @@ impl KetchupApp {
     ) -> egui::Response {
         // Reserve the background before painting the checkbox and its label.
         let background = ui.painter().add(egui::Shape::Noop);
-        let response = ui
-            .allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-                egui::Layout::top_down_justified(egui::Align::Min),
-                |ui| ui.checkbox(checked, label),
-            )
-            .inner;
+        let padding = ui.spacing().button_padding.x as i8;
+        let row = ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+            egui::Layout::top_down_justified(egui::Align::Min),
+            |ui| {
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(padding, 0))
+                    .show(ui, |ui| ui.checkbox(checked, label))
+                    .inner
+            },
+        );
+        let mut response = row.inner;
+        let padding_response = row.response.interact(egui::Sense::click());
+        if padding_response.clicked() && !response.clicked() {
+            *checked = !*checked;
+            response.mark_changed();
+        }
+        let response = response.union(padding_response);
         if response.hovered() || response.has_focus() || response.is_pointer_button_down_on() {
             let visuals = ui.style().interact(&response);
             ui.painter().set(
