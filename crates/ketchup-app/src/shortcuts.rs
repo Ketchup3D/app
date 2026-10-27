@@ -120,7 +120,7 @@ impl KetchupApp {
                 &[
                     ("Push/Pull a face", "P"),
                     ("Scale geometry", "S"),
-                    ("Offset a face", "Q"),
+                    ("Offset a face", "F"),
                     ("Move geometry", "M"),
                     ("Toggle Move / Copy", Self::move_copy_key(ctx)),
                     ("Divide a copy span", "/N + Enter"),
@@ -144,7 +144,6 @@ impl KetchupApp {
                     ("Temporary orbit", "Middle drag"),
                     ("Temporary pan", "Shift + middle drag"),
                     ("Zoom to pointer", "Scroll"),
-                    ("Fit model to view", "F"),
                     ("Toggle emphasis on current group/component", "Tab"),
                 ],
             ),
@@ -165,6 +164,7 @@ impl KetchupApp {
                 "Selection & objects",
                 &[
                     ("Toggle selection", "Shift + click"),
+                    ("Search Outliner", if mac { "⌘ + F" } else { "Ctrl + F" }),
                     ("Select all", if mac { "⌘ + A" } else { "Ctrl + A" }),
                     ("Object & clipboard menu", "Right click"),
                     ("Edit group or component", "Double-click"),

@@ -10,6 +10,7 @@ mod outliner;
 const ORDER_PREFERENCE_KEY: &str = "ketchup.inspector-order.v1";
 
 const PREFERENCE_KEY: &str = "ketchup.inspector.v1";
+const OUTLINER_SEARCH_ID: &str = "outliner_search";
 
 // Persist the whole settings object: new DisplaySettings fields automatically
 // participate, while serde defaults keep older preferences compatible.
@@ -19,6 +20,7 @@ pub(super) struct InspectorPreferences {
     visible: bool,
     width: f32,
     component_filter: String,
+    outliner_filter: String,
     paint_color: [u8; 3],
     last_seen_release_notes: Option<String>,
     display: Option<DisplaySettings>,
@@ -32,6 +34,7 @@ impl Default for InspectorPreferences {
             visible: true,
             width: 300.,
             component_filter: String::new(),
+            outliner_filter: String::new(),
             paint_color: [195, 96, 67],
             last_seen_release_notes: None,
             display: None,
@@ -140,6 +143,14 @@ fn set_section_open(ctx: &egui::Context, key: &str, open: bool) {
 }
 
 impl KetchupApp {
+    pub(super) fn request_outliner_search(&mut self, ctx: &egui::Context) {
+        self.inspector = true;
+        self.focus_outliner_search = true;
+        set_section_open(ctx, "outliner", true);
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::unique(OUTLINER_SEARCH_ID)));
+        ctx.request_repaint();
+    }
+
     pub(super) fn restore_inspector_preferences(
         &mut self,
         ctx: &egui::Context,
@@ -156,6 +167,7 @@ impl KetchupApp {
             300.
         };
         self.component_filter = preferences.component_filter.clone();
+        self.outliner_filter = preferences.outliner_filter.clone();
         self.paint_color = preferences.paint_color;
         self.release_notes.last_seen_version = preferences.last_seen_release_notes.clone();
         if let Some(display) = &preferences.display
@@ -180,6 +192,7 @@ impl KetchupApp {
             visible: self.inspector,
             width: self.inspector_width,
             component_filter: self.component_filter.clone(),
+            outliner_filter: self.outliner_filter.clone(),
             paint_color: self.paint_color,
             last_seen_release_notes: self.release_notes.last_seen_version.clone(),
             display: Some(self.doc.display.clone()),
@@ -299,6 +312,120 @@ mod preference_tests {
         let mut refreshed = KetchupApp::with_document(Document::default(), None, true);
         refreshed.inspector_order = restore_order(Some(&storage));
         assert_eq!(refreshed.inspector_order, order);
+    }
+
+    #[test]
+    fn outliner_search_persists_immediately_and_defaults_to_empty() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.outliner_filter = "Handle".into();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!(restored.outliner_filter, "Handle");
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert!(old.outliner_filter.is_empty());
+
+        restored.outliner_filter.clear();
+        restored.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        app.restore_inspector_preferences(&ctx, Some(&storage));
+        assert!(app.outliner_filter.is_empty());
+    }
+
+    #[test]
+    fn find_shortcut_reveals_and_focuses_outliner_and_persists_expansion() {
+        for width in [1440., 800.] {
+            for modifiers in [
+                egui::Modifiers::CTRL,
+                egui::Modifiers {
+                    ctrl: true,
+                    command: true,
+                    ..Default::default()
+                },
+                egui::Modifiers {
+                    mac_cmd: true,
+                    command: true,
+                    ..Default::default()
+                },
+            ] {
+                let ctx = egui::Context::default();
+                ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.);
+                let mut app = KetchupApp::with_document(Document::default(), None, true);
+                app.outliner_filter = "Cabinet".into();
+                set_section_open(&ctx, "outliner", false);
+                let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 900.)));
+                let mut other_text = String::new();
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        app.inspector_panel(ui);
+                        ui.add(egui::TextEdit::singleline(&mut other_text))
+                            .request_focus();
+                    },
+                );
+                assert!(ctx.egui_wants_keyboard_input());
+                app.inspector = false;
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect,
+                        modifiers,
+                        events: vec![egui::Event::Key {
+                            key: Key::F,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                        }],
+                        ..Default::default()
+                    },
+                    |ui| {
+                        app.keyboard(&ctx);
+                        assert!(!ctx.input(|input| input.key_pressed(Key::F)));
+                        app.inspector_panel(ui);
+                    },
+                );
+                // Allow newly opened windows and disclosures to finish their layout.
+                for _ in 0..2 {
+                    let _ = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            app.inspector_panel(ui);
+                        },
+                    );
+                }
+                assert!(app.inspector);
+                assert!(!app.focus_outliner_search);
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(egui::Id::unique(OUTLINER_SEARCH_ID))
+                );
+                assert_eq!(app.outliner_filter, "Cabinet");
+                assert_eq!(app.tool, Tool::Select);
+
+                let mut storage = SavedPreferences::default();
+                app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+                assert!(!app.project.modified);
+                let restored_ctx = egui::Context::default();
+                let mut restored = KetchupApp::with_document(Document::default(), None, true);
+                restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+                assert!(restored.inspector);
+                assert!(
+                    restored
+                        .current_inspector_preferences(&restored_ctx)
+                        .sections["outliner"]
+                );
+            }
+        }
     }
 
     #[test]
@@ -1196,12 +1323,13 @@ impl KetchupApp {
         model.hidden.remove(&id);
         model.locked.remove(&id);
         model.entity_tags.remove(&id);
-        let mut points = model.vertices.values().map(|v| v.position).chain(
+        let points = model.vertices.values().map(|v| v.position).chain(
             model
                 .dimensions
                 .values()
                 .flat_map(|dimension| dimension.layout(&model)),
         );
+        let mut points = points.chain(model.texts.values().flat_map(|t| t.layout(&model)));
         let Some(first) = points.next() else {
             self.say(ctx, "This component is empty");
             return;

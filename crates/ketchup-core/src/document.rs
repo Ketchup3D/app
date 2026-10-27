@@ -37,6 +37,8 @@ pub struct Model {
     #[serde(default)]
     pub dimensions: BTreeMap<u64, crate::Dimension>,
     #[serde(default)]
+    pub texts: BTreeMap<u64, crate::TextAnnotation>,
+    #[serde(default)]
     pub objects: BTreeMap<u64, crate::Object>,
     #[serde(default)]
     pub hidden: BTreeSet<u64>,
@@ -182,6 +184,7 @@ impl Model {
         self.sync_dimensions();
         let ids = self.erasable_entities(ids);
         self.dimensions.retain(|id, _| !ids.contains(id));
+        self.texts.retain(|id, _| !ids.contains(id));
         let removed: BTreeSet<_> = self
             .edges
             .values()
@@ -231,11 +234,17 @@ impl Model {
                     .flat_map(|f| f.vertices.iter().chain(f.holes.iter().flatten()).copied()),
             )
             .collect();
-        let mut vertices = used.iter().map(|id| self.vertices[id].position).chain(
+        let vertices = used.iter().map(|id| self.vertices[id].position).chain(
             self.dimensions
                 .values()
                 .filter(|d| !hidden.contains(&d.id))
                 .flat_map(|d| d.layout(self)),
+        );
+        let mut vertices = vertices.chain(
+            self.texts
+                .values()
+                .filter(|t| !hidden.contains(&t.id))
+                .flat_map(|t| t.layout(self)),
         );
         let first = vertices.next()?;
         Some(vertices.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p))))
@@ -246,6 +255,7 @@ impl Model {
             || self.faces.len() > 1_000_000
             || self.objects.len() > 1_000_000
             || self.dimensions.len() > 1_000_000
+            || self.texts.len() > 1_000_000
         {
             return Err("Model is too large");
         }
@@ -256,6 +266,7 @@ impl Model {
             .chain(self.faces.keys())
             .chain(self.objects.keys())
             .chain(self.dimensions.keys())
+            .chain(self.texts.keys())
             .max()
             .copied()
             .unwrap_or(0);
@@ -316,6 +327,7 @@ impl Model {
         self.validate_tags()?;
         self.validate_objects()?;
         self.validate_dimensions()?;
+        self.validate_texts()?;
         if self
             .face_colors
             .keys()
@@ -330,6 +342,7 @@ impl Model {
             || self.faces.contains_key(id)
             || self.objects.contains_key(id)
             || self.dimensions.contains_key(id)
+            || self.texts.contains_key(id)
     }
 }
 

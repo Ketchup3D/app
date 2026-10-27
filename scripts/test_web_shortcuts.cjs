@@ -43,7 +43,7 @@ test('canvas and eframe sibling input share the capture listener', () => {
 test('app commands cancel browser defaults on canvas and in text fields', () => {
     for (const target of [canvas, textInput]) {
         for (const modifier of ['ctrlKey', 'metaKey']) {
-            for (const key of ['a', 'n', 'o', 's', 'y', 'z', 'A', 'N', 'O', 'S', 'Y', 'Z']) {
+            for (const key of ['a', 'f', 'n', 'o', 's', 'y', 'z', 'A', 'F', 'N', 'O', 'S', 'Y', 'Z']) {
                 for (const shiftKey of [false, true]) {
                     assert(cancelled(key, {target, [modifier]: true, shiftKey}), `${modifier}+${key}`);
                 }

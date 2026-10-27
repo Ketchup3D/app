@@ -494,7 +494,7 @@ fn all_keyboard_tool_shortcuts_select_the_expected_tool() {
         (Key::D, Tool::Freehand),
         (Key::P, Tool::PushPull),
         (Key::S, Tool::Scale),
-        (Key::Q, Tool::Offset),
+        (Key::F, Tool::Offset),
         (Key::M, Tool::Move),
         (Key::B, Tool::Paint),
         (Key::T, Tool::TapeMeasure),
@@ -503,8 +503,14 @@ fn all_keyboard_tool_shortcuts_select_the_expected_tool() {
         (Key::E, Tool::Erase),
         (Key::O, Tool::Orbit),
     ] {
+        let camera = h.app.doc.camera.clone();
         h.key(key);
         assert_eq!(h.app.tool, tool);
+        if key == Key::F {
+            assert_eq!(Tool::Offset.shortcut(), "F");
+            assert_eq!(h.app.doc.camera.target, camera.target);
+            assert_eq!(h.app.doc.camera.distance, camera.distance);
+        }
     }
     h.key(Key::F1);
     assert!(h.app.help);

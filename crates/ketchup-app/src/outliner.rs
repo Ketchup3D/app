@@ -27,14 +27,41 @@ struct OutlinerDragHover {
 
 struct Outliner<'a> {
     model: &'a Model,
+    filtered_objects: Option<&'a BTreeSet<u64>>,
     selected: &'a BTreeSet<u64>,
     entities: &'a renderer::EntityCache,
     action: Option<OutlinerAction>,
+    toggle_visibility: Option<u64>,
     hover: Option<u64>,
     context_menu: Option<(u64, egui::Response)>,
     drop: Option<OutlinerDrop>,
     drop_hover: Option<u64>,
     drag_hover: Option<OutlinerDragHover>,
+}
+
+// Include ancestors so a match remains reachable even inside collapsed objects.
+// Filtering never changes the remembered disclosure states.
+fn matching_outliner_objects(model: &Model, query: &str) -> Option<BTreeSet<u64>> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+    let mut visible = BTreeSet::new();
+    for object in model.objects.values() {
+        if !object.name.to_lowercase().contains(&query)
+            && !format!("#{}", object.id).contains(&query)
+        {
+            continue;
+        }
+        let mut current = Some(object.id);
+        while let Some(id) = current {
+            if !visible.insert(id) {
+                break;
+            }
+            current = model.parent(id);
+        }
+    }
+    Some(visible)
 }
 
 fn empty_outliner_label(ui: &mut egui::Ui, icon: &str, label: &str) {
@@ -58,59 +85,104 @@ impl Outliner<'_> {
             ("Edge", "edge")
         } else if self.model.faces.contains_key(&id) {
             ("Face", "face")
+        } else if self.model.texts.contains_key(&id) {
+            ("Text", "text")
         } else {
             ("Dimension", "dimension")
         };
         let mut label = object
             .map(|object| object.name.trim())
+            .or_else(|| {
+                self.model
+                    .texts
+                    .get(&id)
+                    .map(|text| text.text.lines().next().unwrap_or("Text"))
+            })
             .filter(|name| !name.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| format!("#{id}"));
-        if state.hidden {
-            label.push_str(" · Hidden");
-        }
         if state.locked {
             label.push_str(" · Locked");
         }
         if self.model.edit_context == Some(id) {
             label.push_str(" · Editing");
         }
+        let hidden_color = Palette::for_ui(ui).muted.gamma_multiply(0.5);
         let text = RichText::new(&label);
         let text = if state.hidden {
-            text.color(Palette::for_ui(ui).muted)
+            text.color(hidden_color)
         } else {
             text
         };
-        let hidden = state.hidden;
         let icon = egui::Atom::paint(egui::vec2(18., 18.), move |ui, args| {
             icons::line_icon(
                 ui.painter(),
                 args.rect.center(),
                 icon,
-                if hidden {
-                    Palette::for_ui(ui).muted
+                if state.hidden {
+                    hidden_color
                 } else {
                     args.fallback_text_color
                 },
             );
         });
-        let button = egui::Button::selectable(self.selected.contains(&id), (icon, text))
-            .truncate()
-            .sense(if object.is_some() && !state.locked {
-                Sense::click_and_drag()
-            } else {
-                Sense::click()
-            });
+        let button = egui::Button::selectable(
+            self.selected.contains(&id),
+            (icon, text, egui::Atom::grow()),
+        )
+        .truncate()
+        .sense(if object.is_some() && !state.locked {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        });
         // Keep the drag source ID stable while the hierarchy changes.
         let row_id = ui.make_persistent_id(("outliner_entity_row", id));
         let response = ui
-            .scope_builder(egui::UiBuilder::new().scope_id(row_id), |ui| ui.add(button))
+            .scope_builder(egui::UiBuilder::new().scope_id(row_id), |ui| {
+                ui.horizontal(|ui| {
+                    let height = ui.spacing().interact_size.y;
+                    let width = (ui.available_width() - height - ui.spacing().item_spacing.x)
+                        .max(0.);
+                    let response = ui.add_sized(egui::vec2(width, height), button);
+                    let hidden = self.model.hidden.contains(&id);
+                    let eye_hidden = state.hidden;
+                    let eye = egui::Atom::paint(egui::vec2(18., 18.), move |ui, args| {
+                        icons::line_icon(
+                            ui.painter(),
+                            args.rect.center(),
+                            if eye_hidden { "eye_closed" } else { "eye" },
+                            if eye_hidden {
+                                hidden_color
+                            } else {
+                                args.fallback_text_color
+                            },
+                        );
+                    });
+                    let name = format!("{} {kind}: {label}", if hidden { "Show" } else { "Hide" });
+                    let tooltip = if state.hidden && !hidden {
+                        format!("{name}\nVisibility is also controlled by the parent object and tags")
+                    } else {
+                        name.clone()
+                    };
+                    if ui
+                        .add_sized(egui::vec2(height, height), egui::Button::new(eye).frame(false))
+                        .accessible_name(name)
+                        .on_hover_text(tooltip)
+                        .clicked()
+                    {
+                        self.toggle_visibility = Some(id);
+                    }
+                    response
+                })
+                .inner
+            })
             .inner
             .accessible_name(format!("{kind}: {label}"))
             .on_hover_text(format!(
                 "{kind}: {label}\nEntity #{id}\n{}",
                 if state.hidden {
-                    "Click to select · Shift-click to select a range · Ctrl/Cmd-click to toggle selection · Right-click to unhide; check Tags for tag visibility"
+                    "Click to select · Shift-click to select a range · Ctrl/Cmd-click to toggle selection · Use the eye button to toggle visibility; check parent objects and Tags for inherited visibility"
                 } else {
                     "Click to select · Shift-click to select a range · Ctrl/Cmd-click to toggle selection · Double-click to edit · Drag onto a group to nest, or between rows to reorder"
                 }
@@ -284,6 +356,15 @@ impl Outliner<'_> {
         // Keep objects above raw geometry so large meshes don't bury the hierarchy.
         for id in model.ordered_objects(ids) {
             let object = &model.objects[&id];
+            if let Some(visible) = self.filtered_objects {
+                if visible.contains(&id) {
+                    self.row(ui, id);
+                    ui.indent(("outliner_search_children", id), |ui| {
+                        self.level(ui, &object.entities, Some(id));
+                    });
+                }
+                continue;
+            }
             let state_id = ui.make_persistent_id(("outliner_object", id));
             let key = format!("outliner_object/{id}");
             restore_section(ui.ctx(), state_id, &key, false);
@@ -312,6 +393,9 @@ impl Outliner<'_> {
                 }
             });
             remember_section(ui.ctx(), state_id, &key);
+        }
+        if self.filtered_objects.is_some() {
+            return;
         }
         let geometry: Vec<_> = ids
             .iter()
@@ -397,6 +481,116 @@ mod tests {
             range: false,
             open: false,
         }
+    }
+
+    #[test]
+    fn search_finds_nested_objects_and_keeps_only_matches_and_ancestors() {
+        let (mut app, group, component, _) = nested_model();
+        let model = &mut app.doc.model;
+        let edge = model.add_edge(DVec3::Y, DVec3::Y + DVec3::X).unwrap();
+        model
+            .make_object(&BTreeSet::from([edge]), false, "Unrelated")
+            .unwrap();
+        assert_eq!(
+            matching_outliner_objects(model, "  hAnDlE  "),
+            Some(BTreeSet::from([group, component]))
+        );
+        assert_eq!(
+            matching_outliner_objects(model, &format!("#{component}")),
+            Some(BTreeSet::from([group, component]))
+        );
+        assert_eq!(
+            matching_outliner_objects(model, "Cabinet"),
+            Some(BTreeSet::from([group]))
+        );
+        assert_eq!(
+            matching_outliner_objects(model, "missing"),
+            Some(BTreeSet::new())
+        );
+        assert_eq!(matching_outliner_objects(model, "  "), None);
+    }
+
+    #[test]
+    fn search_reveals_collapsed_matches_without_changing_disclosure_preferences() {
+        fn labels(app: &mut KetchupApp, ctx: &egui::Context) -> Vec<String> {
+            fn collect(shape: &egui::Shape, labels: &mut Vec<String>) {
+                match shape {
+                    egui::Shape::Text(text) => labels.push(text.galley.job.text.clone()),
+                    egui::Shape::Vec(shapes) => {
+                        for shape in shapes {
+                            collect(shape, labels);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600., 900.))),
+                    ..Default::default()
+                },
+                |ui| app.outliner_contents(ui),
+            );
+            let mut labels = Vec::new();
+            for shape in &output.shapes {
+                collect(&shape.shape, &mut labels);
+            }
+            labels
+        }
+
+        let (mut app, group, component, _) = nested_model();
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.);
+        set_section_open(&ctx, &format!("outliner_object/{group}"), false);
+        set_section_open(&ctx, &format!("outliner_object/{component}"), true);
+        let before = ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
+                .0
+                .clone()
+        });
+        app.outliner_filter = "handle".into();
+        let rendered = labels(&mut app, &ctx);
+        assert!(rendered.contains(&"Cabinet".into()));
+        assert!(rendered.contains(&"Handle".into()));
+        assert!(!rendered.iter().any(|label| label.starts_with("Geometry (")));
+        let after = ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
+                .0
+                .clone()
+        });
+        assert_eq!(before, after);
+
+        app.outliner_filter = "missing".into();
+        let rendered = labels(&mut app, &ctx);
+        assert!(rendered.contains(&"No matching objects".into()));
+        assert!(!rendered.contains(&"Cabinet".into()));
+
+        app.outliner_filter.clear();
+        let rendered = labels(&mut app, &ctx);
+        assert!(rendered.contains(&"Cabinet".into()));
+        assert!(!rendered.contains(&"Handle".into()));
+    }
+
+    #[test]
+    fn search_ranges_skip_filtered_out_siblings() {
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let ids: Vec<_> = ["Part A", "Other", "Part B"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let start = DVec3::Y * index as f64;
+                let edge = app.doc.model.add_edge(start, start + DVec3::X).unwrap();
+                app.doc
+                    .model
+                    .make_object(&BTreeSet::from([edge]), false, name)
+                    .unwrap()
+            })
+            .collect();
+        app.outliner_filter = "part".into();
+        assert_eq!(
+            app.outliner_range(ids[0], ids[2]),
+            BTreeSet::from([ids[0], ids[2]])
+        );
     }
 
     #[test]
@@ -568,27 +762,139 @@ mod tests {
         for shape in &output.shapes {
             texts(&shape.shape, &mut labels);
         }
-        assert!(labels.contains(&"Cabinet · Hidden · Locked".into()));
-        assert!(labels.contains(&"Handle · Hidden · Locked".into()));
+        assert!(labels.contains(&"Cabinet · Locked".into()));
+        assert!(labels.contains(&"Handle · Locked".into()));
         assert!(labels.contains(&"Geometry (1)".into()));
-        assert!(labels.contains(&format!("#{edge} · Hidden · Locked")));
+        assert!(labels.contains(&format!("#{edge} · Locked")));
+        assert!(labels.iter().all(|label| !label.contains(" · Hidden")));
+    }
+
+    #[test]
+    fn visibility_button_is_right_aligned_and_toggles_only_its_entity_with_undo() {
+        fn frame(
+            app: &mut KetchupApp,
+            ctx: &egui::Context,
+            events: Vec<egui::Event>,
+        ) -> egui::FullOutput {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600., 900.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.outliner_contents(ui),
+            )
+        }
+        fn bounds(output: &egui::FullOutput, name: &str) -> Rect {
+            let node = output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .unwrap()
+                .nodes
+                .iter()
+                .find(|(_, node)| node.label() == Some(name))
+                .unwrap();
+            let rect = node.1.bounds().unwrap();
+            Rect::from_min_max(
+                Pos2::new(rect.x0 as f32, rect.y0 as f32),
+                Pos2::new(rect.x1 as f32, rect.y1 as f32),
+            )
+        }
+
+        let (mut app, group, component, _) = nested_model();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.);
+        set_section_open(&ctx, &format!("outliner_object/{group}"), true);
+        app.selected.insert(group);
+        frame(&mut app, &ctx, vec![]);
+        let output = frame(&mut app, &ctx, vec![]);
+        let eye = bounds(&output, "Hide Component: Handle");
+        let parent_eye = bounds(&output, "Hide Group: Cabinet");
+        let row = bounds(&output, "Component: Handle");
+        assert!(eye.left() > row.right());
+        assert!((eye.right() - parent_eye.right()).abs() < 1.);
+
+        for name in ["Show Component: Handle", "Hide Component: Handle"] {
+            for pressed in [true, false] {
+                frame(
+                    &mut app,
+                    &ctx,
+                    vec![
+                        egui::Event::PointerMoved(eye.center()),
+                        egui::Event::PointerButton {
+                            pos: eye.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            let output = frame(&mut app, &ctx, vec![]);
+            bounds(&output, name);
+            assert_eq!(
+                app.doc.model.hidden.contains(&component),
+                name.starts_with("Show")
+            );
+            assert!(!app.doc.model.hidden.contains(&group));
+            assert_eq!(app.selected, BTreeSet::from([group]));
+            assert_eq!(app.doc.model.edit_context, None);
+        }
+        assert_eq!(app.history.undo_label(), Some("Unhide"));
+        app.undo(&ctx, false);
+        assert!(app.doc.model.hidden.contains(&component));
+        let restored = Document::from_json(&serde_json::to_string(&app.doc).unwrap()).unwrap();
+        assert!(restored.model.hidden.contains(&component));
+        app.undo(&ctx, true);
+        assert!(!app.doc.model.hidden.contains(&component));
     }
 }
 
 impl KetchupApp {
     pub(super) fn outliner_contents(&mut self, ui: &mut egui::Ui) {
+        let search = ui
+            .add(
+                egui::TextEdit::singleline(&mut self.outliner_filter)
+                    .id(egui::Id::unique(OUTLINER_SEARCH_ID))
+                    .prefix(egui::Atom::paint(egui::vec2(18., 18.), |ui, args| {
+                        icons::line_icon(
+                            ui.painter(),
+                            args.rect.center(),
+                            "search",
+                            Palette::for_ui(ui).muted,
+                        );
+                    }))
+                    .hint_text("Search objects")
+                    .desired_width(f32::INFINITY),
+            )
+            .accessible_name("Search objects")
+            .on_hover_text("Find groups and components at any depth by name or #ID · Ctrl/Cmd+F");
+        if self.focus_outliner_search {
+            search.request_focus();
+            search.scroll_to_me(Some(egui::Align::Center));
+            self.focus_outliner_search = false;
+        }
         let roots = self.doc.model.root_entities();
         if roots.is_empty() {
             empty_outliner_label(ui, "geometry", "No objects or geometry yet");
+            return;
+        }
+        let filtered_objects = matching_outliner_objects(&self.doc.model, &self.outliner_filter);
+        if filtered_objects.as_ref().is_some_and(BTreeSet::is_empty) {
+            empty_outliner_label(ui, "outliner", "No matching objects");
             return;
         }
         self.entity_cache.update(&self.doc.model);
         let hover_id = ui.scope_id().with("outliner_drag_hover");
         let mut tree = Outliner {
             model: &self.doc.model,
+            filtered_objects: filtered_objects.as_ref(),
             selected: &self.selected,
             entities: &self.entity_cache,
             action: None,
+            toggle_visibility: None,
             hover: None,
             context_menu: None,
             drop: None,
@@ -609,6 +915,7 @@ impl KetchupApp {
             });
         let Outliner {
             action,
+            toggle_visibility,
             hover,
             context_menu,
             drop,
@@ -670,6 +977,9 @@ impl KetchupApp {
         if let Some(action) = action {
             self.apply_outliner_action(action, ui.ctx());
         }
+        if let Some(id) = toggle_visibility {
+            self.toggle_outliner_visibility(id, ui.ctx());
+        }
         if let Some((id, response)) = context_menu {
             if response.secondary_clicked() {
                 if !self.prepare_outliner_selection(id, ui.ctx()) {
@@ -698,6 +1008,35 @@ impl KetchupApp {
                 }
             });
         }
+    }
+
+    fn toggle_outliner_visibility(&mut self, id: u64, ctx: &egui::Context) {
+        if !self.doc.model.contains_entity(&id) {
+            return;
+        }
+        let before = self.doc.model.clone();
+        let show = self.doc.model.hidden.remove(&id);
+        if !show {
+            self.doc.model.hidden.insert(id);
+        }
+        // A child can be toggled without entering its object. Propagate changes
+        // within component definitions just as the shared Hide/Unhide commands do.
+        let context = self.doc.model.edit_context;
+        self.doc.model.edit_context = self.doc.model.parent(id);
+        let result = self.doc.model.synchronize_edit_context();
+        self.doc.model.edit_context = context;
+        if let Err(message) = result {
+            self.doc.model = before;
+            self.say(ctx, message);
+            return;
+        }
+        self.finish_edit(if show { "Unhide" } else { "Hide" }, before, ctx);
+        if context.is_some_and(|id| self.doc.model.is_hidden(id)) {
+            self.navigate_context(None, ctx);
+        }
+        self.hover = None;
+        self.snap = None;
+        self.outliner_hover.clear();
     }
 
     fn set_outliner_children_open(&self, ctx: &egui::Context, open: bool) {
@@ -803,6 +1142,9 @@ impl KetchupApp {
                 .into_iter()
                 .filter(|id| !model.objects.contains_key(id)),
         );
+        if let Some(visible) = matching_outliner_objects(model, &self.outliner_filter) {
+            order.retain(|id| visible.contains(id));
+        }
         let start = order.iter().position(|id| *id == anchor);
         let end = order.iter().position(|id| *id == target);
         match (start, end) {

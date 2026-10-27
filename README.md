@@ -262,7 +262,7 @@ networks.
 | Union flyout | Union button in the left toolbar: Flip, Outer Shell, Union, Intersect, Trim, Split |
 | Flip | Choose Flip, then click a colored mirror plane or use Right / Left / Up for X / Y / Z |
 | Scale | S; select geometry, click a reference point, move or type a uniform scale factor + Enter |
-| Offset | Q; click near a face boundary, move inward/outward, click or type a length + Enter |
+| Offset | F; click near a face boundary, move inward/outward, click or type a length + Enter |
 | Move / Copy | M; click a base point and destination; tap Ctrl (Option on Mac) to toggle Copy; type a length + Enter for precision |
 | Aligned copies | After placing a Move copy, type `/N` (or `N/`) + Enter to divide the original span into N equal intervals; type `Nx` (or `xN`, `N*`, `*N`) + Enter for N copies at the original spacing |
 | Paint | B; choose a color in the inspector, then click a filled face |
@@ -281,7 +281,7 @@ networks.
 | Orbit while drawing | Hold Ctrl/Command and move the cursor; release Ctrl/Command to resume drawing |
 | Pan | **Hold Shift while orbiting**, including middle-drag |
 | Zoom | Mouse wheel; anchors at the pointer on the camera target plane |
-| Fit all geometry | F, or the Fit view button |
+| Fit all geometry | Fit view button |
 | Emphasize current group/component | Enabled by default. Emphasize group checkbox before the Snap options, or Tab, toggles the group/component currently being edited solid and everything else in muted wireframe, regardless of selection. Has no visual effect outside a group/component |
 | Ground, sky, and horizon colors | Model inspector → Display → Environment; color pickers, Sky/Ground toggles, and reset colors |
 | Undo | Ctrl/Command Z |

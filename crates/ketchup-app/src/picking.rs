@@ -241,6 +241,9 @@ impl PickingCache {
         include_faces: bool,
     ) -> Option<u64> {
         if include_faces {
+            if let Some(id) = selection::pick_text(model, camera, size, pixel, radius) {
+                return Some(id);
+            }
             if let Some(id) = selection::pick_dimension(model, camera, size, pixel, radius) {
                 return Some(id);
             }

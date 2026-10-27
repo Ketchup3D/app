@@ -4,6 +4,7 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(super) enum ContextAction {
     Rename,
+    EditText,
     EditObject,
     CloseContext,
     Group,
@@ -48,6 +49,9 @@ impl KetchupApp {
                     self.object_rename = Some((id, object.name.clone()));
                     Self::request_name_input_focus(ctx, egui::Id::unique("rename_object_name"));
                 }
+            }
+            EditText if !locked && self.selected.len() == 1 => {
+                self.begin_text_edit(*self.selected.first().unwrap(), ctx);
             }
             EditObject => {
                 if self.selected.len() == 1 {
@@ -153,16 +157,53 @@ impl KetchupApp {
         response.context_menu(|ui| self.entity_menu(ui, extra));
     }
 
+    pub(super) fn menu_style(style: &mut egui::Style) {
+        egui::menu::menu_style(style);
+        style.spacing.item_spacing.y = 2.;
+        style.spacing.interact_size.y = 24.;
+        style.spacing.button_padding = egui::vec2(8., 3.);
+    }
+
+    pub(super) fn menu_checkbox(
+        ui: &mut egui::Ui,
+        checked: &mut bool,
+        label: &str,
+    ) -> egui::Response {
+        // Reserve the background before painting the checkbox and its label.
+        let background = ui.painter().add(egui::Shape::Noop);
+        let response = ui
+            .allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                egui::Layout::top_down_justified(egui::Align::Min),
+                |ui| ui.checkbox(checked, label),
+            )
+            .inner;
+        if response.hovered() || response.has_focus() || response.is_pointer_button_down_on() {
+            let visuals = ui.style().interact(&response);
+            ui.painter().set(
+                background,
+                egui::Shape::rect_filled(
+                    response.rect,
+                    visuals.corner_radius,
+                    visuals.weak_bg_fill,
+                ),
+            );
+        }
+        response
+    }
+
+    pub(super) fn configure_entity_menu(ui: &mut egui::Ui) {
+        ui.set_min_width(230.);
+        Self::menu_style(ui.style_mut());
+    }
+
     pub(super) fn entity_menu(
         &mut self,
         ui: &mut egui::Ui,
         extra: impl FnOnce(&mut Self, &mut egui::Ui),
     ) {
         let mut action = None;
-        ui.set_min_width(230.);
-        ui.spacing_mut().item_spacing.y = 2.;
-        ui.spacing_mut().interact_size.y = 24.;
-        ui.spacing_mut().button_padding = egui::vec2(8., 3.);
+        Self::configure_entity_menu(ui);
         let selected = !self.selected.is_empty();
         let editable = selected && !self.doc.model.selection_protected(&self.selected);
         let objects = self
@@ -205,6 +246,14 @@ impl KetchupApp {
             editable && self.selected.len() == 1 && objects,
             ContextAction::Rename,
         );
+        if self.selected.len() == 1
+            && self
+                .selected
+                .first()
+                .is_some_and(|id| self.doc.model.texts.contains_key(id))
+        {
+            item(ui, "Edit Text…", editable, ContextAction::EditText);
+        }
         if self.selected.len() == 1 && objects {
             let object = &self.doc.model.objects[self.selected.first().unwrap()];
             let label = if object.kind == ObjectKind::Group {

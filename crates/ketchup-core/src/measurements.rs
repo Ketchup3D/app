@@ -10,6 +10,32 @@ pub struct DimensionAnchor {
     pub weights: Vec<(u64, f64)>,
 }
 impl DimensionAnchor {
+    pub(crate) fn validate(&self, model: &Model) -> Result<(), &'static str> {
+        if !valid_point(self.point)
+            || self.weights.len() > 3
+            || self
+                .weights
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.weights.len()
+            || self.weights.iter().any(|(id, w)| {
+                !model.vertices.contains_key(id) || !w.is_finite() || *w < -EPS || *w > 1. + EPS
+            })
+        {
+            return Err("Invalid dimension attachment");
+        }
+        if !self.weights.is_empty()
+            && (self.weights.iter().map(|(_, w)| w).sum::<f64>() - 1.).abs() > EPS
+        {
+            return Err("Invalid dimension attachment weights");
+        }
+        if !valid_point(self.position(model)) {
+            return Err("Invalid dimension position");
+        }
+        Ok(())
+    }
     pub fn position(&self, model: &Model) -> DVec3 {
         if self.weights.is_empty()
             || self
@@ -113,7 +139,10 @@ impl Model {
             point,
             weights: vec![],
         };
-        for edge in self.edges.values().filter(|e| !self.is_hidden(e.id)) {
+        for edge in self.edges.values().filter(|e| {
+            !self.is_hidden(e.id)
+                && (self.edit_context.is_none() || self.entity_in_context(e.id).is_some())
+        }) {
             let (a, b) = self.points(edge);
             for (id, p) in [(edge.a, a), (edge.b, b)] {
                 if p.distance(point) < EPS {
@@ -122,7 +151,10 @@ impl Model {
                 }
             }
         }
-        for edge in self.edges.values().filter(|e| !self.is_hidden(e.id)) {
+        for edge in self.edges.values().filter(|e| {
+            !self.is_hidden(e.id)
+                && (self.edit_context.is_none() || self.entity_in_context(e.id).is_some())
+        }) {
             let (a, b) = self.points(edge);
             let t = (point - a).dot(b - a) / (b - a).length_squared();
             if (0. ..=1.).contains(&t) && (a + (b - a) * t).distance(point) < EPS {
@@ -131,11 +163,11 @@ impl Model {
             }
         }
         // Use the same triangulation as rendering, so holes never acquire attachments.
-        for face in self
-            .faces
-            .values()
-            .filter(|f| !self.is_hidden(f.id) && self.face_contains(f, point, true))
-        {
+        for face in self.faces.values().filter(|f| {
+            !self.is_hidden(f.id)
+                && (self.edit_context.is_none() || self.entity_in_context(f.id).is_some())
+                && self.face_contains(f, point, true)
+        }) {
             for [a, b, c] in self.face_triangles(face) {
                 let (u, v, w) = (b - a, c - a, point - a);
                 let denominator = u.dot(u) * v.dot(v) - u.dot(v).powi(2);
@@ -209,6 +241,7 @@ impl Model {
     }
     /// Snapshot attachments before topology is removed; detached annotations retain their last positions.
     pub(crate) fn sync_dimensions(&mut self) {
+        self.sync_texts();
         let updates: Vec<_> = self
             .dimensions
             .values()
@@ -235,32 +268,7 @@ impl Model {
                 return Err("Invalid dimension");
             }
             for anchor in [&d.start, &d.end] {
-                if !valid_point(anchor.point)
-                    || anchor.weights.len() > 3
-                    || anchor
-                        .weights
-                        .iter()
-                        .map(|(id, _)| *id)
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .len()
-                        != anchor.weights.len()
-                    || anchor.weights.iter().any(|(id, w)| {
-                        !self.vertices.contains_key(id)
-                            || !w.is_finite()
-                            || *w < -EPS
-                            || *w > 1. + EPS
-                    })
-                {
-                    return Err("Invalid dimension attachment");
-                }
-                if !anchor.weights.is_empty()
-                    && (anchor.weights.iter().map(|(_, w)| w).sum::<f64>() - 1.).abs() > EPS
-                {
-                    return Err("Invalid dimension attachment weights");
-                }
-                if !valid_point(anchor.position(self)) {
-                    return Err("Invalid dimension position");
-                }
+                anchor.validate(self)?;
             }
             if d.layout(self).iter().any(|p| !valid_point(*p)) {
                 return Err("Dimension is outside the model limits");
@@ -269,6 +277,6 @@ impl Model {
         Ok(())
     }
 }
-fn valid_point(p: DVec3) -> bool {
+pub(crate) fn valid_point(p: DVec3) -> bool {
     p.is_finite() && p.abs().max_element() <= 1e10
 }

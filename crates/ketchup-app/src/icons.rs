@@ -108,7 +108,8 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, colors: ToolPalette) {
         | Tool::Offset
         | Tool::Paint
         | Tool::Flip
-        | Tool::Dimensions => blue,
+        | Tool::Dimensions
+        | Tool::Text => blue,
         Tool::OuterShell | Tool::Union | Tool::Intersect | Tool::Trim | Tool::Split => blue,
         _ => red,
     };
@@ -384,6 +385,14 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, colors: ToolPalette) {
             }
             p.circle_filled(xy(0., 0.4), 2., outline);
         }
+        Tool::Text => {
+            p.line_segment([xy(-0.9, 0.8), xy(0., -0.1)], stroke);
+            p.line_segment([xy(-0.9, 0.8), xy(-0.75, 0.25)], stroke);
+            p.line_segment([xy(-0.9, 0.8), xy(-0.35, 0.65)], stroke);
+            p.line_segment([xy(-0.15, -0.85), xy(0.95, -0.85)], stroke);
+            p.line_segment([xy(0.4, -0.85), xy(0.4, 0.55)], stroke);
+            p.line_segment([xy(0.1, 0.55), xy(0.7, 0.55)], stroke);
+        }
         Tool::Dimensions => {
             for x in [-0.8, 0.8] {
                 p.line_segment([xy(x, -0.9), xy(x, 0.9)], Stroke::new(1.2, outline));
@@ -478,9 +487,111 @@ pub fn axis_lock(
     p.circle_filled(at(8., -1.), 0.8, color);
 }
 
+pub fn group_emphasis(p: &egui::Painter, c: Pos2, solid: Color32, wireframe: Color32) {
+    // Keep the surrounding cubes hollow; only the edited object has shaded faces.
+    let cube = |center: Pos2, radius: f32, filled: bool| {
+        let at = |x: f32, y: f32| center + egui::vec2(x, y) * radius;
+        let color = if filled { solid } else { wireframe };
+        let stroke = Stroke::new(if filled { 1.4 } else { 1.1 }, color);
+        if filled {
+            for (face, shade) in [
+                ([(0., -1.), (1., -0.5), (0., 0.), (-1., -0.5)], 0.25),
+                ([(-1., -0.5), (0., 0.), (0., 1.), (-1., 0.5)], 0.5),
+                ([(0., 0.), (1., -0.5), (1., 0.5), (0., 1.)], 0.8),
+            ] {
+                p.add(egui::Shape::convex_polygon(
+                    face.map(|(x, y)| at(x, y)).to_vec(),
+                    solid.gamma_multiply(shade),
+                    Stroke::NONE,
+                ));
+            }
+        }
+        p.add(egui::Shape::closed_line(
+            [
+                (0., -1.),
+                (1., -0.5),
+                (1., 0.5),
+                (0., 1.),
+                (-1., 0.5),
+                (-1., -0.5),
+            ]
+            .map(|(x, y)| at(x, y))
+            .to_vec(),
+            stroke,
+        ));
+        for (x, y) in [(-1., -0.5), (1., -0.5), (0., 1.)] {
+            p.line_segment([center, at(x, y)], stroke);
+        }
+    };
+    cube(c + egui::vec2(-7., -5.), 3.5, false);
+    cube(c + egui::vec2(7., -5.), 3.5, false);
+    cube(c + egui::vec2(0., 4.), 5.5, true);
+}
+
 pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
     let s = Stroke::new(1.5, color);
     match kind {
+        "search" => {
+            p.circle_stroke(c + egui::vec2(-2., -2.), 5., s);
+            p.line_segment([c + egui::vec2(2., 2.), c + egui::vec2(7., 7.)], s);
+        }
+        "magnet" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            let mut points = vec![at(-7., -7.)];
+            points.extend((0..=16).map(|i| {
+                let angle = std::f32::consts::PI * (1. - i as f32 / 16.);
+                at(7. * angle.cos(), 7. * angle.sin())
+            }));
+            points.extend([at(7., -7.), at(3., -7.)]);
+            points.extend((0..=16).map(|i| {
+                let angle = std::f32::consts::PI * i as f32 / 16.;
+                at(3. * angle.cos(), 3. * angle.sin())
+            }));
+            points.push(at(-3., -7.));
+            p.add(egui::Shape::closed_line(points, s));
+            for sign in [-1., 1.] {
+                p.line_segment([at(sign * 3., -3.), at(sign * 7., -3.)], s);
+            }
+        }
+        "eye_closed" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.add(egui::Shape::line(
+                vec![
+                    at(-8., -2.),
+                    at(-4., 1.),
+                    at(0., 2.),
+                    at(4., 1.),
+                    at(8., -2.),
+                ],
+                s,
+            ));
+            for (x, y, tip_x, tip_y) in [
+                (-6., -0.5, -8., 2.5),
+                (-3., 1.25, -4., 5.),
+                (0., 2., 0., 6.),
+                (3., 1.25, 4., 5.),
+                (6., -0.5, 8., 2.5),
+            ] {
+                p.line_segment([at(x, y), at(tip_x, tip_y)], s);
+            }
+        }
+        "eye" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.add(egui::Shape::closed_line(
+                vec![
+                    at(-8., 0.),
+                    at(-4., -4.),
+                    at(0., -5.),
+                    at(4., -4.),
+                    at(8., 0.),
+                    at(4., 4.),
+                    at(0., 5.),
+                    at(-4., 4.),
+                ],
+                s,
+            ));
+            p.circle_stroke(c, 2.5, s);
+        }
         "outliner" => {
             let at = |x: f32, y: f32| c + egui::vec2(x, y);
             p.add(egui::Shape::line(
@@ -559,6 +670,15 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
                 color.gamma_multiply(0.15),
                 s,
             ));
+        }
+        "text" => {
+            p.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "T",
+                egui::FontId::proportional(16.),
+                color,
+            );
         }
         "dimension" => {
             let at = |x: f32, y: f32| c + egui::vec2(x, y);
@@ -700,6 +820,18 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
                 vec![at(-1., -8.), at(-5., -4.), at(-1., 0.)],
                 s,
             ));
+        }
+        "origin" => {
+            for (x, y) in [(-1., -1.), (1., -1.), (-1., 1.), (1., 1.)] {
+                let corner = c + egui::vec2(x * 8., y * 8.);
+                p.line_segment([corner, corner - egui::vec2(x * 4., 0.)], s);
+                p.line_segment([corner, corner - egui::vec2(0., y * 4.)], s);
+            }
+            // Three axes meet at the world origin.
+            for tip in [egui::vec2(0., -5.), egui::vec2(-4., 3.), egui::vec2(4., 3.)] {
+                p.line_segment([c, c + tip], s);
+            }
+            p.circle_filled(c, 2., color);
         }
         "fit" => {
             // Frame a 3D model so this reads as zoom extents, not fullscreen.

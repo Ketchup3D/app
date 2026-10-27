@@ -5,8 +5,9 @@ use ketchup_core::{Dimension, DimensionAnchor, angle_arc, angle_degrees};
 pub(super) struct Measurement {
     pub(super) points: Vec<DVec3>,
     pub(super) complete: bool,
-    normal: DVec3,
-    offset: DVec3,
+    pub(super) normal: DVec3,
+    pub(super) offset: DVec3,
+    pub(super) text: String,
 }
 
 impl KetchupApp {
@@ -16,6 +17,10 @@ impl KetchupApp {
     }
 
     pub(super) fn update_measurement(&mut self, pos: Pos2) {
+        if self.tool == Tool::Text {
+            self.update_text_pointer(pos);
+            return;
+        }
         self.prepare_picking();
         let points = self
             .measurement
@@ -81,6 +86,10 @@ impl KetchupApp {
     }
 
     pub(super) fn measurement_click(&mut self, pos: Pos2, ctx: &egui::Context) {
+        if self.tool == Tool::Text {
+            self.text_click(pos, ctx);
+            return;
+        }
         if self.measurement.as_ref().is_some_and(|m| m.complete) {
             self.measurement = None;
             self.snap = None;
@@ -184,6 +193,9 @@ impl KetchupApp {
         })
     }
     pub(super) fn measurement_value(&self) -> Option<String> {
+        if self.tool == Tool::Text {
+            return None;
+        }
         let points = self.measurement_points();
         if self.tool == Tool::Dimensions {
             self.dimension_preview()
@@ -205,6 +217,7 @@ impl KetchupApp {
             return "Measurement complete · Click to start another · Esc to clear";
         }
         match (self.tool, m.points.len()) {
+            (Tool::Text, 1) => "Move to position the text · Click to place · Esc to cancel",
             (Tool::TapeMeasure, 1) => {
                 "Click the second point · Arrow keys lock axes · Esc to cancel"
             }
@@ -239,13 +252,19 @@ impl KetchupApp {
         );
         ui.add_space(12.);
     }
-    pub(super) fn paint_measurements(&self, p: &egui::Painter, rect: Rect, model: &Model) {
+    pub(super) fn dimension_shapes(
+        &self,
+        mesh: &mut renderer::Mesh,
+        p: &egui::Painter,
+        rect: Rect,
+        model: &Model,
+    ) -> Vec<egui::Shape> {
         if !self.doc.display.dimensions {
-            return;
+            return vec![];
         }
         let colors = Palette::for_painter(p);
         let camera = &self.doc.camera;
-        let size = dv(rect.size());
+        let mut shapes = vec![];
         let selected = model.expand_entities(&self.selected);
         for dimension in model
             .dimensions
@@ -264,7 +283,9 @@ impl KetchupApp {
             } else {
                 colors.ink
             };
-            paint_dimension(p, camera, rect, model, dimension, color);
+            shapes.extend(dimension_shapes(
+                mesh, p, camera, rect, model, dimension, color,
+            ));
         }
         if let Some(preview) = &self.paste_preview {
             let offset = preview.point - preview.clipboard.anchor;
@@ -285,10 +306,40 @@ impl KetchupApp {
                     point: b + offset,
                     weights: vec![],
                 };
-                paint_dimension(p, camera, rect, model, &dimension, colors.green);
+                shapes.extend(dimension_shapes(
+                    mesh,
+                    p,
+                    camera,
+                    rect,
+                    model,
+                    &dimension,
+                    colors.green,
+                ));
             }
         }
-        if !self.tool.is_measuring() {
+        if self.tool == Tool::Dimensions {
+            if let Some(dimension) = self.dimension_preview() {
+                shapes.extend(dimension_shapes(
+                    mesh,
+                    p,
+                    camera,
+                    rect,
+                    model,
+                    &dimension,
+                    self.lock.map(axis_color).unwrap_or(colors.green),
+                ));
+            }
+        }
+        shapes
+    }
+    pub(super) fn paint_measurements(&self, p: &egui::Painter, rect: Rect) {
+        if !self.doc.display.dimensions {
+            return;
+        }
+        let colors = Palette::for_painter(p);
+        let camera = &self.doc.camera;
+        let size = dv(rect.size());
+        if !self.tool.is_measuring() || self.tool == Tool::Text {
             return;
         }
         let points = self.measurement_points();
@@ -301,18 +352,7 @@ impl KetchupApp {
                 );
             }
         };
-        if self.tool == Tool::Dimensions && points.len() == 2 {
-            if let Some(dimension) = self.dimension_preview() {
-                paint_dimension(
-                    p,
-                    camera,
-                    rect,
-                    model,
-                    &dimension,
-                    self.lock.map(axis_color).unwrap_or(colors.green),
-                );
-            }
-        } else if self.tool == Tool::Protractor {
+        if self.tool == Tool::Protractor {
             if points.len() >= 2 {
                 segment(points[0], points[1]);
             }
@@ -333,7 +373,7 @@ impl KetchupApp {
                     }
                 }
             }
-        } else if points.len() == 2 {
+        } else if self.tool == Tool::TapeMeasure && points.len() == 2 {
             segment(points[0], points[1]);
             if let Some(mid) = screen((points[0] + points[1]) * 0.5) {
                 measurement_label(
@@ -368,44 +408,67 @@ impl KetchupApp {
     }
 }
 
-fn paint_dimension(
+fn dimension_shapes(
+    mesh: &mut renderer::Mesh,
     p: &egui::Painter,
     camera: &Camera,
     rect: Rect,
     model: &Model,
     d: &Dimension,
     color: Color32,
-) {
+) -> Vec<egui::Shape> {
     let points = d.layout(model);
     let size = dv(rect.size());
-    let stroke = Stroke::new(1., color);
+    let mut shapes = vec![];
     for (a, b) in [(0, 2), (1, 3), (2, 3)] {
-        if let Some((a, b)) = camera.segment(points[a], points[b], size) {
-            p.line_segment([rect.min + pv(a), rect.min + pv(b)], stroke);
+        for (a, b) in mesh.annotation_line(points[a], points[b]) {
+            shapes.extend(mesh.annotation_stroke(p, rect, a, b, Stroke::new(1., color)));
         }
     }
-    let Some(a) = camera.project(points[2], size).map(|v| rect.min + pv(v)) else {
-        return;
+    let Some(a) = camera.project(points[2], size) else {
+        return shapes;
     };
-    let Some(b) = camera.project(points[3], size).map(|v| rect.min + pv(v)) else {
-        return;
+    let Some(b) = camera.project(points[3], size) else {
+        return shapes;
     };
-    let direction = (b - a).normalized();
-    let normal = egui::vec2(-direction.y, direction.x);
-    for point in [a, b] {
-        p.line_segment(
-            [
-                point - normal * 4. - direction * 3.,
-                point + normal * 4. + direction * 3.,
-            ],
-            Stroke::new(1.5, color),
-        );
+    let direction = (b - a).normalize_or_zero();
+    let normal = DVec2::new(-direction.y, direction.x);
+    for point in [points[2], points[3]] {
+        for (a, b) in mesh.annotation_tick(point, normal * 4. + direction * 3.) {
+            shapes.extend(mesh.annotation_stroke(p, rect, a, b, Stroke::new(1.5, color)));
+        }
     }
-    measurement_label(p, a.lerp(b, 0.5), format_length(d.length(model)), color);
+    let midpoint = (a + b) * 0.5;
+    // Keep the label centered on the projected span, and use the corresponding
+    // point on the 3D line for its depth (also in perspective views).
+    let center = camera
+        .ray(midpoint, size)
+        .segment_point(points[2], points[3]);
+    let (bounds, label) = measurement_label_shape(
+        p,
+        rect.min + pv(midpoint),
+        format_length(d.length(model)),
+        color,
+    );
+    shapes.extend(mesh.annotation_label(p, rect, center, bounds, label));
+    shapes
 }
-fn measurement_label(p: &egui::Painter, at: Pos2, text: String, color: Color32) {
+fn measurement_label_shape(
+    p: &egui::Painter,
+    at: Pos2,
+    text: String,
+    color: Color32,
+) -> (Rect, egui::Shape) {
     let galley = p.layout_no_wrap(text, FontId::monospace(12.), color);
     let rect = Rect::from_center_size(at, galley.size() + egui::vec2(12., 8.));
-    p.rect_filled(rect, 4, Palette::for_painter(p).paper);
-    p.galley(rect.min + egui::vec2(6., 4.), galley, color);
+    (
+        rect,
+        egui::Shape::Vec(vec![
+            egui::Shape::rect_filled(rect, 4, Palette::for_painter(p).paper),
+            egui::Shape::galley(rect.min + egui::vec2(6., 4.), galley, color),
+        ]),
+    )
+}
+fn measurement_label(p: &egui::Painter, at: Pos2, text: String, color: Color32) {
+    p.add(measurement_label_shape(p, at, text, color).1);
 }

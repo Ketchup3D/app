@@ -13,6 +13,8 @@ mod outliner_drag;
 mod precision_input;
 #[path = "release_notes_tests.rs"]
 mod release_notes;
+#[path = "text_tools_tests.rs"]
+mod text_tools;
 
 struct Harness {
     ctx: egui::Context,
@@ -996,7 +998,7 @@ fn orbit_tool_shift_drag_only_translates_camera() {
 }
 
 #[test]
-fn orbit_uses_all_objects_center_after_pan_and_zoom() {
+fn orbit_uses_visible_objects_center_after_pan_and_zoom() {
     for button in [egui::PointerButton::Primary, egui::PointerButton::Middle] {
         for hidden in [false, true] {
             let mut h = Harness::new();
@@ -1039,7 +1041,11 @@ fn orbit_uses_all_objects_center_after_pan_and_zoom() {
             if hidden {
                 h.app.doc.model.hidden.insert(component);
             }
-            let pivot = DVec3::new(5., 1., 6.);
+            let pivot = if hidden {
+                DVec3::new(-5., -3., 2.)
+            } else {
+                DVec3::new(5., 1., 6.)
+            };
             let size = dv(h.app.viewport.size());
             h.app.doc.camera.pan(DVec2::new(150., 90.), size.y);
             h.app.doc.camera.zoom(180., size * 0.7, size);
@@ -1093,6 +1099,80 @@ fn orbit_uses_all_objects_center_after_pan_and_zoom() {
             h.pointer(end, button, false, false);
         }
     }
+}
+
+#[test]
+fn orbit_center_tracks_nested_visibility_and_display_overrides() {
+    let mut h = Harness::new();
+    let model = &mut h.app.doc.model;
+    model.add_edge(DVec3::ZERO, DVec3::X * 2.).unwrap();
+    let far = model.add_edge(DVec3::X * 10., DVec3::X * 12.).unwrap();
+    let inner = model
+        .make_object(&BTreeSet::from([far]), true, "Nested component")
+        .unwrap();
+    let outer = model
+        .make_object(&BTreeSet::from([inner]), false, "Outer group")
+        .unwrap();
+    // Grouping creates new IDs for the nested contents.
+    let inner = *model.objects[&outer].entities.first().unwrap();
+    let tag = model.add_tag("Assembly").unwrap();
+    model.entity_tags.insert(outer, tag);
+    model.locked.insert(outer);
+    assert_eq!(h.app.orbit_center(), DVec3::X * 6.);
+
+    for hidden in [outer, inner] {
+        h.app.doc.model.hidden.insert(hidden);
+        assert_eq!(h.app.orbit_center(), DVec3::X);
+        h.app.doc.display.hidden_geometry = true;
+        assert_eq!(h.app.orbit_center(), DVec3::X);
+        h.app.doc.display.hidden_objects = true;
+        assert_eq!(h.app.orbit_center(), DVec3::X * 6.);
+
+        // Hidden tags still suppress objects when hidden objects are revealed.
+        h.app.doc.model.tags.get_mut(&tag).unwrap().visible = false;
+        assert_eq!(h.app.orbit_center(), DVec3::X);
+        h.app.doc.model.tags.get_mut(&tag).unwrap().visible = true;
+        h.app.doc.model.hidden.remove(&hidden);
+        h.app.doc.display.hidden_objects = false;
+        h.app.doc.display.hidden_geometry = false;
+        assert_eq!(h.app.orbit_center(), DVec3::X * 6.);
+    }
+}
+
+#[test]
+fn orbit_center_ignores_hidden_geometry_and_disabled_dimensions() {
+    let mut h = Harness::new();
+    let edge = h
+        .app
+        .doc
+        .model
+        .add_edge(DVec3::X * 10., DVec3::X * 12.)
+        .unwrap();
+    h.app.doc.model.hidden.insert(edge);
+    assert_eq!(h.app.orbit_center(), DVec3::ZERO);
+    h.app.doc.display.hidden_objects = true;
+    assert_eq!(h.app.orbit_center(), DVec3::ZERO);
+    h.app.doc.display.hidden_geometry = true;
+    assert_eq!(h.app.orbit_center(), DVec3::X * 11.);
+    h.app.doc.display.hidden_geometry = false;
+
+    let dimension = h
+        .app
+        .doc
+        .model
+        .add_dimension(DVec3::ZERO, DVec3::X * 2., DVec3::Y * 2.)
+        .unwrap();
+    assert_eq!(h.app.orbit_center(), DVec3::new(1., 1., 0.));
+    h.app.doc.display.dimensions = false;
+    assert_eq!(h.app.orbit_center(), DVec3::ZERO);
+    h.app.doc.display.dimensions = true;
+    h.app.doc.model.hidden.insert(dimension);
+    assert_eq!(h.app.orbit_center(), DVec3::ZERO);
+    let tag = h.app.doc.model.add_tag("Dimensions").unwrap();
+    h.app.doc.model.entity_tags.insert(dimension, tag);
+    h.app.doc.model.tags.get_mut(&tag).unwrap().visible = false;
+    h.app.doc.model.hidden.remove(&dimension);
+    assert_eq!(h.app.orbit_center(), DVec3::ZERO);
 }
 
 #[test]
@@ -1293,16 +1373,29 @@ fn close_snapped_outline_then_select_and_delete_face_or_edge() {
 }
 
 #[test]
-fn snap_checkbox_starts_checked_and_disables_geometry_magnet() {
+fn snapping_menu_preserves_independent_options_and_controls_geometry_magnet() {
     let mut h = Harness::new();
     assert!(h.app.doc.snap_to_geometry);
+    assert!(h.app.doc.snap_to_axes);
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    let checkbox = text_position(&output, "Snap to objects");
+    let snapping = text_position(&output, "▾");
+    h.click(snapping);
+    let menu = h.frame(vec![], egui::Modifiers::NONE);
+    let checkbox = text_position(&menu, "Snap to objects");
     h.click(checkbox);
     assert!(
         !h.app.doc.snap_to_geometry,
         "Snap to objects checkbox should toggle off at {checkbox:?}"
     );
+    assert!(h.app.doc.snap_to_axes);
+    let menu = h.frame(vec![], egui::Modifiers::NONE);
+    let axes = text_position(&menu, "Snap to axes");
+    h.click(axes);
+    assert!(!h.app.doc.snap_to_axes);
+    assert!(!h.app.doc.snap_to_geometry);
+    h.click(axes);
+    assert!(h.app.doc.snap_to_axes);
+    h.key(Key::Escape);
     h.app
         .doc
         .model
@@ -1315,8 +1408,11 @@ fn snap_checkbox_starts_checked_and_disables_geometry_magnet() {
         egui::Modifiers::NONE,
     );
     assert_eq!(h.app.snap.unwrap().kind, Inference::Plane);
-    h.click(checkbox);
+    h.click(snapping);
+    let menu = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&menu, "Snap to objects"));
     assert!(h.app.doc.snap_to_geometry);
+    h.key(Key::Escape);
     h.frame(
         vec![egui::Event::PointerMoved(pointer)],
         egui::Modifiers::NONE,
@@ -2550,7 +2646,7 @@ fn push_pull_pointer_preview_numeric_commit_cancel_and_undo() {
 fn offset_then_push_down_previews_and_commits_an_open_recess() {
     let mut h = Harness::new();
     let rim = modeling_rectangle(&mut h);
-    h.key(Key::Q);
+    h.key(Key::F);
     let offset_at = h.at(DVec3::new(2., 0.25, 0.));
     h.click(offset_at);
     modeling_number(&mut h, "0.5");
@@ -2633,7 +2729,7 @@ fn move_and_scale_real_pointer_clicks_and_axis_locked_numeric_distance() {
 fn offset_and_paint_through_viewport_preserve_history_and_saved_color() {
     let mut h = Harness::new();
     let face = modeling_rectangle(&mut h);
-    h.key(Key::Q);
+    h.key(Key::F);
     let at = h.at(DVec3::new(2., 0.25, 0.));
     h.click(at);
     modeling_number(&mut h, "0.5");

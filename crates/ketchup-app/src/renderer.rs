@@ -35,6 +35,7 @@ pub struct Mesh {
     occlusion: Occlusion,
     size: DVec2,
     pixels_per_point: f64,
+    parallel: bool,
     view: CameraView,
     display: ketchup_core::DisplaySettings,
     buffer_pool: Option<BufferPool>,
@@ -49,6 +50,7 @@ impl Mesh {
             occlusion: Occlusion::default(),
             size,
             pixels_per_point: 1.,
+            parallel: camera.projection == ketchup_core::Projection::Parallel,
             view: camera.view(size),
             display: ketchup_core::DisplaySettings::default(),
             buffer_pool: None,
@@ -291,6 +293,126 @@ impl Mesh {
             self.line(a, b, width, color);
         }
     }
+    /// Keep projected depth after centerline clipping so the complete stroke
+    /// can also be clipped against foreground surfaces before painting.
+    pub fn annotation_line(&mut self, a: DVec3, b: DVec3) -> Vec<(DVec3, DVec3)> {
+        let Some((a, b)) = self.section_line(a, b) else {
+            return vec![];
+        };
+        let Some((a, b)) = self.view.segment_depth(a, b) else {
+            return vec![];
+        };
+        self.visible_annotation_line(a, b)
+    }
+
+    pub fn annotation_tick(&mut self, anchor: DVec3, offset: DVec2) -> Vec<(DVec3, DVec3)> {
+        if self.section_line(anchor, anchor).is_none() {
+            return vec![];
+        }
+        let Some(point) = self.view.project_depth(anchor) else {
+            return vec![];
+        };
+        self.visible_annotation_line(point - offset.extend(0.), point + offset.extend(0.))
+    }
+
+    pub fn annotation_arrow(&mut self, anchor: DVec3, offset: DVec2) -> Vec<(DVec3, DVec3)> {
+        if self.section_line(anchor, anchor).is_none() {
+            return vec![];
+        }
+        let Some(point) = self.view.project_depth(anchor) else {
+            return vec![];
+        };
+        self.visible_annotation_line(point, point + offset.extend(0.))
+    }
+
+    fn visible_annotation_line(&mut self, a: DVec3, b: DVec3) -> Vec<(DVec3, DVec3)> {
+        let visible = self.occlusion.visible_intervals(a, b);
+        let lines = visible
+            .iter()
+            .map(|&(start, end)| (a.lerp(b, start), a.lerp(b, end)))
+            .collect();
+        self.occlusion.spans = visible;
+        lines
+    }
+
+    /// Clip the tessellated stroke footprint as well as its centerline.
+    /// Width, end caps, and the antialiasing fringe must all stay behind faces.
+    pub fn annotation_stroke(
+        &mut self,
+        painter: &egui::Painter,
+        viewport: Rect,
+        a: DVec3,
+        b: DVec3,
+        stroke: egui::Stroke,
+    ) -> Vec<egui::Shape> {
+        let screen = |p: DVec3| viewport.min + egui::vec2(p.x as f32, p.y as f32);
+        let shape = egui::Shape::line_segment([screen(a), screen(b)], stroke);
+        let bounds = shape
+            .visual_bounding_rect()
+            .expand(1. / painter.ctx().pixels_per_point());
+        let local = bounds.translate(-viewport.min.to_vec2());
+        let polygon: Vec<_> = [
+            local.left_top(),
+            local.right_top(),
+            local.right_bottom(),
+            local.left_bottom(),
+        ]
+        .map(|p| DVec2::new(f64::from(p.x), f64::from(p.y)))
+        .into();
+        let delta = (b - a).truncate();
+        let gradient = if delta.length_squared() > 1e-12 {
+            delta * ((b.z - a.z) / delta.length_squared())
+        } else {
+            DVec2::ZERO
+        };
+        let visible = self
+            .occlusion
+            .visible_surface_polygons(polygon.clone(), a, gradient);
+        if visible.len() == 1 && visible[0] == polygon {
+            return vec![shape];
+        }
+        if visible.is_empty() {
+            return vec![];
+        }
+        clipped_annotation_shapes(painter, viewport, shape, &visible)
+    }
+
+    /// Labels are screen-facing billboards at their world anchor's depth.
+    /// Clip their entire footprint, including glyphs and background, so a
+    /// foreground silhouette can cover only part of a label.
+    pub fn annotation_label(
+        &mut self,
+        painter: &egui::Painter,
+        viewport: Rect,
+        anchor: DVec3,
+        bounds: Rect,
+        shape: egui::Shape,
+    ) -> Vec<egui::Shape> {
+        if self.section_line(anchor, anchor).is_none() {
+            return vec![];
+        }
+        let Some(point) = self.view.project_depth(anchor) else {
+            return vec![];
+        };
+        let local = bounds.translate(-viewport.min.to_vec2());
+        let polygon: Vec<_> = [
+            local.left_top(),
+            local.right_top(),
+            local.right_bottom(),
+            local.left_bottom(),
+        ]
+        .map(|p| DVec2::new(f64::from(p.x), f64::from(p.y)))
+        .into();
+        let visible = self.occlusion.visible_polygons(polygon.clone(), point.z);
+        if visible.len() == 1 && visible[0] == polygon {
+            return vec![shape];
+        }
+        if visible.is_empty() {
+            return vec![];
+        }
+        clipped_annotation_shapes(painter, viewport, shape, &visible)
+    }
+
     pub fn background_line(
         &mut self,
         _camera: &Camera,
@@ -396,7 +518,39 @@ impl Mesh {
         cache.edge_surfaces = std::mem::take(&mut self.edge_surfaces);
         self.paint(painter, rect);
     }
-    pub fn paint(self, painter: &egui::Painter, rect: Rect) {
+    fn normalize_parallel_depth(&mut self) {
+        if !self.parallel {
+            return;
+        }
+        // Orthographic projection uses a very distant far plane. WebGL's
+        // conversion from [0, 1] to [-1, 1] otherwise rounds nearby faces to
+        // the same depth, letting rear faces overwrite visible surfaces.
+        // Remap only GPU depths; CPU occlusion keeps its original precision.
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for vertex in &self.vertices {
+            let depth = f64::from(vertex.position[2]);
+            if depth > 0. && depth < 1. {
+                lo = lo.min(depth);
+                hi = hi.max(depth);
+            }
+        }
+        if !lo.is_finite() {
+            return;
+        }
+        let center = (lo + hi) * 0.5;
+        let span = (hi - lo).max(f64::EPSILON);
+        for vertex in &mut self.vertices {
+            let depth = f64::from(vertex.position[2]);
+            // Depths 0 and 1 are reserved for overlays and background lines.
+            if depth > 0. && depth < 1. {
+                vertex.position[2] = (0.5 + 0.8 * (depth - center) / span) as f32;
+            }
+        }
+    }
+
+    pub fn paint(mut self, painter: &egui::Painter, rect: Rect) {
+        self.normalize_parallel_depth();
         painter.add(egui_wgpu::Callback::new_paint_callback(
             rect,
             SceneCallback {
@@ -701,6 +855,95 @@ impl Occlusion {
         visible
     }
 
+    fn visible_polygons(&mut self, polygon: Vec<DVec2>, depth: f64) -> Vec<Vec<DVec2>> {
+        self.visible_surface_polygons(polygon, DVec3::new(0., 0., depth), DVec2::ZERO)
+    }
+
+    fn visible_surface_polygons(
+        &mut self,
+        polygon: Vec<DVec2>,
+        origin: DVec3,
+        gradient: DVec2,
+    ) -> Vec<Vec<DVec2>> {
+        self.finish_collection();
+        let mut visible = vec![polygon];
+        if self.triangles.is_empty() {
+            return visible;
+        }
+        if self.nodes.is_empty() {
+            self.build(0, self.indices.len());
+            self.tree_quality = self.quality();
+        }
+        let depth_at = |p: DVec2| origin.z + gradient.dot(p - origin.truncate());
+        let lo = visible[0]
+            .iter()
+            .map(|&p| p.extend(depth_at(p)))
+            .reduce(DVec3::min)
+            .unwrap();
+        let hi = visible[0]
+            .iter()
+            .map(|&p| p.extend(depth_at(p)))
+            .reduce(DVec3::max)
+            .unwrap();
+        let overlaps = |bounds: OcclusionBounds| {
+            bounds.lo.z < hi.z
+                && bounds.lo.x < hi.x
+                && bounds.hi.x > lo.x
+                && bounds.lo.y < hi.y
+                && bounds.hi.y > lo.y
+        };
+        self.pending.clear();
+        self.pending.push(0);
+        while let Some(index) = self.pending.pop() {
+            let node = &self.nodes[index];
+            if !overlaps(node.bounds) {
+                continue;
+            }
+            if let Some((left, right)) = node.children {
+                self.pending.extend([left, right]);
+                continue;
+            }
+            for &index in &self.indices[node.start..node.end] {
+                let triangle = &self.triangles[index];
+                if !overlaps(triangle.bounds) {
+                    continue;
+                }
+                let [a, b, c] = triangle.points.map(|p| p.truncate());
+                let winding = (b - a).perp_dot(c - a).signum();
+                let mut outside = vec![];
+                // The occluded region is the intersection of the triangle's
+                // three screen half-planes and its foreground depth half-plane.
+                for mut polygon in visible {
+                    for (normal, origin, offset) in [
+                        (DVec2::new(-(b - a).y, (b - a).x) * winding, a, 0.),
+                        (DVec2::new(-(c - b).y, (c - b).x) * winding, b, 0.),
+                        (DVec2::new(-(a - c).y, (a - c).x) * winding, c, 0.),
+                        (
+                            gradient - triangle.gradient,
+                            a,
+                            depth_at(a) - triangle.points[0].z - 64. * f64::EPSILON,
+                        ),
+                    ] {
+                        let side = |p: DVec2| normal.dot(p - origin) + offset;
+                        let piece = clip_polygon(&polygon, |p| -side(p));
+                        if piece.len() >= 3 {
+                            outside.push(piece);
+                        }
+                        polygon = clip_polygon(&polygon, side);
+                        if polygon.len() < 3 {
+                            break;
+                        }
+                    }
+                }
+                visible = outside;
+                if visible.is_empty() {
+                    return visible;
+                }
+            }
+        }
+        visible
+    }
+
     fn compute_intervals(&mut self, a: DVec3, b: DVec3, visible: &mut Vec<(f64, f64)>) {
         #[cfg(test)]
         {
@@ -762,6 +1005,153 @@ impl Occlusion {
         }
         visible.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     }
+}
+
+fn clip_polygon(polygon: &[DVec2], side: impl Fn(DVec2) -> f64) -> Vec<DVec2> {
+    let mut clipped = vec![];
+    for i in 0..polygon.len() {
+        let a = polygon[i];
+        let b = polygon[(i + 1) % polygon.len()];
+        let (da, db) = (side(a), side(b));
+        if da >= 0. {
+            clipped.push(a);
+        }
+        if (da >= 0.) != (db >= 0.) {
+            clipped.push(a.lerp(b, da / (da - db)));
+        }
+    }
+    // Half-plane subtraction can leave coincident vertices along a shared
+    // triangle boundary. A zero-area region must not become a clipping mask:
+    // its zero-length sides would otherwise admit the entire source mesh.
+    if clipped.len() < 3 {
+        return vec![];
+    }
+    let origin = clipped[0];
+    let area = (1..clipped.len() - 1)
+        .map(|i| (clipped[i] - origin).perp_dot(clipped[i + 1] - origin))
+        .sum::<f64>();
+    if area.abs() <= 1e-12 {
+        return vec![];
+    }
+    clipped
+}
+
+fn clipped_annotation_shapes(
+    painter: &egui::Painter,
+    viewport: Rect,
+    shape: egui::Shape,
+    regions: &[Vec<DVec2>],
+) -> Vec<egui::Shape> {
+    match shape {
+        egui::Shape::Vec(shapes) => shapes
+            .into_iter()
+            .flat_map(|shape| clipped_annotation_shapes(painter, viewport, shape, regions))
+            .collect(),
+        egui::Shape::Text(mut text) => {
+            // Retain texel UVs in the galley until egui's final tessellation:
+            // other UI text can still grow the font atlas later in this frame.
+            use egui::emath::GuiRounding as _;
+            let pos = if painter
+                .ctx()
+                .tessellation_options(|o| o.round_text_to_pixels)
+            {
+                text.pos.round_to_pixels(painter.ctx().pixels_per_point())
+            } else {
+                text.pos
+            };
+            let galley = Arc::make_mut(&mut text.galley);
+            galley.num_vertices = 0;
+            galley.num_indices = 0;
+            for placed in &mut galley.rows {
+                let origin = pos - viewport.min + placed.pos.to_vec2();
+                let row = Arc::make_mut(&mut placed.row);
+                row.visuals.mesh = clipped_annotation_mesh(&row.visuals.mesh, regions, origin);
+                row.visuals.mesh_bounds = row.visuals.mesh.calc_bounds();
+                row.visuals.glyph_vertex_range = 0..row.visuals.mesh.vertices.len();
+                row.visuals.glyph_index_start = 0;
+                galley.num_vertices += row.visuals.mesh.vertices.len();
+                galley.num_indices += row.visuals.mesh.indices.len();
+            }
+            vec![egui::Shape::Text(text)]
+        }
+        shape => painter
+            .ctx()
+            .tessellate(
+                vec![egui::epaint::ClippedShape::new(painter.clip_rect(), shape)],
+                painter.ctx().pixels_per_point(),
+            )
+            .into_iter()
+            .filter_map(|primitive| {
+                let egui::epaint::Primitive::Mesh(source) = primitive.primitive else {
+                    return None;
+                };
+                Some(egui::Shape::mesh(clipped_annotation_mesh(
+                    &source,
+                    regions,
+                    -viewport.min.to_vec2(),
+                )))
+            })
+            .collect(),
+    }
+}
+
+fn clipped_annotation_mesh(
+    source: &egui::Mesh,
+    regions: &[Vec<DVec2>],
+    origin: egui::Vec2,
+) -> egui::Mesh {
+    let mut clipped = egui::Mesh::with_texture(source.texture_id);
+    for region in regions {
+        for triangle in source.indices.chunks_exact(3) {
+            let mut vertices: Vec<_> = triangle
+                .iter()
+                .map(|&i| source.vertices[i as usize])
+                .collect();
+            for i in 0..region.len() {
+                let a = region[i];
+                let b = region[(i + 1) % region.len()];
+                vertices = clip_annotation_vertices(&vertices, |v| {
+                    let p = v.pos.to_vec2() + origin;
+                    (b - a).perp_dot(DVec2::new(f64::from(p.x), f64::from(p.y)) - a)
+                });
+            }
+            let base = clipped.vertices.len() as u32;
+            for i in 1..vertices.len().saturating_sub(1) {
+                clipped
+                    .indices
+                    .extend([base, base + i as u32, base + i as u32 + 1]);
+            }
+            clipped.vertices.extend(vertices);
+        }
+    }
+    clipped
+}
+
+fn clip_annotation_vertices(
+    vertices: &[egui::epaint::Vertex],
+    side: impl Fn(&egui::epaint::Vertex) -> f64,
+) -> Vec<egui::epaint::Vertex> {
+    let mut clipped = vec![];
+    for i in 0..vertices.len() {
+        let a = vertices[i];
+        let b = vertices[(i + 1) % vertices.len()];
+        let (da, db) = (side(&a), side(&b));
+        if da >= 0. {
+            clipped.push(a);
+        }
+        if (da >= 0.) != (db >= 0.) {
+            let t = (da / (da - db)) as f32;
+            let [r, g, b_color, alpha] = std::array::from_fn(|i| {
+                egui::lerp(f32::from(a.color[i])..=f32::from(b.color[i]), t).round() as u8
+            });
+            clipped.push(egui::epaint::Vertex {
+                pos: a.pos.lerp(b.pos, t),
+                uv: a.uv.lerp(b.uv, t),
+                color: Color32::from_rgba_premultiplied(r, g, b_color, alpha),
+            });
+        }
+    }
+    clipped
 }
 
 fn subtract_hidden(visible: &mut Vec<(f64, f64)>, lo: f64, hi: f64) {
@@ -1117,7 +1507,7 @@ impl FaceCache {
             let state = entities.get(id);
             state.context.is_some() && !state.hidden
         };
-        let mut points = model
+        let points = model
             .edges
             .values()
             .filter(|e| active(e.id))
@@ -1136,6 +1526,13 @@ impl FaceCache {
                     .filter(|d| active(d.id))
                     .flat_map(|d| d.layout(model)),
             );
+        let mut points = points.chain(
+            model
+                .texts
+                .values()
+                .filter(|t| active(t.id))
+                .flat_map(|t| t.layout(model)),
+        );
         let first = points.next()?;
         Some(points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p))))
     }
@@ -1167,6 +1564,44 @@ impl CachedFace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_faces_remain_distinct_after_webgl_depth_conversion() {
+        let camera = Camera {
+            projection: ketchup_core::Projection::Parallel,
+            ..Default::default()
+        };
+        let mut mesh = Mesh::new(&camera, DVec2::new(640., 480.));
+        let depths = [0., 1e-7_f32, 1.01e-7_f32, 1.];
+        let webgl_depth = |z: f32| (z * 2. - 1.) * 0.5 + 0.5;
+        assert_eq!(webgl_depth(depths[1]), webgl_depth(depths[2]));
+        mesh.vertices = depths
+            .into_iter()
+            .map(|z| Vertex {
+                position: [0., 0., z],
+                color: Color32::WHITE.to_array(),
+                lateral: 0.,
+            })
+            .collect();
+        mesh.normalize_parallel_depth();
+        let mapped: Vec<_> = mesh.vertices.iter().map(|v| v.position[2]).collect();
+        assert_eq!(mapped[0], 0., "overlays stay in front");
+        assert_eq!(mapped[3], 1., "background lines stay behind geometry");
+        assert!(webgl_depth(mapped[1]) < webgl_depth(mapped[2]));
+        assert!(mapped[1] > 0. && mapped[2] < 1.);
+
+        let mut perspective = Mesh::new(&Camera::default(), DVec2::new(640., 480.));
+        perspective.vertices = mesh.vertices;
+        perspective.normalize_parallel_depth();
+        assert_eq!(
+            perspective
+                .vertices
+                .iter()
+                .map(|v| v.position[2])
+                .collect::<Vec<_>>(),
+            mapped
+        );
+    }
 
     #[test]
     fn indexed_strokes_preserve_coverage_with_compact_vertices() {
@@ -1254,6 +1689,253 @@ mod tests {
         let p = [lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y)].map(|p| p.extend(depth));
         occlusion.insert([p[0], p[1], p[2]]);
         occlusion.insert([p[0], p[2], p[3]]);
+    }
+
+    #[test]
+    fn dimension_lines_and_ticks_hide_only_behind_foreground_faces() {
+        for projection in [
+            ketchup_core::Projection::Perspective,
+            ketchup_core::Projection::Parallel,
+        ] {
+            let camera = Camera {
+                projection,
+                ..Camera::default()
+            };
+            let size = DVec2::new(1000., 800.);
+            let a = camera.target - camera.right() * 2.;
+            let b = camera.target + camera.right() * 2.;
+            let mut mesh = Mesh::new(&camera, size);
+            let center = mesh.view.project_depth(camera.target).unwrap();
+            let pa = mesh.view.project(a).unwrap();
+            let pb = mesh.view.project(b).unwrap();
+            let lo = center.truncate() - DVec2::new(10., 20.);
+            let hi = center.truncate() + DVec2::new(10., 20.);
+            occluding_rectangle(&mut mesh.occlusion, lo, hi, center.z - 0.001);
+            let lines = mesh.annotation_line(a, b);
+            assert_eq!(lines.len(), 2);
+            assert!(lines[0].0.truncate().distance(pa) < 1e-8);
+            assert!((lines[0].1.x - lo.x).abs() < 1e-8);
+            assert!((lines[1].0.x - hi.x).abs() < 1e-8);
+            assert!(lines[1].1.truncate().distance(pb) < 1e-8);
+            assert!(
+                mesh.annotation_tick(camera.target, DVec2::new(3., 4.))
+                    .is_empty()
+            );
+
+            // Moving the covering face behind the dimension restores every part.
+            mesh.occlusion = Occlusion::default();
+            occluding_rectangle(&mut mesh.occlusion, lo, hi, center.z + 0.001);
+            let lines = mesh.annotation_line(a, b);
+            assert_eq!(lines.len(), 1);
+            assert!(
+                lines[0].0.truncate().distance(pa) < 1e-8
+                    && lines[0].1.truncate().distance(pb) < 1e-8
+            );
+            assert_eq!(
+                mesh.annotation_tick(camera.target, DVec2::new(3., 4.))
+                    .len(),
+                1
+            );
+            mesh.display.section_cuts = true;
+            mesh.display.section_height = -1.;
+            assert!(mesh.annotation_line(a, b).is_empty());
+            assert!(
+                mesh.annotation_tick(camera.target, DVec2::new(3., 4.))
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn dimension_stroke_width_and_antialiasing_do_not_bleed_across_silhouettes() {
+        for pixels_per_point in [1., 2., 2.5] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(pixels_per_point);
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let viewport = Rect::from_min_size(egui::pos2(100., 50.), egui::vec2(100., 100.));
+                // The first centerline is wholly outside the face. Its width
+                // crosses the silhouette; the second stroke's end cap crosses it.
+                for (a, b, face_lo, face_depth) in [
+                    (DVec3::new(49.75, 20., 0.5), DVec3::new(49.75, 80., 0.5), DVec2::new(50., 0.), 0.4),
+                    (DVec3::new(10., 50., 0.5), DVec3::new(50., 50., 0.5), DVec2::new(50., 0.), 0.4),
+                    // A perspective stroke's interpolated depth crosses the face.
+                    (DVec3::new(20., 50., 0.3), DVec3::new(80., 50., 0.7), DVec2::ZERO, 0.5),
+                ] {
+                    let mut mesh = Mesh::new(&Camera::default(), DVec2::splat(100.));
+                    occluding_rectangle(&mut mesh.occlusion, face_lo, DVec2::splat(100.), face_depth);
+                    let shapes = mesh.annotation_stroke(ui.painter(), viewport, a, b, egui::Stroke::new(1.5, Color32::WHITE));
+                    assert!(!shapes.is_empty());
+                    let mut triangle_count = 0;
+                    for shape in shapes {
+                        let egui::Shape::Mesh(stroke) = shape else { panic!("a partially covered stroke must clip its full mesh") };
+                        triangle_count += stroke.indices.len() / 3;
+                        assert!(stroke.vertices.iter().all(|v| v.pos.x <= viewport.min.x + 50.0001), "stroke width or antialiasing leaked behind the face at scale {pixels_per_point}: {a:?} to {b:?}, vertices {:?}", stroke.vertices);
+                    }
+                    assert!(triangle_count > 0, "preserve the exposed part of the stroke");
+                    mesh.occlusion = Occlusion::default();
+                    occluding_rectangle(&mut mesh.occlusion, face_lo, DVec2::splat(100.), 0.9);
+                    let shapes = mesh.annotation_stroke(ui.painter(), viewport, a, b, egui::Stroke::new(1.5, Color32::WHITE));
+                    assert!(matches!(shapes.as_slice(), [egui::Shape::LineSegment { .. }]));
+                }
+            });
+            output.textures_delta.clear();
+        }
+    }
+
+    fn polygon_area(polygons: &[Vec<DVec2>]) -> f64 {
+        polygons
+            .iter()
+            .map(|p| {
+                (0..p.len())
+                    .map(|i| p[i].perp_dot(p[(i + 1) % p.len()]))
+                    .sum::<f64>()
+                    .abs()
+                    * 0.5
+            })
+            .sum()
+    }
+
+    #[test]
+    fn dimension_label_footprints_follow_silhouettes_and_sloping_depth() {
+        let polygon = vec![
+            DVec2::new(10., 10.),
+            DVec2::new(90., 10.),
+            DVec2::new(90., 90.),
+            DVec2::new(10., 90.),
+        ];
+        for reversed in [false, true] {
+            for (near, far, area) in [
+                (0.4, 0.4, 0.),
+                (0.6, 0.6, 6400.),
+                (0.5, 0.5, 6400.),
+                (0.4, 0.6, 3200.),
+            ] {
+                let mut occlusion = Occlusion::default();
+                let points = [
+                    DVec3::new(0., 0., near),
+                    DVec3::new(100., 0., far),
+                    DVec3::new(100., 100., far),
+                    DVec3::new(0., 100., near),
+                ];
+                for mut triangle in [
+                    [points[0], points[1], points[2]],
+                    [points[0], points[2], points[3]],
+                ] {
+                    if reversed {
+                        triangle.swap(0, 2);
+                    }
+                    occlusion.insert(triangle);
+                }
+                let visible = occlusion.visible_polygons(polygon.clone(), 0.5);
+                assert!((polygon_area(&visible) - area).abs() < 1e-7);
+            }
+        }
+        let mut occlusion = Occlusion::default();
+        occluding_rectangle(
+            &mut occlusion,
+            DVec2::new(40., 0.),
+            DVec2::new(60., 100.),
+            0.4,
+        );
+        assert!(
+            (polygon_area(&occlusion.visible_polygons(polygon.clone(), 0.5)) - 4800.).abs() < 1e-7
+        );
+        // Hidden or removed faces must stop clipping labels on the next frame.
+        occlusion.begin_frame();
+        assert_eq!(
+            occlusion.visible_polygons(polygon.clone(), 0.5),
+            vec![polygon]
+        );
+    }
+
+    #[test]
+    fn partially_occluded_labels_preserve_texture_coordinates_and_viewport_offset() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let viewport = Rect::from_min_size(egui::pos2(100., 50.), egui::vec2(1000., 800.));
+            let mut mesh = Mesh::new(&Camera::default(), DVec2::new(1000., 800.));
+            let anchor = DVec3::ZERO;
+            let center = mesh.view.project_depth(anchor).unwrap();
+            let at = viewport.min + egui::vec2(center.x as f32, center.y as f32);
+            let bounds = Rect::from_center_size(at, egui::vec2(80., 20.));
+            let mut label = egui::Mesh::default();
+            label.add_rect_with_uv(
+                bounds,
+                Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(1., 1.)),
+                Color32::WHITE,
+            );
+            occluding_rectangle(
+                &mut mesh.occlusion,
+                center.truncate() - DVec2::new(100., 100.),
+                center.truncate() + DVec2::new(0., 100.),
+                center.z - 0.001,
+            );
+            let shapes = mesh.annotation_label(
+                ui.painter(),
+                viewport,
+                anchor,
+                bounds,
+                egui::Shape::mesh(label),
+            );
+            assert!(!shapes.is_empty());
+            let mut area = 0.;
+            for shape in shapes {
+                let egui::Shape::Mesh(label) = shape else {
+                    panic!("clipped label must be a mesh")
+                };
+                for v in &label.vertices {
+                    assert!(v.pos.x >= at.x - 1e-4);
+                    assert!((v.uv.x - (v.pos.x - bounds.left()) / bounds.width()).abs() < 1e-5);
+                    assert!((v.uv.y - (v.pos.y - bounds.top()) / bounds.height()).abs() < 1e-5);
+                    assert_eq!(v.color, Color32::WHITE);
+                }
+                for indices in label.indices.chunks_exact(3) {
+                    let [a, b, c] = [indices[0], indices[1], indices[2]]
+                        .map(|i| label.vertices[i as usize].pos);
+                    area += f64::from((b - a).rot90().dot(c - a).abs()) * 0.5;
+                }
+            }
+            assert!((area - 800.).abs() < 1e-3);
+
+            let galley = ui.painter().layout_no_wrap(
+                "123.45 m".into(),
+                egui::FontId::monospace(12.),
+                Color32::WHITE,
+            );
+            let original_vertices = galley.num_vertices;
+            let text_at = at - galley.size() * 0.5;
+            let bounds = Rect::from_min_size(text_at, galley.size()).expand(4.);
+            let shapes = mesh.annotation_label(
+                ui.painter(),
+                viewport,
+                anchor,
+                bounds,
+                egui::Shape::galley(text_at, Arc::clone(&galley), Color32::WHITE),
+            );
+            let [egui::Shape::Text(text)] = shapes.as_slice() else {
+                panic!("keep clipped glyphs in a galley until final tessellation")
+            };
+            assert_eq!(
+                galley.num_vertices, original_vertices,
+                "never mutate cached font layouts"
+            );
+            assert!(text.galley.num_indices > 0);
+            assert!(
+                text.galley
+                    .rows
+                    .iter()
+                    .flat_map(|r| &r.visuals.mesh.vertices)
+                    .any(|v| v.uv.x > 1.)
+            );
+            use egui::emath::GuiRounding as _;
+            let text_pos = text.pos.round_to_pixels(ctx.pixels_per_point());
+            for row in &text.galley.rows {
+                for v in &row.visuals.mesh.vertices {
+                    assert!(text_pos.x + row.pos.x + v.pos.x >= at.x - 1e-4);
+                }
+            }
+        });
+        output.textures_delta.clear();
     }
 
     #[test]

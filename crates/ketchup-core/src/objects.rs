@@ -73,6 +73,7 @@ impl Model {
             .chain(self.faces.keys())
             .chain(self.objects.keys())
             .chain(self.dimensions.keys())
+            .chain(self.texts.keys())
             .copied()
             .filter(|id| !children.contains(id))
             .collect()
@@ -221,6 +222,7 @@ impl Model {
             .chain(self.faces.keys())
             .chain(self.objects.keys())
             .chain(self.dimensions.keys())
+            .chain(self.texts.keys())
             .copied()
             .collect();
         self.entity_tags.retain(|id, _| entities.contains(id));
@@ -237,6 +239,7 @@ impl Model {
         let mut copy = self.clone();
         copy.sync_dimensions();
         copy.dimensions.retain(|id, _| ids.contains(id));
+        copy.texts.retain(|id, _| ids.contains(id));
         copy.edges.retain(|id, _| ids.contains(id));
         copy.faces.retain(|id, _| ids.contains(id));
         copy.objects.retain(|id, _| ids.contains(id));
@@ -273,6 +276,7 @@ impl Model {
                 .dimensions
                 .values()
                 .flat_map(|d| d.layout(source))
+                .chain(source.texts.values().flat_map(|t| t.layout(source)))
                 .any(|p| !(p + offset).is_finite() || (p + offset).abs().max_element() > 1e10)
             || source.vertices.values().any(|v| {
                 !(v.position + offset).is_finite()
@@ -289,6 +293,7 @@ impl Model {
             .chain(source.faces.keys())
             .chain(source.objects.keys())
             .chain(source.dimensions.keys())
+            .chain(source.texts.keys())
             .map(|old| (*old, self.id()))
             .collect();
         let roots = source.root_entities().iter().map(|id| ids[id]).collect();
@@ -329,6 +334,24 @@ impl Model {
                 }
             }
             self.dimensions.insert(dimension.id, dimension);
+        }
+        for text in source.texts.values() {
+            let mut text = text.clone();
+            text.id = ids[&text.id];
+            text.anchor.point += offset;
+            if text
+                .anchor
+                .weights
+                .iter()
+                .all(|(id, _)| ids.contains_key(id))
+            {
+                for (id, _) in &mut text.anchor.weights {
+                    *id = ids[id];
+                }
+            } else {
+                text.anchor.weights.clear();
+            }
+            self.texts.insert(text.id, text);
         }
         for (id, color) in &source.face_colors {
             self.face_colors.insert(ids[id], *color);
@@ -415,7 +438,7 @@ impl Model {
         }
         let ids = self.expand_entities(selected);
         let copy = self.copy_entities(selected);
-        if copy.edges.is_empty() && copy.dimensions.is_empty() {
+        if copy.edges.is_empty() && copy.dimensions.is_empty() && copy.texts.is_empty() {
             return None;
         }
         // Keep a duplicate of any boundary still needed by an unselected face.
@@ -434,6 +457,7 @@ impl Model {
         }
         self.faces.retain(|id, _| !ids.contains(id));
         self.dimensions.retain(|id, _| !ids.contains(id));
+        self.texts.retain(|id, _| !ids.contains(id));
         self.face_colors.retain(|id, _| self.faces.contains_key(id));
         self.edges
             .retain(|id, _| !ids.contains(id) || outside_edges.contains(id));
@@ -524,6 +548,7 @@ impl Model {
             .chain(self.faces.keys())
             .chain(self.objects.keys())
             .chain(self.dimensions.keys())
+            .chain(self.texts.keys())
             .any(|id| !all_ids.insert(*id))
         {
             return Err("Duplicate entity ID");

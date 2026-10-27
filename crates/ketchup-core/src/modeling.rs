@@ -20,11 +20,17 @@ impl Model {
     pub fn selection_center(&self, selected: &BTreeSet<u64>) -> Option<DVec3> {
         let ids = self.selection_vertices(selected);
         let entities = self.expand_entities(selected);
-        let mut points = ids.iter().map(|id| self.vertices[id].position).chain(
+        let points = ids.iter().map(|id| self.vertices[id].position).chain(
             entities
                 .iter()
                 .filter_map(|id| self.dimensions.get(id))
                 .flat_map(|d| d.layout(self)),
+        );
+        let mut points = points.chain(
+            entities
+                .iter()
+                .filter_map(|id| self.texts.get(id))
+                .flat_map(|t| t.layout(self)),
         );
         let first = points.next()?;
         let (lo, hi) = points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p)));
@@ -45,8 +51,13 @@ impl Model {
             .into_iter()
             .filter(|id| self.dimensions.contains_key(id))
             .collect();
-        if vertices.is_empty() && dimensions.is_empty() {
-            return Err("Select geometry or a dimension first");
+        let texts: Vec<_> = self
+            .expand_entities(selected)
+            .into_iter()
+            .filter(|id| self.texts.contains_key(id))
+            .collect();
+        if vertices.is_empty() && dimensions.is_empty() && texts.is_empty() {
+            return Err("Select geometry, a dimension, or text first");
         }
         let protected: BTreeSet<_> = self
             .edges
@@ -71,6 +82,25 @@ impl Model {
                     anchor.weights.clear();
                 }
             }
+        }
+        for id in texts {
+            let source = &self.texts[&id];
+            let [a, b] = source.layout(self);
+            let changed = next.texts.get_mut(&id).unwrap();
+            let attached_geometry_moves = !source.anchor.weights.is_empty()
+                && source
+                    .anchor
+                    .weights
+                    .iter()
+                    .all(|(id, _)| vertices.contains(id));
+            // Moving a label alone repositions the text without losing its attachment.
+            let anchor = if attached_geometry_moves || source.anchor.weights.is_empty() {
+                f(a)
+            } else {
+                a
+            };
+            changed.anchor.point = anchor;
+            changed.offset = f(b) - anchor;
         }
         for id in vertices {
             next.vertices.get_mut(&id).unwrap().position = f(self.vertices[&id].position);
@@ -476,6 +506,7 @@ fn offset_ring(points: &[DVec2], distance: f64) -> Result<Vec<DVec2>, &'static s
 pub struct MovePreview {
     vertices: Vec<(u64, DVec3)>,
     dimensions: Vec<crate::Dimension>,
+    texts: Vec<crate::TextAnnotation>,
     objects: Vec<(u64, crate::InstanceTransform)>,
     edges: Vec<u64>,
     faces: Vec<(u64, bool)>,
@@ -506,8 +537,13 @@ impl MovePreview {
                 d
             })
             .collect();
-        if vertices.is_empty() && dimensions.is_empty() {
-            return Err("Select geometry or a dimension first");
+        let texts: Vec<_> = entities
+            .iter()
+            .filter_map(|id| model.texts.get(id))
+            .cloned()
+            .collect();
+        if vertices.is_empty() && dimensions.is_empty() && texts.is_empty() {
+            return Err("Select geometry, a dimension, or text first");
         }
         let protected = model
             .edges
@@ -545,6 +581,7 @@ impl MovePreview {
                 .map(|id| (id, model.vertices[&id].position))
                 .collect(),
             dimensions,
+            texts,
             objects,
             edges,
             faces,
@@ -571,6 +608,20 @@ impl MovePreview {
             d.end.point += delta;
             d.offset = (source.start.point + source.offset + delta) - (source.start.point + delta);
         }
+        for source in &self.texts {
+            let text = preview.texts.get_mut(&source.id).unwrap();
+            text.clone_from(source);
+            if source.anchor.weights.is_empty() {
+                text.anchor.point += delta;
+            } else if !source
+                .anchor
+                .weights
+                .iter()
+                .all(|(id, _)| self.vertices.iter().any(|(v, _)| v == id))
+            {
+                text.offset += delta;
+            }
+        }
         for &(id, frame) in &self.objects {
             preview.objects.get_mut(&id).unwrap().transform = Some(frame.translated(delta));
         }
@@ -593,6 +644,7 @@ impl MovePreview {
             }
         }
         preview.validate_dimensions().map_err(|_| INVALID)?;
+        preview.validate_texts().map_err(|_| INVALID)?;
         Ok(())
     }
 }

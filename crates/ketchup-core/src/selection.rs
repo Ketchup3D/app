@@ -23,13 +23,50 @@ pub fn pick_entity(
     point: DVec2,
     radius: f64,
 ) -> Option<u64> {
-    pick_dimension(model, camera, size, point, radius)
+    pick_text(model, camera, size, point, radius)
+        .or_else(|| pick_dimension(model, camera, size, point, radius))
         .or_else(|| pick(model, camera, size, point, radius))
         .or_else(|| {
             model
                 .nearest_context_face(camera.ray(point, size))
                 .and_then(|(id, _, _)| model.entity_in_context(id))
         })
+}
+
+/// Leader text is selectable both on its leader and over its readable label.
+pub fn pick_text(
+    model: &Model,
+    camera: &Camera,
+    size: DVec2,
+    point: DVec2,
+    radius: f64,
+) -> Option<u64> {
+    let view = camera.view(size);
+    model
+        .texts
+        .values()
+        .filter(|t| !model.is_hidden(t.id))
+        .filter_map(|text| {
+            let id = model.entity_in_context(text.id)?;
+            let [a, b] = text.layout(model);
+            let half = text.label_size() * 0.5;
+            let label = view.project(b).is_some_and(|center| {
+                (point - center).abs().cmple(half).all() && visible_in_view(model, &view, b)
+            });
+            let leader = view.segment(a, b).and_then(|(screen_a, screen_b)| {
+                let distance = distance_to_segment(point, screen_a, screen_b);
+                (distance <= radius
+                    && visible_in_view(model, &view, view.ray(point).segment_point(a, b)))
+                .then_some(distance)
+            });
+            if label {
+                Some((id, 0.))
+            } else {
+                leader.map(|distance| (id, distance))
+            }
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(id, _)| id)
 }
 
 pub fn pick_dimension(
@@ -184,6 +221,17 @@ pub fn box_select(
             .all(|p| camera.project(*p, size).is_some_and(inside));
         if hit {
             selected.insert(dimension.id);
+        }
+    }
+    for text in model.texts.values().filter(|t| !model.is_hidden(t.id)) {
+        let [a, b] = text.layout(model);
+        let hit = camera.project(a, size).is_some_and(inside)
+            && camera.project(b, size).is_some_and(|center| {
+                let half = text.label_size() * 0.5;
+                inside(center - half) && inside(center + half)
+            });
+        if hit {
+            selected.insert(text.id);
         }
     }
     let hits = selected.clone();

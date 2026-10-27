@@ -129,6 +129,7 @@ impl Model {
         let ids = self.expand_entities(&object.entities);
         self.sync_dimensions();
         self.dimensions.retain(|id, _| !ids.contains(id));
+        self.texts.retain(|id, _| !ids.contains(id));
         self.edges.retain(|id, _| !ids.contains(id));
         self.faces.retain(|id, _| !ids.contains(id));
         self.objects.retain(|id, _| !ids.contains(id));
@@ -144,6 +145,7 @@ impl Model {
         self.edges.extend(contents.edges.clone());
         self.faces.extend(contents.faces.clone());
         self.dimensions.extend(contents.dimensions.clone());
+        self.texts.extend(contents.texts.clone());
         self.face_colors.extend(contents.face_colors.clone());
         self.objects.extend(contents.objects.clone());
         self.tags.extend(contents.tags.clone());
@@ -189,6 +191,10 @@ impl Model {
             d.start.point = d.start.point * scale + translation;
             d.end.point = d.end.point * scale + translation;
             d.offset *= scale;
+        }
+        for text in self.texts.values_mut() {
+            text.anchor.point = text.anchor.point * scale + translation;
+            text.offset *= scale;
         }
         for vertex in self.vertices.values_mut() {
             vertex.position = vertex.position * scale + translation;
@@ -362,6 +368,11 @@ impl Model {
                             for (vertex, _) in &mut anchor.weights {
                                 *vertex = vertex_remap.get(vertex).copied().unwrap_or(*vertex);
                             }
+                        }
+                    }
+                    if let Some(text) = self.texts.get_mut(id) {
+                        for (vertex, _) in &mut text.anchor.weights {
+                            *vertex = vertex_remap.get(vertex).copied().unwrap_or(*vertex);
                         }
                     }
                 }

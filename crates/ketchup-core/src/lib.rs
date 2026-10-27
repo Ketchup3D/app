@@ -1,3 +1,4 @@
+pub mod annotations;
 pub mod camera;
 mod csg;
 pub mod display;
@@ -13,6 +14,7 @@ pub mod selection;
 pub mod solids;
 pub mod tags;
 
+pub use annotations::TextAnnotation;
 pub use camera::{Camera, CameraView, Projection, Ray, StandardView};
 pub use display::{DisplaySettings, FaceStyle};
 pub use document::{Document, Edge, Face, History, Model, Vertex};
@@ -27,6 +29,8 @@ pub use objects::{Object, ObjectKind};
 pub use solids::SolidOperation;
 pub use tags::Tag;
 
+#[cfg(test)]
+mod annotation_tests;
 #[cfg(test)]
 mod edit_context_tests;
 #[cfg(test)]
@@ -71,6 +75,7 @@ pub enum Tool {
     TapeMeasure,
     Protractor,
     Dimensions,
+    Text,
     Erase,
     Orbit,
 }
@@ -88,7 +93,12 @@ impl Tool {
         Self::SOLID.contains(&self)
     }
 
-    pub const MEASURING: [Self; 3] = [Self::Dimensions, Self::TapeMeasure, Self::Protractor];
+    pub const MEASURING: [Self; 4] = [
+        Self::Dimensions,
+        Self::TapeMeasure,
+        Self::Protractor,
+        Self::Text,
+    ];
     pub fn is_measuring(self) -> bool {
         Self::MEASURING.contains(&self)
     }
@@ -102,7 +112,7 @@ impl Tool {
     pub fn is_drawing(self) -> bool {
         Self::DRAWING.contains(&self)
     }
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Select,
         Self::Line,
         Self::Rectangle,
@@ -122,6 +132,7 @@ impl Tool {
         Self::Paint,
         Self::TapeMeasure,
         Self::Protractor,
+        Self::Text,
         Self::Dimensions,
         Self::Erase,
         Self::Orbit,
@@ -161,6 +172,7 @@ impl Tool {
             Self::TapeMeasure => "Tape Measure",
             Self::Protractor => "Protractor",
             Self::Dimensions => "Dimensions",
+            Self::Text => "Text",
             Self::Erase => "Erase",
             Self::Orbit => "Orbit",
         }
@@ -181,12 +193,13 @@ impl Tool {
             | Self::Trim
             | Self::Split => "",
             Self::Scale => "S",
-            Self::Offset => "Q",
+            Self::Offset => "F",
             Self::Move => "M",
             Self::Paint => "B",
             Self::TapeMeasure => "T",
             Self::Protractor => "A",
             Self::Dimensions => "I",
+            Self::Text => "",
             Self::Erase => "E",
             Self::Orbit => "O",
         }
@@ -236,6 +249,7 @@ impl Tool {
             Self::Dimensions => {
                 "Click two endpoints, then click to place the dimension · Esc to cancel"
             }
+            Self::Text => "Click an object, then click to place its text label · Esc to cancel",
             Self::Orbit => "Drag to orbit · Hold Shift to pan · Scroll to zoom",
         }
     }
