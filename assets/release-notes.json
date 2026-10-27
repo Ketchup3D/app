@@ -11,6 +11,12 @@
           "Browsers without file-system picker support continue to download project files using their download settings.",
           "Cancelling the save picker leaves the project unchanged, and failed writes report an error without marking the project as saved."
         ]
+      },
+      {
+        "title": "Editor",
+        "changes": [
+          "Starting a new project resets the camera angle and framing while preserving projection and field-of-view preferences."
+        ]
       }
     ]
   },
