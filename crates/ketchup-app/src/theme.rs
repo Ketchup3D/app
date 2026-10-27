@@ -65,6 +65,30 @@ impl Palette {
     }
 }
 
+/// Grid lines stay visible against each theme's environment without competing
+/// with model edges.
+#[derive(Clone, Copy)]
+pub struct GridPalette {
+    pub major: Color32,
+    pub minor: Color32,
+}
+
+impl GridPalette {
+    pub fn for_ui(ui: &egui::Ui) -> Self {
+        if ui.visuals().dark_mode {
+            Self {
+                major: Color32::from_rgb(83, 96, 83),
+                minor: Color32::from_rgb(61, 72, 61),
+            }
+        } else {
+            Self {
+                major: Color32::from_rgb(161, 168, 148),
+                minor: Color32::from_rgb(188, 194, 175),
+            }
+        }
+    }
+}
+
 /// Theme defaults for model faces and their style previews. User paint and tag
 /// colors stay independent of the theme.
 #[derive(Clone, Copy)]

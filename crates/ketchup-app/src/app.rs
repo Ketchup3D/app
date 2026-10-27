@@ -3321,16 +3321,13 @@ impl KetchupApp {
         mesh.set_display(display);
         let spacing = 10.0_f64.powf((camera.distance / 15.).log10().floor());
         if self.doc.display.grid {
+            let colors = GridPalette::for_ui(ui);
             let x = (camera.target.x / spacing).round() * spacing;
             let y = (camera.target.y / spacing).round() * spacing;
             let span = spacing * 35.;
             for i in -35_i32..=35 {
                 let major = i % 5 == 0;
-                let color = if major {
-                    Color32::from_rgb(211, 218, 202)
-                } else {
-                    Color32::from_rgb(225, 230, 217)
-                };
+                let color = if major { colors.major } else { colors.minor };
                 mesh.background_line(
                     camera,
                     DVec3::new(x + i as f64 * spacing, y - span, 0.),
