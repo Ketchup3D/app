@@ -47,6 +47,8 @@ mod context_menu;
 mod display_scene;
 #[path = "drawing_inference.rs"]
 mod drawing_inference;
+#[path = "grid.rs"]
+mod grid;
 #[path = "measurement_tools.rs"]
 mod measurement_tools;
 #[path = "move_tool.rs"]
@@ -3317,29 +3319,11 @@ impl KetchupApp {
         let mut mesh = renderer::Mesh::cached(camera, size, &mut self.scene_cache);
         mesh.set_pixels_per_point(ui.ctx().pixels_per_point());
         mesh.set_display(display);
-        let spacing = 10.0_f64.powf((camera.distance / 15.).log10().floor());
         if self.doc.display.grid {
             let colors = GridPalette::for_ui(ui);
-            let x = (camera.target.x / spacing).round() * spacing;
-            let y = (camera.target.y / spacing).round() * spacing;
-            let span = spacing * 35.;
-            for i in -35_i32..=35 {
-                let major = i % 5 == 0;
+            for (a, b, major) in grid::lines(camera) {
                 let color = if major { colors.major } else { colors.minor };
-                mesh.background_line(
-                    camera,
-                    DVec3::new(x + i as f64 * spacing, y - span, 0.),
-                    DVec3::new(x + i as f64 * spacing, y + span, 0.),
-                    if major { 0.8 } else { 0.55 },
-                    color,
-                );
-                mesh.background_line(
-                    camera,
-                    DVec3::new(x - span, y + i as f64 * spacing, 0.),
-                    DVec3::new(x + span, y + i as f64 * spacing, 0.),
-                    if major { 0.8 } else { 0.55 },
-                    color,
-                );
+                mesh.background_line(camera, a, b, if major { 0.8 } else { 0.55 }, color);
             }
         }
         for axis in [Axis::X, Axis::Y, Axis::Z]

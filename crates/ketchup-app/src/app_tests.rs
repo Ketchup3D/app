@@ -7,6 +7,8 @@ mod context_menus;
 mod drawing_inference;
 #[path = "feature_audit_tests.rs"]
 mod feature_audit;
+#[path = "grid_tests.rs"]
+mod grid_snapping;
 #[path = "outliner_drag_tests.rs"]
 mod outliner_drag;
 #[path = "precision_tests.rs"]
