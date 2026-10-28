@@ -230,7 +230,7 @@ impl Layout {
                 };
                 let response = ui.interact(
                     divider,
-                    ui.id().with(("viewport-divider", *id)),
+                    ui.scope_id().with(("viewport-divider", *id)),
                     Sense::drag(),
                 );
                 if response.dragged() && available > 1. {
@@ -540,7 +540,7 @@ impl KetchupApp {
                 continue;
             }
             let rect = pane.rect;
-            egui::Area::new(ui.id().with(("viewport-camera-controls", pane.selected)))
+            egui::Area::new(ui.scope_id().with(("viewport-camera-controls", pane.selected)))
                 .pivot(Align2::RIGHT_TOP)
                 .default_size(egui::vec2(72. + ui.spacing().item_spacing.x, 40.))
                 .fixed_pos(rect.right_top() + egui::vec2(-8., 8.))
@@ -583,7 +583,7 @@ impl KetchupApp {
                 });
             let response = ui.interact(
                 rect,
-                ui.id().with(("viewport-canvas", pane.id)),
+                ui.scope_id().with(("viewport-canvas", pane.id)),
                 Sense::click_and_drag(),
             );
             // Hover activates a camera for wheel and modifier-orbit as well as
