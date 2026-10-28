@@ -592,6 +592,9 @@ impl KetchupApp {
                 && self.viewports.dragging.is_none()
                 && response.enabled()
                 && response.contains_pointer()
+                && ctx
+                    .input(|input| input.pointer.hover_pos())
+                    .is_some_and(|pos| rect.contains(pos))
             {
                 activate = Some(pane.selected);
             }

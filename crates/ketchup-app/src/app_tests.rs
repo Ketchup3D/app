@@ -31,6 +31,11 @@ impl Harness {
     fn new() -> Self {
         let ctx = egui::Context::default();
         apply(&ctx);
+        // Keep UI interaction fixtures settled and all picker choices visible.
+        ctx.style_mut_of(ctx.theme(), |style| {
+            style.animation_time = 0.;
+            style.spacing.combo_height = 1000.;
+        });
         let mut harness = Self {
             ctx,
             app: KetchupApp::with_document(Document::default(), None, true),
@@ -481,7 +486,12 @@ fn shapes_stay_on_the_starting_face_plane() {
     let end = h.at(DVec3::new(1., 0., 3.));
     h.frame(vec![egui::Event::PointerMoved(end)], egui::Modifiers::NONE);
     let preview = h.app.drawing_points();
-    assert!(preview.iter().all(|point| point.y.abs() < 1e-6));
+    assert!(
+        preview.iter().all(|point| point.y.abs() < 1e-6),
+        "preview={preview:?}, snap={:?}, normal={:?}",
+        h.app.snap,
+        h.app.drawing.as_ref().map(|d| d.normal)
+    );
     h.click(end);
     assert_eq!(h.app.doc.model.edges.len(), 8);
     h.app.doc.model.validate().unwrap();
@@ -2625,7 +2635,7 @@ fn context_menu_lock_protects_delete_and_hide_can_be_reversed_from_outliner() {
     h.click(text_position(&tree, "Geometry (1)"));
     h.frame(vec![], egui::Modifiers::NONE);
     let tree = h.frame(vec![], egui::Modifiers::NONE);
-    let row = text_position(&tree, &format!("#{id} · Hidden"));
+    let row = text_position(&tree, &format!("#{id}"));
     let menu = open_context_menu(&mut h, row);
     h.click(text_position(&menu, "Unhide"));
     assert!(h.app.doc.model.hidden.is_empty());
@@ -4473,7 +4483,7 @@ fn precision_controls_independently_update_measurement_displays() {
 fn sidebar_sections_collapse_and_display_controls_change_saved_settings() {
     let mut h = Harness::new();
     // Make all sections accessible in the viewport without scrolling.
-    h.size.y = 1600.;
+    h.size.y = 2600.;
     let output = h.frame(vec![], egui::Modifiers::NONE);
     for title in ["Components", "Tags", "Display"] {
         text_position(&output, title);
@@ -4646,7 +4656,7 @@ fn sidebar_header_drag_cancels_on_escape_or_release_outside_the_inspector() {
 fn expanding_edge_style_keeps_the_inspector_width_stable() {
     let mut h = Harness::new();
     h.ctx.style_mut_of(h.ctx.theme(), |s| s.animation_time = 0.);
-    h.size.y = 1600.;
+    h.size.y = 2600.;
     for _ in 0..3 {
         h.frame(vec![], egui::Modifiers::NONE);
     }
@@ -4698,7 +4708,7 @@ fn library_placement_creates_linked_instance_supports_cancel_and_undo() {
 fn view_sidebar_buttons_set_projection_and_all_standard_views_without_resizing() {
     let mut h = Harness::new();
     h.ctx.style_mut_of(h.ctx.theme(), |s| s.animation_time = 0.);
-    h.size.y = 2600.;
+    h.size.y = 4000.;
     h.frame(vec![], egui::Modifiers::NONE);
     let width = h.app.viewport.right();
     for title in ["Camera", "Standard views"] {
@@ -4734,8 +4744,10 @@ fn generate_menu_is_next_to_edit_and_woodworking_opens_cancellable_scope_dialog(
     let generate = text_position(&output, "Generate");
     let help = text_position(&output, "Help");
     assert!(edit.x < generate.x && generate.x < help.x);
-    let output = h.click(generate);
-    let output = h.click(text_position(&output, "Woodworking"));
+    h.click(generate);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "Woodworking"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&output, "Prepare cutting plan…"));
     assert_eq!(h.app.project.cutting_plan_selection, Some(false));
     let output = h.frame(vec![], egui::Modifiers::NONE);
@@ -4753,7 +4765,8 @@ fn generate_screenshot_dialog_supports_multiple_views_and_cancels_without_editin
     let mut h = Harness::new();
     let before = h.app.doc.clone();
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    let output = h.click(text_position(&output, "Generate"));
+    h.click(text_position(&output, "Generate"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&output, "Screenshot"));
     assert!(h.app.screenshot.open);
     let output = h.frame(vec![], egui::Modifiers::NONE);

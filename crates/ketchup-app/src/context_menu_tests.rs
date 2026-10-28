@@ -32,7 +32,7 @@ fn outliner_shift_click_selects_and_adjusts_ranges_in_both_directions() {
     h.app.doc.model.locked.insert(d);
     let first = outliner_row(&mut h, "First");
     let second = outliner_row(&mut h, "Second");
-    let hidden = outliner_row(&mut h, "Hidden · Hidden");
+    let hidden = outliner_row(&mut h, "Hidden");
     let last = outliner_row(&mut h, "Last");
     let modified_click = |h: &mut Harness, pos, modifiers| {
         h.pointer_with_modifiers(pos, egui::PointerButton::Primary, true, modifiers);
@@ -78,7 +78,7 @@ fn outliner_modifier_clicks_toggle_visible_hidden_and_locked_items() {
         h.app.doc.model.locked.insert(d);
         let first = outliner_row(&mut h, "First");
         let second = outliner_row(&mut h, "Second");
-        let hidden = outliner_row(&mut h, "Hidden · Hidden");
+        let hidden = outliner_row(&mut h, "Hidden");
         let locked = outliner_row(&mut h, "Locked · Locked");
         h.click(first);
         assert_eq!(h.app.selected, BTreeSet::from([a]));
@@ -160,13 +160,13 @@ fn outliner_context_menu_expands_and_collapses_selected_subtrees() {
     h.app.doc.model.locked.insert(parent);
     let model = h.app.doc.model.clone();
     h.app.selected = BTreeSet::from([parent, other]);
-    let label = "Parent · Hidden · Locked";
+    let label = "Parent · Locked";
     let row = outliner_row(&mut h, label);
     let menu = open_context_menu(&mut h, row);
     h.click(text_position(&menu, "Expand Children"));
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    text_position(&output, "Child · Hidden · Locked");
-    text_position(&output, &format!("#{edge} · Hidden · Locked"));
+    text_position(&output, "Child · Locked");
+    text_position(&output, &format!("#{edge} · Locked"));
     text_position(&output, &format!("#{other_edge}"));
     assert_eq!(h.app.selected, BTreeSet::from([parent, other]));
 
@@ -182,7 +182,7 @@ fn outliner_context_menu_expands_and_collapses_selected_subtrees() {
             _ => false,
         }
     }
-    for label in ["Child · Hidden · Locked", "Geometry (1)"] {
+    for label in ["Child · Locked", "Geometry (1)"] {
         assert!(
             !output
                 .shapes
@@ -210,7 +210,7 @@ fn outliner_context_menu_preserves_multiselection_and_runs_shared_commands() {
     assert!(h.app.selected.is_empty());
     assert_eq!(h.app.history.undo_label(), Some("Hide"));
 
-    let row = outliner_row(&mut h, "First · Hidden");
+    let row = outliner_row(&mut h, "First");
     let menu = open_context_menu(&mut h, row);
     assert_eq!(h.app.selected, BTreeSet::from([a]));
     h.click(text_position(&menu, "Unhide"));

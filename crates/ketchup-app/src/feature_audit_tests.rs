@@ -82,6 +82,12 @@ pub(super) fn render_cases() -> Vec<RenderCase> {
             serde_json::json!([240, 20, 150]),
         );
     }
+    pair(
+        "units",
+        "units",
+        defaults["units"].clone(),
+        serde_json::json!({"length": "feet"}),
+    );
     cases
 }
 
@@ -220,7 +226,7 @@ fn sidebar_position(h: &Harness, output: &egui::FullOutput, label: &str) -> Pos2
 fn options_workspace() -> Harness {
     let mut h = Harness::new();
     h.ctx.style_mut_of(h.ctx.theme(), |s| s.animation_time = 0.);
-    h.size.y = 3000.;
+    h.size.y = 5000.;
     for _ in 0..2 {
         h.frame(vec![], egui::Modifiers::NONE);
     }

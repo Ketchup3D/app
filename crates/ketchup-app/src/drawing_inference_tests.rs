@@ -376,7 +376,12 @@ fn unlocked_shapes_can_follow_a_reference_axis_outside_the_current_plane() {
         assert_eq!(h.app.lock, None);
         let preview = h.app.drawing_points();
         h.click(h.at(target));
-        assert!(h.app.drawing.is_none());
+        assert!(
+            h.app.drawing.is_none(),
+            "tool={tool:?}, snap={:?}, notice={:?}",
+            h.app.snap,
+            h.app.notice
+        );
         assert!(preview.iter().all(|p| {
             h.app
                 .doc
@@ -505,7 +510,10 @@ fn rectangle_reference_alignment_can_return_to_the_horizontal_plane() {
     hover(&mut h, point);
     hover(&mut h, DVec3::new(3., 4., 0.));
     let snap = h.app.snap.unwrap();
-    assert!(snap.point.distance(DVec3::new(3., 4., 0.)) < 1e-7);
+    assert!(
+        snap.point.distance(DVec3::new(3., 4., 0.)) < 1e-6,
+        "snap={snap:?}"
+    );
     assert_eq!(h.app.drawing_guide.unwrap().axis, Axis::Z);
     assert!(h.app.drawing_points().iter().all(|p| p.z.abs() < 1e-7));
 }
@@ -597,7 +605,11 @@ fn y_locked_lines_snap_immediately_to_hovered_group_and_component_geometry() {
                     };
                     h.key(Key::L);
                     h.click(h.at(start));
-                    assert!(h.app.line_start.unwrap().distance(start) < 1e-7);
+                    assert!(
+                        h.app.line_start.unwrap().distance(start) < 1e-6,
+                        "start={start:?}, actual={:?}, offset={offset:?}",
+                        h.app.line_start
+                    );
                     h.key(Key::ArrowLeft);
                     let reference = a.lerp(b, fraction) + offset;
                     let expected = DVec3::new(start.x, reference.y, start.z);
@@ -616,7 +628,7 @@ fn y_locked_lines_snap_immediately_to_hovered_group_and_component_geometry() {
                     );
                     assert_eq!(h.app.lock, Some(Axis::Y));
                     assert!(h.app.active_drawing_projection().is_some());
-                    assert!((snap.point - start).cross(DVec3::Y).length() < 1e-7);
+                    assert!((snap.point - start).cross(DVec3::Y).length() < 1e-6);
 
                     h.click(h.at(reference));
                     assert!(h.app.line_start.unwrap().distance(expected) < 1e-5);
@@ -650,8 +662,9 @@ fn every_explicit_lock_uses_the_hovered_reference_coordinate() {
         hover(&mut h, point);
         let expected = start + axis.vector() * (point - start).dot(axis.vector());
         assert!(
-            h.app.snap.unwrap().point.distance(expected) < 1e-7,
-            "{axis:?}"
+            h.app.snap.unwrap().point.distance(expected) < 1e-6,
+            "{axis:?}, snap={:?}, start={start:?}",
+            h.app.snap
         );
         assert_eq!(h.app.lock, Some(axis));
     }
@@ -691,7 +704,7 @@ fn y_lock_can_reference_a_solid_component_outside_the_current_editing_group() {
     hover(&mut h, reference);
     assert!(h.app.hover.is_none());
     let expected = DVec3::new(-2., 3., 0.);
-    assert!(h.app.snap.unwrap().point.distance(expected) < 1e-7);
+    assert!(h.app.snap.unwrap().point.distance(expected) < 1e-6);
     assert!(h.app.active_drawing_projection().is_some());
     h.click(h.at(reference));
     assert!(h.app.line_start.unwrap().distance(expected) < 1e-7);

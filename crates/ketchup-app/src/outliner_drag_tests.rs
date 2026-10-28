@@ -13,9 +13,28 @@ fn frame(h: &mut Harness) -> egui::FullOutput {
     h.frame(vec![], egui::Modifiers::NONE)
 }
 
+fn outliner_position(h: &Harness, output: &egui::FullOutput, label: &str) -> Pos2 {
+    // A breadcrumb can have the same name as an Outliner row.
+    output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text)
+                if (text.galley.job.text == label
+                    || text.galley.job.text.strip_suffix(" · Editing") == Some(label))
+                    && text.pos.x > h.app.viewport.right() =>
+            {
+                Some(text.pos + text.galley.size() * 0.5)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("Missing Outliner row: {label}"))
+}
+
 fn row(h: &mut Harness, label: &str) -> Pos2 {
     frame(h);
-    text_position(&frame(h), label)
+    let output = frame(h);
+    outliner_position(h, &output, label)
 }
 
 fn begin_drag(h: &mut Harness, label: &str) -> egui::FullOutput {
@@ -28,12 +47,16 @@ fn begin_drag(h: &mut Harness, label: &str) -> egui::FullOutput {
         egui::Modifiers::NONE,
     );
     frame(h);
+    assert!(
+        egui::DragAndDrop::has_any_payload(&h.ctx),
+        "drag source={label}"
+    );
     frame(h)
 }
 
 fn drop_on(h: &mut Harness, source: &str, destination: &str) -> egui::FullOutput {
     let output = begin_drag(h, source);
-    let target = text_position(&output, destination);
+    let target = outliner_position(h, &output, destination);
     h.frame(
         vec![egui::Event::PointerMoved(target)],
         egui::Modifiers::NONE,
@@ -41,7 +64,7 @@ fn drop_on(h: &mut Harness, source: &str, destination: &str) -> egui::FullOutput
     // Wait for a collapsed destination to expand before continuing in its tree.
     h.time += 0.5;
     let output = frame(h);
-    let target = text_position(&output, destination);
+    let target = outliner_position(h, &output, destination);
     h.pointer(target, egui::PointerButton::Primary, false, false)
 }
 
@@ -63,7 +86,7 @@ fn outliner_drag_moves_selected_objects_into_and_out_of_a_group_with_undo() {
 
     let output = begin_drag(&mut h, "First");
     assert!(!has_label(&output, "Move to Model"));
-    let top = text_position(&output, "Destination · Editing") - egui::vec2(0., 8.);
+    let top = outliner_position(&h, &output, "Destination · Editing") - egui::vec2(0., 12.);
     h.frame(vec![egui::Event::PointerMoved(top)], egui::Modifiers::NONE);
     h.pointer(top, egui::PointerButton::Primary, false, false);
     assert_eq!(h.app.doc.model.parent(a), None);
@@ -101,7 +124,7 @@ fn outliner_drag_rejects_locked_targets_and_escape_cancels_the_move() {
     h.app.doc.model.locked.insert(destination);
     let before = h.app.doc.model.clone();
     let output = begin_drag(&mut h, "Source");
-    let target = text_position(&output, "Destination · Locked");
+    let target = outliner_position(&h, &output, "Destination · Locked");
     let output = h.frame(
         vec![egui::Event::PointerMoved(target)],
         egui::Modifiers::NONE,
@@ -151,7 +174,7 @@ fn outliner_drag_hover_expands_only_after_500ms_without_moving_the_pointer() {
     let before = h.app.doc.model.clone();
     let output = begin_drag(&mut h, "Source");
     assert!(!has_label(&output, "Child"));
-    let target = text_position(&output, "Destination");
+    let target = outliner_position(&h, &output, "Destination");
     h.frame(
         vec![egui::Event::PointerMoved(target)],
         egui::Modifiers::NONE,
@@ -177,8 +200,8 @@ fn outliner_drag_hover_delay_restarts_when_leaving_or_switching_groups() {
         .reparent_objects(&BTreeSet::from([child]), Some(destination))
         .unwrap();
     let output = begin_drag(&mut h, "Source");
-    let target = text_position(&output, "Destination");
-    let other = text_position(&output, "Other");
+    let target = outliner_position(&h, &output, "Destination");
+    let other = outliner_position(&h, &output, "Other");
     for away in [other, h.app.viewport.center()] {
         h.frame(
             vec![egui::Event::PointerMoved(target)],
@@ -206,7 +229,7 @@ fn outliner_drop_before_hover_delay_moves_objects_without_expanding_the_group() 
     let source = object(&mut h, "Source", false, DVec3::ZERO);
     let destination = object(&mut h, "Destination", false, DVec3::Y * 2.);
     let output = begin_drag(&mut h, "Source");
-    let target = text_position(&output, "Destination");
+    let target = outliner_position(&h, &output, "Destination");
     h.frame(
         vec![egui::Event::PointerMoved(target)],
         egui::Modifiers::NONE,
@@ -225,7 +248,7 @@ fn outliner_row_edges_reorder_objects_and_shift_selection_uses_the_visible_order
     let before = h.app.doc.model.clone();
     let output = begin_drag(&mut h, "Third");
     assert!(!has_label(&output, "Move to Model"));
-    let target = text_position(&output, "First") - egui::vec2(0., 8.);
+    let target = outliner_position(&h, &output, "First") - egui::vec2(0., 12.);
     h.frame(
         vec![egui::Event::PointerMoved(target)],
         egui::Modifiers::NONE,
@@ -240,8 +263,8 @@ fn outliner_row_edges_reorder_objects_and_shift_selection_uses_the_visible_order
     );
     assert_eq!(h.app.doc.model.vertices, before.vertices);
     let output = frame(&mut h);
-    assert!(text_position(&output, "Third").y < text_position(&output, "First").y);
-    let third = text_position(&output, "Third");
+    assert!(outliner_position(&h, &output, "Third").y < outliner_position(&h, &output, "First").y);
+    let third = outliner_position(&h, &output, "Third");
     h.click(third);
     let second = row(&mut h, "Second");
     h.pointer(second, egui::PointerButton::Primary, true, true);
@@ -258,9 +281,9 @@ fn outliner_empty_space_accepts_a_root_drop_without_a_button() {
     object(&mut h, "Parent", false, DVec3::Y * 2.);
     drop_on(&mut h, "Child", "Parent");
     let output = begin_drag(&mut h, "Child");
-    let parent_pos = text_position(&output, "Parent · Editing");
+    let parent_pos = outliner_position(&h, &output, "Parent · Editing");
     assert!(!has_label(&output, "Move to Model"));
-    let last = text_position(&output, "Geometry (1)");
+    let last = outliner_position(&h, &output, "Geometry (1)");
     let target = Pos2::new(parent_pos.x, last.y + 28.);
     h.frame(
         vec![egui::Event::PointerMoved(target)],

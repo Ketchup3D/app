@@ -165,8 +165,7 @@ fn compass_clicks_align_and_persist_without_editing_geometry_or_changing_tools()
             assert!(h.app.gesture.is_none());
 
             let mut storage = PreferencesStorage::default();
-            h.app
-                .persist_inspector_changes(&h.ctx, Some(&mut storage), false);
+            h.app.save_inspector_preferences(&mut storage);
             assert!(storage.flushed);
             let mut restored = KetchupApp::with_document(Document::default(), None, true);
             restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
@@ -263,8 +262,7 @@ fn compass_drag_orbits_from_background_and_axis_without_editing_the_model() {
         assert!(!h.app.navigating());
 
         let mut storage = PreferencesStorage::default();
-        h.app
-            .persist_inspector_changes(&h.ctx, Some(&mut storage), false);
+        h.app.save_inspector_preferences(&mut storage);
         assert!(storage.flushed);
         let mut restored = KetchupApp::with_document(Document::default(), None, true);
         restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));

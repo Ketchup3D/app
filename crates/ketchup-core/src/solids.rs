@@ -725,6 +725,20 @@ impl Model {
             adjacency.entry(e.a).or_default().push(e.b);
             adjacency.entry(e.b).or_default().push(e.a);
         }
+        // A face joins its outer boundary to every hole boundary even though
+        // no modeled edge crosses the surface between those rings.
+        for face in self
+            .faces
+            .values()
+            .filter(|face| self.parent(face.id) == self.edit_context)
+        {
+            if let Some(&outer) = face.vertices.first() {
+                for &inner in face.holes.iter().filter_map(|ring| ring.first()) {
+                    adjacency.entry(outer).or_default().push(inner);
+                    adjacency.entry(inner).or_default().push(outer);
+                }
+            }
+        }
         let mut pending: VecDeque<_> = vertices.iter().copied().collect();
         while let Some(vertex) = pending.pop_front() {
             for &other in adjacency.get(&vertex).into_iter().flatten() {

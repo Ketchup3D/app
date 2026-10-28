@@ -9,7 +9,9 @@ fn open_notes(h: &mut Harness) -> egui::FullOutput {
     h.click(text_position(&output, "Help"));
     let menu = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&menu, "Release notes"));
-    h.frame(vec![], egui::Modifiers::NONE);
+    for _ in 0..10 {
+        h.frame(vec![], egui::Modifiers::NONE);
+    }
     h.frame(vec![], egui::Modifiers::NONE)
 }
 

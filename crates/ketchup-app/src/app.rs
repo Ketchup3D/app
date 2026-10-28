@@ -167,6 +167,7 @@ struct Modeling {
 struct Drawing {
     origin: DVec3,
     surface_normal: DVec3,
+    on_surface: bool,
     normal: DVec3,
     u: DVec3,
     v: DVec3,
@@ -214,8 +215,9 @@ impl Drawing {
             .max_by(|a, b| a.dot(view).abs().total_cmp(&b.dot(view).abs()))
             .or_else(|| {
                 // A tilted target still needs an exact, planar shape. Keep the
-                // normal as close to the current orientation as possible.
-                let projected = self.normal - direction * self.normal.dot(direction);
+                // normal as close to the starting orientation as possible.
+                let projected =
+                    self.surface_normal - direction * self.surface_normal.dot(direction);
                 (projected.length_squared() > 1e-12).then(|| projected.normalize())
             })
             .or_else(|| {
@@ -789,21 +791,22 @@ impl KetchupApp {
             .doc
             .camera
             .ray(dv(pos - self.viewport.min), dv(self.viewport.size()));
-        let normal = self
+        let surface = self
             .doc
             .model
             .nearest_face(ray)
             .and_then(|(id, _, _)| {
                 ketchup_core::faces::plane(&self.doc.model, &self.doc.model.faces[&id].vertices)
             })
-            .filter(|plane| (snap.point - plane.origin).dot(plane.normal).abs() < 1e-6)
-            .map_or(DVec3::Z, |plane| plane.normal);
+            .filter(|plane| (snap.point - plane.origin).dot(plane.normal).abs() < 1e-6);
+        let normal = surface.map_or(DVec3::Z, |plane| plane.normal);
         let u = (DVec3::X - normal * normal.x)
             .try_normalize()
             .unwrap_or(DVec3::Y);
         let mut drawing = Drawing {
             origin: snap.point,
             surface_normal: normal,
+            on_surface: surface.is_some(),
             normal,
             u,
             v: normal.cross(u),
@@ -843,6 +846,11 @@ impl KetchupApp {
         );
         if let Some(snap) = inferred.filter(|snap| {
             snap.kind != Inference::Plane
+                // A soft local axis must not pull a shape off its starting face.
+                && !(self.lock.is_none()
+                    && matches!(snap.kind, Inference::Axis(_))
+                    && drawing.on_surface
+                    && (snap.point - drawing.origin).dot(drawing.surface_normal).abs() > 1e-6)
                 && (self.lock.is_none()
                     || (snap.point - drawing.origin).dot(drawing.normal).abs() < 1e-6)
         }) {

@@ -273,7 +273,8 @@ fn rectangle_dimensions_can_be_entered_in_the_focused_measurements_field() {
     let mut h = Harness::new();
     h.key(Key::R);
     h.click(h.at(DVec3::ZERO));
-    h.click(egui::pos2(h.size.x - 90., h.size.y - 21.));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "5m,50mm"));
     assert!(h.ctx.egui_wants_keyboard_input());
     type_dimension(&mut h, "(6m - 100cm),60mm - 10mm");
     h.key(Key::Enter);

@@ -402,6 +402,9 @@ fn pushing_an_inset_into_a_solid_creates_a_closed_recess() {
         .unwrap();
     assert_eq!(hit, floor);
     assert!(point.distance(DVec3::new(4., 3., 2.5)) < 1e-7);
+    let body = model.solid_entities(base).unwrap();
+    assert_eq!(body, model.root_entities());
+    assert_eq!(model.solid_entities(floor).unwrap(), body);
     assert!((model.solid_volume(base).unwrap() - (8. * 6. * 4. - 6. * 4. * 1.5)).abs() < 1e-6);
     model.validate().unwrap();
 }

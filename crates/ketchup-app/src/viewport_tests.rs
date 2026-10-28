@@ -108,7 +108,12 @@ fn pointer_creates_and_docks_a_tab_then_orbits_only_its_camera() {
         }
     ));
     let right = harness.app.viewport;
-    assert!(right.left() > 400.);
+    assert!(
+        right.left() > 400.,
+        "rect={right:?}, active={}, layout={:?}",
+        harness.app.viewports.active,
+        harness.app.viewports.layout
+    );
     let original_left = harness.app.viewports.cameras[&0].clone();
     let original_right = harness.app.viewports.cameras[&1].clone();
     let start = right.center();

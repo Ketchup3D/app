@@ -1,5 +1,38 @@
 [
   {
+    "version": "0.4.0",
+    "date": "2026-10-28",
+    "title": "More views and precise measurements",
+    "sections": [
+      {
+        "title": "Views and navigation",
+        "changes": [
+          "Work with multiple viewport tabs and resizable split views, each with its own camera and a shared model, selection, and undo history.",
+          "Use the interactive compass to switch camera views, with viewport layouts and camera preferences remembered across restarts.",
+          "The grid stays anchored to the model while orbiting, and viewports use a cleaner borderless appearance.",
+          "Docking a viewport keeps the correct pane active so camera navigation affects the intended view."
+        ]
+      },
+      {
+        "title": "Measurements and drawing",
+        "changes": [
+          "Choose length, area, volume, and angle units with independent decimal precision in the new Units sidebar section. These preferences persist across restarts, and lengths entered without a unit use the selected length unit.",
+          "Enable Snap to grid to align drawing and placement with the grid spacing at the current zoom; the setting is remembered across restarts.",
+          "Line drawing stops automatically when a closed shape creates a face, and completed shapes clear their drawing guides.",
+          "Shape previews stay on their starting face during local-axis snapping and remain stable when following tilted reference points.",
+          "Solids with inset recesses now report their volume correctly and remain usable by solid tools."
+        ]
+      },
+      {
+        "title": "Workshop plans",
+        "changes": [
+          "Cut lists use consistent part ordering and preserve width and cutting direction for short parts aligned with other parts in the same group.",
+          "Cut lists and cutting layouts show clearer metric dimensions in millimeters or centimeters."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.3.1",
     "date": "2026-10-27",
     "title": "Choose where browser projects are saved",
