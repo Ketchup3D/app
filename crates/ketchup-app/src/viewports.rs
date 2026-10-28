@@ -552,8 +552,6 @@ impl KetchupApp {
                     ui.set_clip_rect(rect.intersect(ui.clip_rect()));
                     let colors = Palette::for_ui(ui);
                     egui::Frame::new()
-                        .fill(colors.paper)
-                        .corner_radius(6)
                         .inner_margin(4)
                         .show(ui, |ui| {
                             ui.set_width(64. + ui.spacing().item_spacing.x);
