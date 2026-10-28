@@ -85,3 +85,118 @@ fn grid_spacing_can_readjust_when_zooming_in() {
         }
     }
 }
+
+fn hover(h: &mut Harness, point: DVec3) {
+    h.frame(
+        vec![egui::Event::PointerMoved(h.at(point))],
+        egui::Modifiers::NONE,
+    );
+}
+
+#[test]
+fn grid_snapping_menu_defaults_off_and_toggles_independently() {
+    let mut h = Harness::new();
+    assert!(!h.app.snap_to_grid);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "▾"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let checkbox = text_position(&output, "Snap to grid");
+    h.click(checkbox);
+    assert!(h.app.snap_to_grid);
+    assert!(h.app.doc.snap_to_geometry);
+    assert!(h.app.doc.snap_to_axes);
+    assert!(!h.app.project.modified);
+    h.click(checkbox);
+    assert!(!h.app.snap_to_grid);
+}
+
+#[test]
+fn grid_snapping_line_preview_and_commit_use_the_displayed_spacing() {
+    for distance in [6., 30., 300.] {
+        let mut h = Harness::new();
+        h.app.doc.camera.distance = distance;
+        h.app.doc.snap_to_geometry = false;
+        h.app.doc.snap_to_axes = false;
+        h.app.set_tool(Tool::Line);
+        let spacing = grid::spacing(&h.app.doc.camera);
+        let target = DVec3::new(2.3, -1.7, 0.) * spacing;
+        hover(&mut h, target);
+        assert!(h.app.snap.unwrap().point.distance(target) < spacing * 1e-4);
+        h.app.snap_to_grid = true;
+        hover(&mut h, target);
+        let expected = DVec3::new(2., -2., 0.) * spacing;
+        assert!(h.app.snap.unwrap().point.distance(expected) < 1e-7);
+        h.click(h.at(target));
+        assert!(h.app.line_start.unwrap().distance(expected) < 1e-7);
+        let end = DVec3::new(-2.2, 1.8, 0.) * spacing;
+        hover(&mut h, end);
+        let preview = h.app.line_preview_snap().unwrap().point;
+        assert!(preview.distance(DVec3::new(-2., 2., 0.) * spacing) < 1e-7);
+        h.click(h.at(end));
+        let edge = h.app.doc.model.edges.values().next().unwrap();
+        let (a, b) = h.app.doc.model.points(edge);
+        assert!(a.distance(expected) < 1e-7);
+        assert!(b.distance(preview) < 1e-7);
+    }
+}
+
+#[test]
+fn grid_snapping_preserves_object_targets_and_off_grid_axis_anchors() {
+    let mut h = Harness::new();
+    h.app.snap_to_grid = true;
+    h.app.set_tool(Tool::Line);
+    let target = DVec3::new(2.3, 1.7, 0.);
+    h.app
+        .doc
+        .model
+        .add_edge(target, target + DVec3::X * 2.)
+        .unwrap();
+    hover(&mut h, target);
+    assert_eq!(h.app.snap.unwrap().kind, Inference::Endpoint);
+    assert!(h.app.snap.unwrap().point.distance(target) < 1e-7);
+    h.click(h.at(target));
+    h.app.doc.snap_to_geometry = false;
+    h.key(Key::ArrowRight);
+    hover(&mut h, target + DVec3::X * 3.1);
+    let point = h.app.snap.unwrap().point;
+    assert!((point - target).cross(DVec3::X).length() < 1e-7);
+    assert!((point.x - 5.).abs() < 1e-7);
+}
+
+#[test]
+fn grid_snapping_shapes_stay_on_each_locked_plane() {
+    for axis in [Axis::X, Axis::Y, Axis::Z] {
+        let mut h = Harness::new();
+        h.app.doc.snap_to_geometry = false;
+        h.app.doc.snap_to_axes = false;
+        h.app.snap_to_grid = true;
+        h.app.set_tool(Tool::Rectangle);
+        h.click(h.at(DVec3::ZERO));
+        h.app.set_axis_lock(Some(axis), &h.ctx);
+        let drawing = h.app.drawing.as_ref().unwrap();
+        let (origin, u, v) = (drawing.origin, drawing.u, drawing.v);
+        hover(&mut h, origin + u * 2.3 + v * 1.7);
+        let point = h.app.snap.unwrap().point;
+        assert!(point.distance(origin + u * 2. + v * 2.) < 1e-7);
+        assert!((point - origin).dot(axis.vector()).abs() < 1e-7);
+    }
+}
+
+#[test]
+fn grid_snapping_move_and_measurement_use_grid_points() {
+    let mut h = Harness::new();
+    h.app.doc.snap_to_geometry = false;
+    h.app.doc.snap_to_axes = false;
+    h.app.snap_to_grid = true;
+    let edge = h.app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    h.app.selected.insert(edge);
+    h.app.set_tool(Tool::Move);
+    h.app.begin_modeling(h.at(DVec3::ZERO), &h.ctx);
+    hover(&mut h, DVec3::new(2.3, -1.7, 0.));
+    let edit = h.app.modeling.as_ref().unwrap();
+    assert!(edit.direction.distance(DVec3::new(2., -2., 0.)) < 1e-7);
+    h.key(Key::Escape);
+    h.app.set_tool(Tool::TapeMeasure);
+    hover(&mut h, DVec3::new(2.3, -1.7, 0.));
+    assert!(h.app.snap.unwrap().point.distance(DVec3::new(2., -2., 0.)) < 1e-7);
+}

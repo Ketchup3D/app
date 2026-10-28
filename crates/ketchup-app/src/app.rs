@@ -223,6 +223,7 @@ pub struct KetchupApp {
     focus_outliner_search: bool,
     line_start: Option<DVec3>,
     snap: Option<Snap>,
+    snap_to_grid: bool,
     drawing_reference: Option<drawing_inference::DrawingReference>,
     drawing_guide: Option<AxisGuide>,
     drawing_axis_guides: Vec<AxisGuide>,
@@ -344,6 +345,7 @@ impl KetchupApp {
             focus_outliner_search: false,
             line_start: None,
             snap: None,
+            snap_to_grid: false,
             drawing_reference: None,
             drawing_guide: None,
             drawing_axis_guides: vec![],
@@ -686,6 +688,18 @@ impl KetchupApp {
         self.doc.camera.target = DVec3::ZERO;
         self.changed(ctx);
     }
+    fn stop_drawing(&mut self) {
+        self.drawing_reference = None;
+        self.drawing_guide = None;
+        self.drawing_axis_guides.clear();
+        self.drawing_projection = None;
+        self.drawing = None;
+        self.gesture = None;
+        self.line_start = None;
+        self.snap = None;
+        self.lock = None;
+        self.length_input.clear();
+    }
     fn commit_line(&mut self, ctx: &egui::Context, precise: bool) {
         self.refresh_snap(ctx);
         let Some(start) = self.line_start else {
@@ -714,10 +728,15 @@ impl KetchupApp {
         let before = self.doc.model.clone();
         match self.doc.model.add_edge(start, end) {
             Ok(_) => {
+                let closed_shape = self.doc.model.faces.len() > before.faces.len();
                 self.finish_edit("Draw line", before, ctx);
-                self.line_start = Some(end);
-                self.length_input.clear();
-                self.refresh_snap(ctx);
+                if closed_shape {
+                    self.stop_drawing();
+                } else {
+                    self.line_start = Some(end);
+                    self.length_input.clear();
+                    self.refresh_snap(ctx);
+                }
             }
             Err(message) => self.say(ctx, message),
         }
@@ -937,10 +956,7 @@ impl KetchupApp {
             before,
             ctx,
         );
-        self.drawing = None;
-        self.snap = None;
-        self.gesture = None;
-        self.length_input.clear();
+        self.stop_drawing();
     }
     fn begin_modeling(&mut self, pos: Pos2, ctx: &egui::Context) {
         self.last_move_copy = None;
@@ -1108,7 +1124,12 @@ impl KetchupApp {
                     self.doc.snap_to_geometry,
                     self.doc.snap_to_axes,
                 ) {
-                    edit.direction = inference.snap.point - edit.anchor;
+                    let snap = if self.snap_to_grid {
+                        grid::snap(inference.snap, grid::spacing(&self.doc.camera), None)
+                    } else {
+                        inference.snap
+                    };
+                    edit.direction = snap.point - edit.anchor;
                     edit.guides = inference.guides;
                 }
                 edit.direction.length()
@@ -1314,10 +1335,6 @@ impl KetchupApp {
             }
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            self.drawing_reference = None;
-            self.drawing_guide = None;
-            self.drawing_axis_guides.clear();
-            self.drawing_projection = None;
             let solid_operation = self.solid_first.take().is_some();
             self.flip_hover = None;
             let measurement_operation = self.measurement.take().is_some();
@@ -1339,13 +1356,8 @@ impl KetchupApp {
             }
             self.move_copy = false;
             self.last_move_copy = None;
-            self.drawing = None;
+            self.stop_drawing();
             self.modeling = None;
-            self.gesture = None;
-            self.line_start = None;
-            self.snap = None;
-            self.lock = None;
-            self.length_input.clear();
             self.notice = None;
             self.help = false;
             self.paste_preview = None;
@@ -2679,9 +2691,6 @@ impl KetchupApp {
                 },
                 self.doc.snap_to_axes,
             );
-            if let (Some(preview), Some(snap)) = (&mut self.paste_preview, self.snap) {
-                preview.point = snap.point;
-            }
             if self.drawing.is_some() && self.paste_preview.is_none() {
                 self.snap = self.drawing_snap(pos);
                 self.align_drawing_plane();
@@ -2689,6 +2698,10 @@ impl KetchupApp {
             self.update_drawing_inference(pos);
             if self.paste_preview.is_none() {
                 self.align_drawing_plane();
+            }
+            self.apply_grid_snap();
+            if let (Some(preview), Some(snap)) = (&mut self.paste_preview, self.snap) {
+                preview.point = snap.point;
             }
         }
         if self.modeling.is_some() {
@@ -3237,6 +3250,12 @@ impl KetchupApp {
             Tool::Line => egui::vec2(-0.95, 0.95),
             _ => Vec2::ZERO,
         } * (size * 0.36);
+        // Keep Dimensions group icons clear of the focus marker.
+        let offset = if tool.is_measuring() {
+            egui::vec2(15., 15.)
+        } else {
+            Vec2::ZERO
+        };
         let painter = ctx
             .layer_painter(egui::LayerId::new(
                 egui::Order::Tooltip,
@@ -3246,7 +3265,7 @@ impl KetchupApp {
         ctx.set_cursor_icon(egui::CursorIcon::None);
         icons::tool(
             &painter,
-            Rect::from_center_size(pos - hotspot, Vec2::splat(size)),
+            Rect::from_center_size(pos - hotspot + offset, Vec2::splat(size)),
             tool,
         );
     }
@@ -4001,7 +4020,7 @@ impl KetchupApp {
                 .layout_no_wrap("▾".into(), FontId::proportional(12.), colors.muted);
         let response = ui
             .add(egui::Button::new("").min_size(egui::vec2(chevron.size().x + 40., 32.)))
-            .on_hover_text("Configure object and axis snapping");
+            .on_hover_text("Configure object, axis, and grid snapping");
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Snapping"));
         icons::line_icon(
             ui.painter(),
@@ -4027,9 +4046,14 @@ impl KetchupApp {
                 let axes_changed = Self::menu_checkbox(ui, &mut self.doc.snap_to_axes, "Snap to axes")
                     .on_hover_text("Automatically align drawing with the red, green, and blue axes. Hover an endpoint, midpoint, or edge to acquire axes through that position. Arrow keys can still lock an axis when this is off.")
                     .changed();
-                if objects_changed || axes_changed {
+                let grid_changed = Self::menu_checkbox(ui, &mut self.snap_to_grid, "Snap to grid")
+                    .on_hover_text("Snap points and moves to the grid spacing at the current zoom. Object targets and axis locks take precedence.")
+                    .changed();
+                if objects_changed || axes_changed || grid_changed {
                     self.snap = None;
-                    self.changed(ui.ctx());
+                    if objects_changed || axes_changed {
+                        self.changed(ui.ctx());
+                    }
                 }
             });
     }

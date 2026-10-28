@@ -11,6 +11,8 @@ Every future user-facing option, setting, tool choice, and expandable section th
 
 # Release workflow
 
+Whenever the user asks to deploy, treat it as a request to push a new version tag and follow this release workflow. Unless the user specifies a version or bump type, increment the minor version and reset the patch version to zero.
+
 Whenever the user asks to push a new version tag:
 
 1. Prepare user-facing release notes for the new version in `assets/release-notes.json` first, using the changes since the previous release. Keep releases newest first, preserve older entries, and include the version, release date, title, and categorized changes. This file powers Help → Release notes and the GitHub Release description.

@@ -1351,6 +1351,13 @@ fn close_snapped_outline_then_select_and_delete_face_or_edge() {
     h.click(h.at(DVec3::ZERO) + egui::vec2(3., 2.));
     assert_eq!(h.app.doc.model.faces.len(), 1);
     assert_eq!(h.app.doc.model.edges.len(), 4);
+    assert!(h.app.line_start.is_none());
+    assert!(h.app.gesture.is_none());
+    assert_eq!(h.app.tool, Tool::Line);
+    // The next click starts a fresh line, just as it would after Escape.
+    h.click(h.at(DVec3::new(6., 1., 0.)));
+    assert_eq!(h.app.doc.model.edges.len(), 4);
+    assert!(h.app.line_start.is_some());
     let face = *h.app.doc.model.faces.keys().next().unwrap();
     h.key(Key::Space);
     h.click(h.at(DVec3::new(2., 1.5, 0.)));
@@ -1372,6 +1379,40 @@ fn close_snapped_outline_then_select_and_delete_face_or_edge() {
     h.key(Key::Delete);
     assert_eq!(h.app.doc.model.edges.len(), 3);
     assert!(h.app.doc.model.faces.is_empty());
+}
+
+#[test]
+fn closing_a_shape_against_existing_geometry_stops_drawing_like_escape() {
+    let mut h = Harness::new();
+    let a = DVec3::ZERO;
+    let b = DVec3::X * 4.;
+    let c = DVec3::new(4., 3., 0.);
+    h.app.doc.model.add_edge(a, b).unwrap();
+    h.app.doc.model.add_edge(b, c).unwrap();
+    h.app.set_tool(Tool::Line);
+    h.click(h.at(c));
+    h.click(h.at(DVec3::Y * 3.));
+    assert!(
+        h.app.line_start.is_some(),
+        "Open outlines must keep drawing"
+    );
+    assert!(h.app.doc.model.faces.is_empty());
+    h.app.set_axis_lock(Some(Axis::Y), &h.ctx);
+    h.click(h.at(a));
+    assert_eq!(h.app.doc.model.faces.len(), 1);
+    assert_eq!(h.app.doc.model.edges.len(), 4);
+    assert!(h.app.line_start.is_none());
+    assert!(h.app.lock.is_none());
+    assert!(h.app.drawing.is_none());
+    assert!(h.app.length_input.is_empty());
+    assert_eq!(h.app.tool, Tool::Line);
+    assert_eq!(h.app.history.undo_label(), Some("Draw line"));
+    h.app.undo(&h.ctx, false);
+    assert_eq!(h.app.doc.model.edges.len(), 3);
+    assert!(h.app.doc.model.faces.is_empty());
+    h.app.undo(&h.ctx, true);
+    assert_eq!(h.app.doc.model.faces.len(), 1);
+    assert!(h.app.line_start.is_none());
 }
 
 #[test]

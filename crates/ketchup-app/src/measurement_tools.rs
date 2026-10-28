@@ -83,6 +83,7 @@ impl KetchupApp {
             }
         }
         self.update_drawing_inference(pos);
+        self.apply_grid_snap();
     }
 
     pub(super) fn measurement_click(&mut self, pos: Pos2, ctx: &egui::Context) {

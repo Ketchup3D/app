@@ -1,4 +1,4 @@
-//! World-anchored grid with zoom-dependent spacing.
+//! Grid rendering and snapping share the same zoom-dependent spacing.
 use super::*;
 
 pub(super) fn spacing(camera: &Camera) -> f64 {
@@ -27,4 +27,48 @@ pub(super) fn lines(camera: &Camera) -> impl Iterator<Item = (DVec3, DVec3, bool
             ),
         ]
     })
+}
+
+pub(super) fn snap(mut snap: Snap, spacing: f64, plane: Option<DVec3>) -> Snap {
+    let round = |value: f64| (value / spacing).round() * spacing;
+    match snap.kind {
+        Inference::Plane => {
+            // Round in the working plane, preserving its elevation and tilt.
+            // World-aligned planes use the same lattice as the visible grid.
+            let normal = plane.unwrap_or(DVec3::Z);
+            let u = (DVec3::X - normal * normal.x)
+                .try_normalize()
+                .unwrap_or(DVec3::Y);
+            let v = normal.cross(u);
+            let x = snap.point.dot(u);
+            let y = snap.point.dot(v);
+            snap.point += u * (round(x) - x) + v * (round(y) - y);
+        }
+        Inference::Axis(axis) | Inference::OnAxis(axis)
+            if plane.is_none_or(|normal| normal.dot(axis.vector()).abs() < 1e-7) =>
+        {
+            // Only the moving coordinate changes, keeping off-grid axis anchors.
+            let direction = axis.vector();
+            let value = snap.point.dot(direction);
+            snap.point += direction * (round(value) - value);
+        }
+        // Exact object targets and intersections of alignment guides win.
+        _ => {}
+    }
+    snap
+}
+
+impl KetchupApp {
+    pub(super) fn apply_grid_snap(&mut self) {
+        if self.snap_to_grid {
+            let plane = self
+                .drawing
+                .as_ref()
+                .map(|drawing| drawing.normal)
+                .or_else(|| self.measurement_plane().map(|(_, normal)| normal));
+            self.snap = self
+                .snap
+                .map(|point| snap(point, spacing(&self.doc.camera), plane));
+        }
+    }
 }

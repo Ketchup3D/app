@@ -130,6 +130,7 @@ impl ToolPreferences {
 struct SnappingPreferences {
     geometry: bool,
     axes: bool,
+    grid: bool,
 }
 
 impl Default for SnappingPreferences {
@@ -137,6 +138,7 @@ impl Default for SnappingPreferences {
         Self {
             geometry: true,
             axes: true,
+            grid: false,
         }
     }
 }
@@ -345,6 +347,10 @@ impl KetchupApp {
             self.doc.snap_to_geometry = snapping.geometry;
             self.doc.snap_to_axes = snapping.axes;
         }
+        self.snap_to_grid = preferences
+            .snapping
+            .as_ref()
+            .is_some_and(|snapping| snapping.grid);
         self.release_notes.last_seen_version = preferences.last_seen_release_notes.clone();
         if let Some(display) = &preferences.display
             && display.valid()
@@ -383,6 +389,7 @@ impl KetchupApp {
             snapping: Some(SnappingPreferences {
                 geometry: self.doc.snap_to_geometry,
                 axes: self.doc.snap_to_axes,
+                grid: self.snap_to_grid,
             }),
             cutting_plan: CuttingPlanPreferences {
                 group_stock: self.project.cutting_plan_group_stock,
@@ -778,9 +785,10 @@ mod preference_tests {
 
     #[test]
     fn each_additional_option_saves_independently_without_a_model_edit() {
-        let options: [(&str, fn(&mut KetchupApp)); 12] = [
+        let options: [(&str, fn(&mut KetchupApp)); 13] = [
             ("object snapping", |app| app.doc.snap_to_geometry = false),
             ("axis snapping", |app| app.doc.snap_to_axes = false),
+            ("grid snapping", |app| app.snap_to_grid = true),
             ("axis lock", |app| app.lock = Some(Axis::Y)),
             ("shortcut filter", |app| app.shortcut_filter = "Move".into()),
             ("stock grouping", |app| {
@@ -839,6 +847,19 @@ mod preference_tests {
                 !storage.flushed,
                 "{name}: unchanged settings must not write every frame"
             );
+        }
+    }
+
+    #[test]
+    fn grid_snapping_defaults_off_for_new_and_older_preferences() {
+        for json in ["{}", r#"{"snapping":{"geometry":false,"axes":true}}"#] {
+            let preferences: InspectorPreferences = serde_json::from_str(json).unwrap();
+            let mut storage = SavedPreferences::default();
+            eframe::set_value(&mut storage, PREFERENCE_KEY, &preferences);
+            let mut app = KetchupApp::with_document(Document::default(), None, true);
+            assert!(!app.snap_to_grid);
+            app.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert!(!app.snap_to_grid);
         }
     }
 
