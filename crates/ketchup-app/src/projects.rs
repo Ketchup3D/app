@@ -77,6 +77,8 @@ impl KetchupApp {
         self.set_tool(Tool::Select);
         egui::DragAndDrop::clear_payload(ctx);
         self.doc = doc;
+        self.viewports
+            .reframe_project(&self.doc.camera, &self.doc.viewport_cameras);
         self.history = History::default();
         self.selected.clear();
         self.outliner_anchor = None;
@@ -194,6 +196,7 @@ impl KetchupApp {
         if self.project.blocked() {
             return;
         }
+        self.sync_viewport_cameras();
         let contents = match serde_json::to_string(&self.doc) {
             Ok(contents) => contents,
             Err(error) => {

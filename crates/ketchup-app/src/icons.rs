@@ -693,7 +693,7 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
                 color,
             );
         }
-        "dimension" => {
+        "dimension" | "units" => {
             let at = |x: f32, y: f32| c + egui::vec2(x, y);
             p.line_segment([at(-6., 0.), at(6., 0.)], s);
             for x in [-6., 6.] {

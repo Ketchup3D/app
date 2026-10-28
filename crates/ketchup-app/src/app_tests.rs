@@ -1,6 +1,8 @@
 use super::*;
 use eframe::App;
 
+#[path = "compass_tests.rs"]
+mod compass;
 #[path = "context_menu_tests.rs"]
 mod context_menus;
 #[path = "drawing_inference_tests.rs"]
@@ -4191,13 +4193,19 @@ fn dimensions_locked_during_selection_or_placement_keep_three_lines_and_a_label(
             );
             assert!(h.app.snap.unwrap().point.distance(b) < 1e-6);
             if lock_stage < 2 {
-                assert_eq!(h.app.measurement_value(), Some(format_length(expected)));
+                assert_eq!(
+                    h.app.measurement_value(),
+                    Some(h.app.doc.display.units.format_length(expected))
+                );
             }
             h.click(second);
             if lock_stage == 2 {
                 h.key(key);
             }
-            assert_eq!(h.app.measurement_value(), Some(format_length(expected)));
+            assert_eq!(
+                h.app.measurement_value(),
+                Some(h.app.doc.display.units.format_length(expected))
+            );
             let points = &h.app.measurement.as_ref().unwrap().points;
             assert_eq!(points.len(), 2);
             assert!(points[0].distance(a) < 1e-6);
@@ -4221,7 +4229,7 @@ fn dimensions_locked_during_selection_or_placement_keep_three_lines_and_a_label(
             let label_at = lines[2][0].lerp(lines[2][1], 0.5);
             assert!(preview.shapes.iter().any(|shape| has_label(
                 &shape.shape,
-                &format_length(expected),
+                &h.app.doc.display.units.format_length(expected),
                 label_at
             )));
 
@@ -4248,7 +4256,7 @@ fn dimensions_locked_during_selection_or_placement_keep_three_lines_and_a_label(
             assert_eq!(placed_lines, lines);
             assert!(placed.shapes.iter().any(|shape| has_label(
                 &shape.shape,
-                &format_length(expected),
+                &h.app.doc.display.units.format_length(expected),
                 label_at
             )));
         }
@@ -4277,7 +4285,10 @@ fn dimensions_axis_lock_updates_preview_and_placement_without_moving_endpoints()
         let endpoints = h.app.measurement.as_ref().unwrap().points.clone();
         h.key(key);
         assert_eq!(h.app.lock, Some(axis));
-        assert_eq!(h.app.measurement_value(), Some(format_length(expected)));
+        assert_eq!(
+            h.app.measurement_value(),
+            Some(h.app.doc.display.units.format_length(expected))
+        );
         assert_eq!(h.app.measurement.as_ref().unwrap().points, endpoints);
         h.click(placement);
         let dimension = h.app.doc.model.dimensions.values().next().unwrap();
@@ -4328,6 +4339,134 @@ fn dimensions_axis_lock_switches_and_clears_during_placement() {
     let dimension = h.app.doc.model.dimensions.values().next().unwrap();
     assert_eq!(dimension.axis, None);
     assert!((dimension.length(&h.app.doc.model) - a.distance(b)).abs() < 1e-6);
+}
+
+#[test]
+fn units_section_controls_change_measurements_without_editing_geometry() {
+    use ketchup_core::{AngleUnit, AreaUnit, LengthUnit, UnitSettings, VolumeUnit};
+
+    let mut h = Harness::new();
+    h.ctx.style_mut_of(h.ctx.theme(), |s| s.animation_time = 0.);
+    h.size.y = 2000.;
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    assert!(text_position(&output, "Entity Info").y < text_position(&output, "Units").y);
+    assert!(text_position(&output, "Units").y < text_position(&output, "Components").y);
+    let model = h.app.doc.model.clone();
+    for (current, choice) in [
+        ("Meters (m)", "Feet (ft)"),
+        ("Square meters (m²)", "Square feet (ft²)"),
+        ("Cubic meters (m³)", "Liters (L)"),
+        ("Degrees (°)", "Radians (rad)"),
+    ] {
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&output, current));
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&output, choice));
+    }
+    assert_eq!(
+        h.app.doc.display.units,
+        UnitSettings {
+            length: LengthUnit::Feet,
+            area: AreaUnit::SquareFeet,
+            volume: VolumeUnit::Liters,
+            angle: AngleUnit::Radians,
+            ..Default::default()
+        }
+    );
+    assert_eq!(h.app.doc.model, model);
+    assert!(!h.app.project.modified);
+
+    let solid = ui_solid_box(&mut h.app.doc.model, DVec3::ZERO, DVec3::ONE);
+    h.app.selected = BTreeSet::from([solid]);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    text_position(&output, "1000.000 L");
+    text_position(&output, "64.583 ft²");
+
+    h.app.set_tool(Tool::TapeMeasure);
+    h.app.measurement = Some(measurement_tools::Measurement {
+        points: vec![DVec3::ZERO, DVec3::X * 0.3048],
+        complete: true,
+        ..Default::default()
+    });
+    assert_eq!(h.app.measurement_value().as_deref(), Some("1.000 ft"));
+    h.app.set_tool(Tool::Protractor);
+    h.app.measurement = Some(measurement_tools::Measurement {
+        points: vec![DVec3::ZERO, DVec3::X, DVec3::Y],
+        complete: true,
+        ..Default::default()
+    });
+    assert_eq!(h.app.measurement_value().as_deref(), Some("1.5708 rad"));
+}
+
+#[test]
+fn precision_controls_independently_update_measurement_displays() {
+    fn control_on_row(shape: &egui::Shape, y: f32) -> Option<Pos2> {
+        match shape {
+            egui::Shape::Text(text)
+                if matches!(text.galley.job.text.as_str(), "0.000" | "0.00") =>
+            {
+                let center = text.pos + text.galley.size() * 0.5;
+                ((center.y - y).abs() < 8.).then_some(center)
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().find_map(|shape| control_on_row(shape, y)),
+            _ => None,
+        }
+    }
+
+    let mut h = Harness::new();
+    h.ctx.style_mut_of(h.ctx.theme(), |s| s.animation_time = 0.);
+    h.size.y = 2000.;
+    let model = h.app.doc.model.clone();
+    for (label, choice) in [
+        ("Length precision", "0"),
+        ("Area precision", "0.0"),
+        ("Volume precision", "0.0000"),
+        ("Angle precision", "0.000000"),
+    ] {
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        let y = text_position(&output, label).y;
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| control_on_row(&shape.shape, y))
+            .unwrap();
+        h.click(pos);
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&output, choice));
+    }
+    assert_eq!(
+        h.app.doc.display.units.precision,
+        ketchup_core::UnitPrecision {
+            length: Some(0),
+            area: Some(1),
+            volume: Some(4),
+            angle: Some(6),
+        }
+    );
+    assert_eq!(h.app.doc.model, model);
+    assert!(!h.app.project.modified);
+
+    let solid = ui_solid_box(&mut h.app.doc.model, DVec3::ZERO, DVec3::ONE);
+    h.app.selected = BTreeSet::from([solid]);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    text_position(&output, "6.0 m²");
+    text_position(&output, "1.0000 m³");
+
+    h.app.set_tool(Tool::TapeMeasure);
+    h.app.measurement = Some(measurement_tools::Measurement {
+        points: vec![DVec3::ZERO, DVec3::X * 1.23456],
+        complete: true,
+        ..Default::default()
+    });
+    assert_eq!(h.app.measurement_value().as_deref(), Some("1 m"));
+    h.app.set_tool(Tool::Protractor);
+    h.app.doc.display.units.angle = ketchup_core::AngleUnit::Radians;
+    h.app.measurement = Some(measurement_tools::Measurement {
+        points: vec![DVec3::ZERO, DVec3::X, DVec3::Y],
+        complete: true,
+        ..Default::default()
+    });
+    assert_eq!(h.app.measurement_value().as_deref(), Some("1.570796 rad"));
 }
 
 #[test]
@@ -4401,6 +4540,7 @@ fn sidebar_headers_reorder_in_memory_and_keep_their_disclosure_state() {
         [
             InspectorSection::Outliner,
             InspectorSection::EntityInfo,
+            InspectorSection::Units,
             InspectorSection::Tags,
             InspectorSection::Components,
             InspectorSection::Display,

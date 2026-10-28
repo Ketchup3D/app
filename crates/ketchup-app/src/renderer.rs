@@ -2,7 +2,7 @@ use eframe::{egui, egui_wgpu, wgpu};
 use egui::{Color32, Rect};
 use ketchup_core::{Camera, CameraView, DVec2, DVec3, Face, Model};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -17,9 +17,16 @@ pub struct SceneCache {
     occlusion: Occlusion,
     edge_surfaces: BTreeMap<(u64, u64), Vec<DVec2>>,
     buffers: BufferPool,
+    gpu_buffers: GpuBufferPool,
 }
 
 type BufferPool = Arc<Mutex<Vec<MeshBuffers>>>;
+type GpuBufferPool = Arc<Mutex<Vec<GpuBuffers>>>;
+
+struct GpuBuffers {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+}
 
 struct MeshBuffers {
     vertices: Vec<Vertex>,
@@ -39,6 +46,7 @@ pub struct Mesh {
     view: CameraView,
     display: ketchup_core::DisplaySettings,
     buffer_pool: Option<BufferPool>,
+    gpu_pool: GpuBufferPool,
 }
 impl Mesh {
     pub fn new(camera: &Camera, size: DVec2) -> Self {
@@ -54,11 +62,13 @@ impl Mesh {
             view: camera.view(size),
             display: ketchup_core::DisplaySettings::default(),
             buffer_pool: None,
+            gpu_pool: Default::default(),
         }
     }
     pub fn cached(camera: &Camera, size: DVec2, cache: &mut SceneCache) -> Self {
         let mut mesh = Self::new(camera, size);
         mesh.buffer_pool = Some(Arc::clone(&cache.buffers));
+        mesh.gpu_pool = Arc::clone(&cache.gpu_buffers);
         if let Ok(mut buffers) = cache.buffers.lock() {
             if let Some(mut buffers) = buffers.pop() {
                 buffers.vertices.clear();
@@ -558,6 +568,8 @@ impl Mesh {
                 indices: self.indices,
                 triangle_ranges: self.triangle_ranges,
                 buffer_pool: self.buffer_pool,
+                gpu_pool: self.gpu_pool,
+                gpu_buffers: OnceLock::new(),
             },
         ));
     }
@@ -1205,10 +1217,6 @@ fn stroke_depth(depth: f64, offset: DVec2, surfaces: &[DVec2]) -> f32 {
 struct Resources {
     face_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
-    buffer: wgpu::Buffer,
-    capacity: u64,
-    index_buffer: wgpu::Buffer,
-    index_capacity: u64,
 }
 pub fn install(cc: &eframe::CreationContext<'_>) -> bool {
     let Some(state) = cc.wgpu_render_state.as_ref() else {
@@ -1230,26 +1238,9 @@ pub(crate) fn install_resources(
     });
     let face_pipeline = create_pipeline(device, &shader, format, true);
     let edge_pipeline = create_pipeline(device, &shader, format, false);
-    let capacity = 4096;
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("KetchUp vertices"),
-        size: capacity,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("KetchUp indices"),
-        size: capacity,
-        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
     renderer.callback_resources.insert(Resources {
         face_pipeline,
         edge_pipeline,
-        buffer,
-        capacity,
-        index_buffer,
-        index_capacity: capacity,
     });
 }
 fn create_pipeline(
@@ -1311,10 +1302,19 @@ struct SceneCallback {
     indices: Vec<u32>,
     triangle_ranges: Vec<std::ops::Range<u32>>,
     buffer_pool: Option<BufferPool>,
+    gpu_pool: GpuBufferPool,
+    gpu_buffers: OnceLock<GpuBuffers>,
 }
 
 impl Drop for SceneCallback {
     fn drop(&mut self) {
+        if let Some(buffers) = self.gpu_buffers.take() {
+            if let Ok(mut pool) = self.gpu_pool.lock() {
+                if pool.len() < 3 {
+                    pool.push(buffers);
+                }
+            }
+        }
         let Some(pool) = &self.buffer_pool else {
             return;
         };
@@ -1340,34 +1340,55 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         _encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        let Some(r) = resources.get_mut::<Resources>() else {
+        if resources.get::<Resources>().is_none() {
             return vec![];
-        };
-        let bytes = (self.vertices.len() * std::mem::size_of::<Vertex>()) as u64;
-        if bytes > r.capacity {
-            r.capacity = bytes.next_power_of_two();
-            r.buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("KetchUp vertices"),
-                size: r.capacity,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
         }
-        if bytes > 0 {
-            queue.write_buffer(&r.buffer, 0, bytemuck::cast_slice(&self.vertices));
+        // Every callback owns its buffers until egui releases it. All prepare
+        // calls precede all paint calls, so a shared buffer would render only
+        // the last camera in every pane. Pool allocations between frames.
+        let buffers = self.gpu_buffers.get_or_init(|| {
+            let vertex_bytes = (self.vertices.len() * std::mem::size_of::<Vertex>()) as u64;
+            let index_bytes = (self.indices.len() * std::mem::size_of::<u32>()) as u64;
+            let cached = self.gpu_pool.lock().ok().and_then(|mut pool| pool.pop());
+            let create = |size: u64, usage, label| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: size.max(4096).next_power_of_two(),
+                    usage,
+                    mapped_at_creation: false,
+                })
+            };
+            let (vertices, indices) = if let Some(cached) = cached {
+                (Some(cached.vertices), Some(cached.indices))
+            } else {
+                (None, None)
+            };
+            GpuBuffers {
+                vertices: vertices
+                    .filter(|buffer| buffer.size() >= vertex_bytes)
+                    .unwrap_or_else(|| {
+                        create(
+                            vertex_bytes,
+                            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            "KetchUp vertices",
+                        )
+                    }),
+                indices: indices
+                    .filter(|buffer| buffer.size() >= index_bytes)
+                    .unwrap_or_else(|| {
+                        create(
+                            index_bytes,
+                            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                            "KetchUp indices",
+                        )
+                    }),
+            }
+        });
+        if !self.vertices.is_empty() {
+            queue.write_buffer(&buffers.vertices, 0, bytemuck::cast_slice(&self.vertices));
         }
-        let index_bytes = (self.indices.len() * std::mem::size_of::<u32>()) as u64;
-        if index_bytes > r.index_capacity {
-            r.index_capacity = index_bytes.next_power_of_two();
-            r.index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("KetchUp indices"),
-                size: r.index_capacity,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        if index_bytes > 0 {
-            queue.write_buffer(&r.index_buffer, 0, bytemuck::cast_slice(&self.indices));
+        if !self.indices.is_empty() {
+            queue.write_buffer(&buffers.indices, 0, bytemuck::cast_slice(&self.indices));
         }
         vec![]
     }
@@ -1383,8 +1404,11 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         if self.vertices.is_empty() {
             return;
         }
-        pass.set_vertex_buffer(0, r.buffer.slice(..));
-        pass.set_index_buffer(r.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        let Some(buffers) = self.gpu_buffers.get() else {
+            return;
+        };
+        pass.set_vertex_buffer(0, buffers.vertices.slice(..));
+        pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
         // Populate depth with faces first, then test edges against that stable
         // surface depth. Grid/overlay depths keep their existing semantics.
         pass.set_pipeline(&r.face_pipeline);
@@ -1678,6 +1702,8 @@ mod tests {
             indices: mesh.indices,
             triangle_ranges: mesh.triangle_ranges,
             buffer_pool: mesh.buffer_pool,
+            gpu_pool: mesh.gpu_pool,
+            gpu_buffers: OnceLock::new(),
         });
         let retained = Arc::clone(&callback);
         drop(callback);
@@ -1691,6 +1717,84 @@ mod tests {
             next.vertices.is_empty() && next.indices.is_empty() && next.triangle_ranges.is_empty()
         );
         assert!(next.vertices.capacity() >= 1000 && next.indices.capacity() >= 1000);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "Requires a GPU adapter; verifies simultaneous viewport uploads and buffer recycling"]
+    fn simultaneous_viewports_own_distinct_gpu_buffers_until_released() {
+        use egui_wgpu::CallbackTrait;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("GPU adapter");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let mut renderer = egui_wgpu::Renderer::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            egui_wgpu::RendererOptions {
+                depth_stencil_format: Some(wgpu::TextureFormat::Depth32Float),
+                ..Default::default()
+            },
+        );
+        install_resources(&device, wgpu::TextureFormat::Rgba8Unorm, &mut renderer);
+        let gpu_pool = GpuBufferPool::default();
+        let callback = || SceneCallback {
+            vertices: vec![Vertex {
+                position: [0., 0., 0.5],
+                color: [255; 4],
+                lateral: 0.,
+            }],
+            indices: vec![0],
+            triangle_ranges: vec![],
+            buffer_pool: None,
+            gpu_pool: gpu_pool.clone(),
+            gpu_buffers: OnceLock::new(),
+        };
+        let first = callback();
+        let second = callback();
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [1000, 700],
+            pixels_per_point: 1.,
+        };
+        let mut encoder = device.create_command_encoder(&Default::default());
+        first.prepare(
+            &device,
+            &queue,
+            &screen,
+            &mut encoder,
+            &mut renderer.callback_resources,
+        );
+        second.prepare(
+            &device,
+            &queue,
+            &screen,
+            &mut encoder,
+            &mut renderer.callback_resources,
+        );
+        let original = first.gpu_buffers.get().unwrap().vertices.clone();
+        assert_ne!(original, second.gpu_buffers.get().unwrap().vertices);
+        assert_ne!(
+            first.gpu_buffers.get().unwrap().indices,
+            second.gpu_buffers.get().unwrap().indices
+        );
+        assert!(gpu_pool.lock().unwrap().is_empty());
+        drop(first);
+        assert_eq!(gpu_pool.lock().unwrap().len(), 1);
+        let third = callback();
+        third.prepare(
+            &device,
+            &queue,
+            &screen,
+            &mut encoder,
+            &mut renderer.callback_resources,
+        );
+        assert_eq!(original, third.gpu_buffers.get().unwrap().vertices);
+        assert_ne!(
+            third.gpu_buffers.get().unwrap().vertices,
+            second.gpu_buffers.get().unwrap().vertices
+        );
     }
 
     fn occluding_rectangle(occlusion: &mut Occlusion, lo: DVec2, hi: DVec2, depth: f64) {

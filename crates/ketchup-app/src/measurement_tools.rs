@@ -199,15 +199,24 @@ impl KetchupApp {
         }
         let points = self.measurement_points();
         if self.tool == Tool::Dimensions {
-            self.dimension_preview()
-                .map(|d| format_length(d.length(&self.doc.model)))
+            self.dimension_preview().map(|d| {
+                self.doc
+                    .display
+                    .units
+                    .format_length(d.length(&self.doc.model))
+            })
         } else if self.tool == Tool::Protractor {
             (points.len() == 3)
                 .then(|| angle_degrees(points[0], points[1], points[2]))
                 .flatten()
-                .map(|angle| format!("{angle:.2}°"))
+                .map(|angle| self.doc.display.units.format_angle(angle))
         } else {
-            (points.len() >= 2).then(|| format_length(points[0].distance(points[1])))
+            (points.len() >= 2).then(|| {
+                self.doc
+                    .display
+                    .units
+                    .format_length(points[0].distance(points[1]))
+            })
         }
     }
     pub(super) fn measurement_status(&self) -> &'static str {
@@ -285,7 +294,14 @@ impl KetchupApp {
                 colors.ink
             };
             shapes.extend(dimension_shapes(
-                mesh, p, camera, rect, model, dimension, color,
+                mesh,
+                p,
+                camera,
+                rect,
+                model,
+                dimension,
+                color,
+                self.doc.display.units,
             ));
         }
         if let Some(preview) = &self.paste_preview {
@@ -315,6 +331,7 @@ impl KetchupApp {
                     model,
                     &dimension,
                     colors.green,
+                    self.doc.display.units,
                 ));
             }
         }
@@ -328,6 +345,7 @@ impl KetchupApp {
                     model,
                     &dimension,
                     self.lock.map(axis_color).unwrap_or(colors.green),
+                    self.doc.display.units,
                 ));
             }
         }
@@ -368,7 +386,7 @@ impl KetchupApp {
                         measurement_label(
                             p,
                             mid + egui::vec2(0., -14.),
-                            format!("{angle:.2}°"),
+                            self.doc.display.units.format_angle(angle),
                             colors.green,
                         );
                     }
@@ -380,7 +398,10 @@ impl KetchupApp {
                 measurement_label(
                     p,
                     mid + egui::vec2(0., -14.),
-                    format_length(points[0].distance(points[1])),
+                    self.doc
+                        .display
+                        .units
+                        .format_length(points[0].distance(points[1])),
                     colors.green,
                 );
             }
@@ -417,6 +438,7 @@ fn dimension_shapes(
     model: &Model,
     d: &Dimension,
     color: Color32,
+    units: ketchup_core::UnitSettings,
 ) -> Vec<egui::Shape> {
     let points = d.layout(model);
     let size = dv(rect.size());
@@ -448,7 +470,7 @@ fn dimension_shapes(
     let (bounds, label) = measurement_label_shape(
         p,
         rect.min + pv(midpoint),
-        format_length(d.length(model)),
+        units.format_length(d.length(model)),
         color,
     );
     shapes.extend(mesh.annotation_label(p, rect, center, bounds, label));

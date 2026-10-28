@@ -1,5 +1,7 @@
 use super::*;
-use ketchup_core::{DisplaySettings, FaceStyle, Projection};
+use ketchup_core::{
+    AngleUnit, AreaUnit, DisplaySettings, FaceStyle, LengthUnit, Projection, VolumeUnit,
+};
 
 #[path = "view_controls.rs"]
 mod view_controls;
@@ -30,6 +32,7 @@ pub(super) struct InspectorPreferences {
     last_seen_release_notes: Option<String>,
     display: Option<DisplaySettings>,
     camera: Option<CameraPreferences>,
+    viewports: viewports::Preferences,
     screenshot: crate::screenshots::Settings,
     sections: std::collections::BTreeMap<String, bool>,
     scroll_positions: std::collections::BTreeMap<String, [f32; 2]>,
@@ -51,6 +54,7 @@ impl Default for InspectorPreferences {
             last_seen_release_notes: None,
             display: None,
             camera: None,
+            viewports: viewports::Preferences::default(),
             screenshot: Default::default(),
             sections: Default::default(),
             scroll_positions: Default::default(),
@@ -165,7 +169,7 @@ impl Default for CuttingPlanPreferences {
 // project never inherits the previous model's position or scale.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-struct CameraPreferences {
+pub(super) struct CameraPreferences {
     projection: Projection,
     fov: f64,
     yaw: f64,
@@ -179,7 +183,7 @@ impl Default for CameraPreferences {
 }
 
 impl CameraPreferences {
-    fn capture(camera: &Camera) -> Self {
+    pub(super) fn capture(camera: &Camera) -> Self {
         Self {
             projection: camera.projection,
             fov: camera.fov,
@@ -188,7 +192,7 @@ impl CameraPreferences {
         }
     }
 
-    fn restore(&self, camera: &mut Camera) {
+    pub(super) fn restore(&self, camera: &mut Camera) {
         let candidate = Camera {
             projection: self.projection,
             fov: self.fov,
@@ -360,6 +364,11 @@ impl KetchupApp {
         if let Some(camera) = &preferences.camera {
             camera.restore(&mut self.doc.camera);
         }
+        self.viewports = viewports::Workspace::restore(
+            &preferences.viewports,
+            &mut self.doc.camera,
+            &self.doc.viewport_cameras,
+        );
         ctx.data_mut(|data| {
             data.insert_temp(
                 scroll_memory_id(),
@@ -399,6 +408,7 @@ impl KetchupApp {
             last_seen_release_notes: self.release_notes.last_seen_version.clone(),
             display: Some(self.doc.display.clone()),
             camera: Some(CameraPreferences::capture(&self.doc.camera)),
+            viewports: self.viewports.capture(&self.doc.camera),
             screenshot: self.screenshot.settings.clone(),
             sections: ctx.data_mut(|data| {
                 data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
@@ -444,9 +454,12 @@ pub(super) enum InspectorSection {
     Tags,
     Display,
     View,
+    Units,
 }
 
-pub(super) fn restore_order(storage: Option<&dyn eframe::Storage>) -> [InspectorSection; 6] {
+pub(super) fn restore_order(
+    storage: Option<&dyn eframe::Storage>,
+) -> [InspectorSection; InspectorSection::COUNT] {
     let Some(saved) = storage.and_then(|storage| {
         eframe::get_value::<Vec<InspectorSection>>(storage, ORDER_PREFERENCE_KEY)
             // The original preference used a fixed five-element RON tuple.
@@ -464,7 +477,12 @@ pub(super) fn restore_order(storage: Option<&dyn eframe::Storage>) -> [Inspector
         }
         order.push(section);
     }
-    for section in InspectorSection::ALL {
+    // Append missing sections in introduction order, regardless of their default position.
+    for section in InspectorSection::ALL
+        .into_iter()
+        .filter(|section| *section != InspectorSection::Units)
+        .chain([InspectorSection::Units])
+    {
         if !order.contains(&section) {
             order.push(section);
         }
@@ -472,7 +490,10 @@ pub(super) fn restore_order(storage: Option<&dyn eframe::Storage>) -> [Inspector
     order.try_into().unwrap_or(InspectorSection::ALL)
 }
 
-pub(super) fn save_order(order: &[InspectorSection; 6], storage: &mut dyn eframe::Storage) {
+pub(super) fn save_order(
+    order: &[InspectorSection; InspectorSection::COUNT],
+    storage: &mut dyn eframe::Storage,
+) {
     eframe::set_value(storage, ORDER_PREFERENCE_KEY, &order.to_vec());
     storage.flush();
 }
@@ -1415,12 +1436,128 @@ mod preference_tests {
             InspectorSection::EntityInfo,
             InspectorSection::Components,
             InspectorSection::View,
+            InspectorSection::Units,
         ];
         let mut storage = SavedPreferences::default();
         eframe::set_value(&mut storage, ORDER_PREFERENCE_KEY, &original);
         assert_eq!(restore_order(Some(&storage)), expected);
         save_order(&expected, &mut storage);
         assert_eq!(restore_order(Some(&storage)), expected);
+    }
+
+    #[test]
+    fn units_default_below_entity_info_and_append_to_existing_layouts() {
+        let defaults = restore_order(None);
+        let entity = defaults
+            .iter()
+            .position(|s| *s == InspectorSection::EntityInfo)
+            .unwrap();
+        assert_eq!(defaults[entity + 1], InspectorSection::Units);
+
+        let previous = vec![
+            InspectorSection::View,
+            InspectorSection::Tags,
+            InspectorSection::Display,
+            InspectorSection::Outliner,
+            InspectorSection::EntityInfo,
+            InspectorSection::Components,
+        ];
+        let mut storage = SavedPreferences::default();
+        eframe::set_value(&mut storage, ORDER_PREFERENCE_KEY, &previous);
+        let restored = restore_order(Some(&storage));
+        assert_eq!(&restored[..previous.len()], previous.as_slice());
+        assert_eq!(restored.last(), Some(&InspectorSection::Units));
+    }
+
+    #[test]
+    fn unit_choices_and_disclosure_save_immediately_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let model = app.doc.model.clone();
+        let units = ketchup_core::UnitSettings {
+            length: LengthUnit::Inches,
+            area: AreaUnit::SquareFeet,
+            volume: VolumeUnit::Liters,
+            angle: AngleUnit::Radians,
+            ..Default::default()
+        };
+        app.doc.display.units = units;
+        set_section_open(&ctx, "units", false);
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        assert_eq!(app.doc.model, model);
+
+        let restored_ctx = egui::Context::default();
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+        assert_eq!(restored.doc.display.units, units);
+        let id = egui::Id::unique("restored_units");
+        restore_section(&restored_ctx, id, "units", true);
+        assert!(
+            !egui::collapsing_header::CollapsingState::load(&restored_ctx, id)
+                .unwrap()
+                .is_open()
+        );
+        set_section_open(&restored_ctx, "units", true);
+        restored.persist_inspector_changes(&restored_ctx, Some(&mut storage), false);
+        let reloaded_ctx = egui::Context::default();
+        restored.restore_inspector_preferences(&reloaded_ctx, Some(&storage));
+        restore_section(&reloaded_ctx, id, "units", false);
+        assert!(
+            egui::collapsing_header::CollapsingState::load(&reloaded_ctx, id)
+                .unwrap()
+                .is_open()
+        );
+
+        let older: InspectorPreferences =
+            serde_json::from_str(r#"{"display":{"axes":false}}"#).unwrap();
+        assert_eq!(
+            older.display.unwrap().units,
+            ketchup_core::UnitSettings::default()
+        );
+    }
+
+    #[test]
+    fn precision_preferences_save_without_a_model_edit_and_restore_each_control() {
+        use ketchup_core::UnitPrecision;
+
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let model = app.doc.model.clone();
+        let mut storage = SavedPreferences::default();
+        for precision in [
+            UnitPrecision {
+                length: Some(6),
+                ..Default::default()
+            },
+            UnitPrecision {
+                area: Some(1),
+                ..Default::default()
+            },
+            UnitPrecision {
+                volume: Some(0),
+                ..Default::default()
+            },
+            UnitPrecision {
+                angle: Some(5),
+                ..Default::default()
+            },
+        ] {
+            app.doc.display.units.precision = precision;
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            assert_eq!(app.doc.model, model);
+
+            let restored_ctx = egui::Context::default();
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+            assert_eq!(restored.doc.display.units.precision, precision);
+            assert!(!restored.project.modified);
+        }
     }
 
     #[test]
@@ -1440,6 +1577,7 @@ mod preference_tests {
                 InspectorSection::EntityInfo,
                 InspectorSection::Components,
                 InspectorSection::View,
+                InspectorSection::Units,
             ]
         );
     }
@@ -1587,9 +1725,12 @@ mod preference_tests {
 }
 
 impl InspectorSection {
-    pub(super) const ALL: [Self; 6] = [
+    pub(super) const COUNT: usize = 7;
+
+    pub(super) const ALL: [Self; Self::COUNT] = [
         Self::Outliner,
         Self::EntityInfo,
+        Self::Units,
         Self::Components,
         Self::Tags,
         Self::Display,
@@ -1604,6 +1745,7 @@ impl InspectorSection {
             Self::Tags => "Tags",
             Self::Display => "Display",
             Self::View => "View",
+            Self::Units => "Units",
         }
     }
 
@@ -1615,6 +1757,7 @@ impl InspectorSection {
             Self::Tags => "tags",
             Self::Display => "display",
             Self::View => "view",
+            Self::Units => "units",
         }
     }
 
@@ -1625,8 +1768,8 @@ impl InspectorSection {
 
 #[derive(Default)]
 pub(super) struct InspectorLayout {
-    heights: [f32; 6],
-    header_heights: [f32; 6],
+    heights: [f32; InspectorSection::COUNT],
+    header_heights: [f32; InspectorSection::COUNT],
     drag: Option<InspectorDrag>,
     floating: Option<InspectorSection>,
 }
@@ -1634,7 +1777,7 @@ pub(super) struct InspectorLayout {
 struct InspectorDrag {
     section: InspectorSection,
     grab_offset: Vec2,
-    order: [InspectorSection; 6],
+    order: [InspectorSection; InspectorSection::COUNT],
 }
 
 impl InspectorLayout {
@@ -1793,6 +1936,7 @@ fn inspector_icon_color(ui: &egui::Ui, id: &str) -> Color32 {
     let (light, dark) = match id {
         "outliner" => ([48, 111, 173], [131, 185, 239]),
         "entity_info" => ([17, 129, 133], [103, 207, 211]),
+        "units" => ([67, 131, 68], [143, 205, 144]),
         "components" => ([126, 83, 183], [188, 153, 239]),
         "tags" => ([160, 111, 22], [230, 190, 104]),
         "display" => ([198, 76, 58], [246, 142, 125]),
@@ -1996,6 +2140,7 @@ impl KetchupApp {
                         InspectorSection::Tags => self.tags_contents(ui),
                         InspectorSection::Display => self.display_contents(ui),
                         InspectorSection::View => self.view_contents(ui),
+                        InspectorSection::Units => self.units_contents(ui),
                     }
                 });
             let header = panel
@@ -2336,6 +2481,130 @@ impl KetchupApp {
         }
     }
 
+    fn units_contents(&mut self, ui: &mut egui::Ui) {
+        fn precision_picker(
+            ui: &mut egui::Ui,
+            id: &'static str,
+            label: &str,
+            precision: &mut Option<u8>,
+            default: u8,
+        ) {
+            let name = |digits: u8| format!("{:.*}", digits as usize, 0.);
+            let current = precision
+                .unwrap_or(default)
+                .min(ketchup_core::units::MAX_DECIMAL_PLACES);
+            ui.horizontal(|ui| {
+                let label = ui.label(label);
+                egui::ComboBox::from_id_salt(id)
+                    .selected_text(name(current))
+                    .width(ui.available_width())
+                    .truncate()
+                    .show_ui(ui, |ui| {
+                        for digits in 0..=ketchup_core::units::MAX_DECIMAL_PLACES {
+                            if ui
+                                .selectable_label(current == digits, name(digits))
+                                .clicked()
+                            {
+                                *precision = Some(digits);
+                            }
+                        }
+                    })
+                    .response
+                    .labelled_by(label.id);
+            });
+        }
+
+        fn picker<T: Copy + PartialEq>(
+            ui: &mut egui::Ui,
+            id: &'static str,
+            label: &str,
+            selected: &mut T,
+            choices: &[T],
+            name: impl Fn(T) -> &'static str,
+        ) {
+            let label = ui.label(label);
+            egui::ComboBox::from_id_salt(id)
+                .selected_text(name(*selected))
+                .width(ui.available_width())
+                .truncate()
+                .show_ui(ui, |ui| {
+                    for &choice in choices {
+                        ui.selectable_value(selected, choice, name(choice));
+                    }
+                })
+                .response
+                .labelled_by(label.id);
+        }
+
+        let units = &mut self.doc.display.units;
+        picker(
+            ui,
+            "units_length",
+            "Length",
+            &mut units.length,
+            LengthUnit::ALL,
+            LengthUnit::label,
+        );
+        precision_picker(
+            ui,
+            "units_length_precision",
+            "Length precision",
+            &mut units.precision.length,
+            3,
+        );
+        picker(
+            ui,
+            "units_area",
+            "Area",
+            &mut units.area,
+            AreaUnit::ALL,
+            AreaUnit::label,
+        );
+        precision_picker(
+            ui,
+            "units_area_precision",
+            "Area precision",
+            &mut units.precision.area,
+            3,
+        );
+        picker(
+            ui,
+            "units_volume",
+            "Volume",
+            &mut units.volume,
+            VolumeUnit::ALL,
+            VolumeUnit::label,
+        );
+        precision_picker(
+            ui,
+            "units_volume_precision",
+            "Volume precision",
+            &mut units.precision.volume,
+            3,
+        );
+        picker(
+            ui,
+            "units_angle",
+            "Angle",
+            &mut units.angle,
+            AngleUnit::ALL,
+            AngleUnit::label,
+        );
+        precision_picker(
+            ui,
+            "units_angle_precision",
+            "Angle precision",
+            &mut units.precision.angle,
+            units.angle.default_precision(),
+        );
+        ui.add_space(4.);
+        ui.label(
+            RichText::new("Precision controls displayed decimal places. Lengths entered without a unit use the selected length unit.")
+                .small()
+                .color(Palette::for_ui(ui).muted),
+        );
+    }
+
     fn display_contents(&mut self, ui: &mut egui::Ui) {
         let before = self.doc.display.clone();
         let d = &mut self.doc.display;
@@ -2441,7 +2710,10 @@ impl KetchupApp {
             crate::environment::controls(ui, d);
         });
         if ui.button("Reset display").clicked() {
-            *d = DisplaySettings::default();
+            *d = DisplaySettings {
+                units: d.units,
+                ..DisplaySettings::default()
+            };
         }
         if before != self.doc.display {
             self.changed(ui.ctx());

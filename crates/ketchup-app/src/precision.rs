@@ -1,16 +1,18 @@
 //! Typed dimensions are converted to meters before reaching geometry operations.
 use super::*;
+use ketchup_core::LengthUnit;
 
 pub(super) const MAX_INPUT_LEN: usize = 512;
 const FORMULA_EXAMPLE: &str = "Enter a formula such as 60cm - 89mm or (1m + 20cm) / 2";
 
-pub(super) fn length(input: &str) -> Result<f64, &'static str> {
-    let value = Formula::parse(input, true)?;
-    if matches!(value.dimension, 0 | 1) {
-        Ok(value.number)
-    } else {
-        Err("The formula must produce a length, not an area or volume")
+pub(super) fn length(input: &str, unit: LengthUnit) -> Result<f64, &'static str> {
+    let mut value = Formula::parse(input, true, unit.factor())?;
+    match value.dimension {
+        0 => value.number *= unit.factor(),
+        1 => {}
+        _ => return Err("The formula must produce a length, not an area or volume"),
     }
+    value.finite().map(|value| value.number)
 }
 
 fn unit_factor(unit: &str) -> Result<f64, &'static str> {
@@ -29,7 +31,7 @@ fn unit_factor(unit: &str) -> Result<f64, &'static str> {
 #[derive(Clone, Copy)]
 struct Quantity {
     number: f64,
-    // Bare numbers are scalars in products and default to meters in sums.
+    // Bare numbers are scalars in products and use the selected unit in sums.
     dimension: i32,
 }
 
@@ -48,10 +50,15 @@ struct Formula<'a> {
     cursor: usize,
     depth: usize,
     allow_units: bool,
+    default_length_factor: f64,
 }
 
 impl<'a> Formula<'a> {
-    fn parse(input: &'a str, allow_units: bool) -> Result<Quantity, &'static str> {
+    fn parse(
+        input: &'a str,
+        allow_units: bool,
+        default_length_factor: f64,
+    ) -> Result<Quantity, &'static str> {
         if input.len() > MAX_INPUT_LEN {
             return Err("The formula is too long");
         }
@@ -60,6 +67,7 @@ impl<'a> Formula<'a> {
             cursor: 0,
             depth: 0,
             allow_units,
+            default_length_factor,
         };
         let value = parser.sum()?;
         if parser.peek().is_some() {
@@ -87,6 +95,11 @@ impl<'a> Formula<'a> {
             let mut rhs = self.product()?;
             if value.dimension != rhs.dimension {
                 if matches!((value.dimension, rhs.dimension), (0, 1) | (1, 0)) {
+                    if value.dimension == 0 {
+                        value.number *= self.default_length_factor;
+                    } else {
+                        rhs.number *= self.default_length_factor;
+                    }
                     value.dimension = 1;
                     rhs.dimension = 1;
                 } else {
@@ -204,8 +217,8 @@ impl<'a> Formula<'a> {
     }
 }
 
-pub(super) fn positive_length(input: &str) -> Result<f64, &'static str> {
-    let value = length(input)?;
+pub(super) fn positive_length(input: &str, unit: LengthUnit) -> Result<f64, &'static str> {
+    let value = length(input, unit)?;
     if value > 1e-7 && value <= 1e7 {
         Ok(value)
     } else {
@@ -213,11 +226,15 @@ pub(super) fn positive_length(input: &str) -> Result<f64, &'static str> {
     }
 }
 
-pub(super) fn modeling_value(tool: Tool, input: &str) -> Result<f64, &'static str> {
+pub(super) fn modeling_value(
+    tool: Tool,
+    input: &str,
+    unit: LengthUnit,
+) -> Result<f64, &'static str> {
     if tool != Tool::Scale {
-        return length(input);
+        return length(input, unit);
     }
-    Formula::parse(input, false).map(|value| value.number)
+    Formula::parse(input, false, 1.).map(|value| value.number)
 }
 
 impl KetchupApp {
@@ -225,7 +242,7 @@ impl KetchupApp {
         let mut snap = self.snap?;
         if self.tool == Tool::Line
             && let Some(start) = self.line_start
-            && let Ok(length) = positive_length(&self.length_input)
+            && let Ok(length) = positive_length(&self.length_input, self.doc.display.units.length)
             && let Some(direction) = (snap.point - start).try_normalize()
         {
             snap.point = start + direction * length;
@@ -269,15 +286,15 @@ impl KetchupApp {
                     .length_input
                     .split_once(',')
                     .ok_or("Enter width,height, such as 5m,50mm")?;
-                let width = positive_length(width)?;
-                let height = positive_length(height)?;
+                let width = positive_length(width, self.doc.display.units.length)?;
+                let height = positive_length(height, self.doc.display.units.length)?;
                 let direction = |value: f64| if value < 0. { -1. } else { 1. };
                 let a = drawing.u * width * direction(delta.dot(drawing.u));
                 let b = drawing.v * height * direction(delta.dot(drawing.v));
                 Ok(vec![origin, origin + a, origin + a + b, origin + b, origin])
             }
             Tool::Circle | Tool::Polygon => {
-                let radius = positive_length(&self.length_input)?;
+                let radius = positive_length(&self.length_input, self.doc.display.units.length)?;
                 let delta = delta.try_normalize().unwrap_or(drawing.u) * radius;
                 let tangent = drawing.normal.cross(delta);
                 let sides = if self.tool == Tool::Circle {
@@ -293,7 +310,7 @@ impl KetchupApp {
                     .collect())
             }
             Tool::Freehand => {
-                let target = positive_length(&self.length_input)?;
+                let target = positive_length(&self.length_input, self.doc.display.units.length)?;
                 let current: f64 = points.windows(2).map(|p| p[0].distance(p[1])).sum();
                 if current <= 1e-7 {
                     return Err("Draw a stroke before setting its total length");
@@ -311,6 +328,44 @@ impl KetchupApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn length(input: &str) -> Result<f64, &'static str> {
+        super::length(input, LengthUnit::Meters)
+    }
+
+    fn positive_length(input: &str) -> Result<f64, &'static str> {
+        super::positive_length(input, LengthUnit::Meters)
+    }
+
+    fn modeling_value(tool: Tool, input: &str) -> Result<f64, &'static str> {
+        super::modeling_value(tool, input, LengthUnit::Meters)
+    }
+
+    #[test]
+    fn selected_length_units_apply_to_bare_values_but_not_multipliers_or_explicit_units() {
+        for (input, expected) in [
+            ("60", 0.6),
+            ("60 - 8.9", 0.511),
+            ("60 - 89mm", 0.511),
+            ("89mm + 60", 0.689),
+            ("2 * 60", 1.2),
+            ("2 * 60cm", 1.2),
+            ("(60 - 8.9)mm", 0.0511),
+            ("(60 - 89mm) / 2", 0.2555),
+            ("1m", 1.),
+        ] {
+            assert!(
+                (super::length(input, LengthUnit::Centimeters).unwrap() - expected).abs() < 1e-10,
+                "{input}"
+            );
+        }
+        assert_eq!(super::length("2", LengthUnit::Feet), Ok(0.6096));
+        assert_eq!(
+            super::modeling_value(Tool::Scale, "2", LengthUnit::Feet),
+            Ok(2.)
+        );
+        assert!(super::length("1e308", LengthUnit::Kilometers).is_err());
+    }
 
     #[test]
     fn lengths_convert_explicit_units_and_default_to_meters() {

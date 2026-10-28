@@ -98,13 +98,19 @@ impl KetchupApp {
                     if let Some(object) = self.doc.model.objects.get(&id) {
                         Some(object.name.clone())
                     } else if let Some(edge) = self.doc.model.edges.get(&id) {
-                        Some(format_length(self.doc.model.edge_length(edge)))
+                        Some(
+                            self.doc
+                                .display
+                                .units
+                                .format_length(self.doc.model.edge_length(edge)),
+                        )
                     } else {
-                        self.doc
-                            .model
-                            .faces
-                            .get(&id)
-                            .map(|face| format!("{:.3} m²", self.doc.model.face_area(face)))
+                        self.doc.model.faces.get(&id).map(|face| {
+                            self.doc
+                                .display
+                                .units
+                                .format_area(self.doc.model.face_area(face))
+                        })
                     }
                 })
                 .unwrap_or_else(|| "Text".into());

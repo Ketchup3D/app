@@ -352,6 +352,9 @@ pub struct Document {
     pub name: String,
     pub model: Model,
     pub camera: Camera,
+    /// Per-viewport framing belongs to this project, unlike reusable layout preferences.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub viewport_cameras: BTreeMap<u64, Camera>,
     #[serde(default = "enabled")]
     pub snap_to_geometry: bool,
     #[serde(default = "enabled")]
@@ -369,6 +372,7 @@ impl Default for Document {
             name: "Untitled model".into(),
             model: Model::default(),
             camera: Camera::default(),
+            viewport_cameras: BTreeMap::new(),
             snap_to_geometry: true,
             snap_to_axes: true,
             display: crate::DisplaySettings::default(),
@@ -393,7 +397,7 @@ impl Document {
         if !doc.display.valid() {
             return Err("Invalid display settings".into());
         }
-        if !doc.camera.valid() {
+        if !doc.camera.valid() || doc.viewport_cameras.values().any(|camera| !camera.valid()) {
             return Err("Invalid camera".into());
         }
         Ok(doc)

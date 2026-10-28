@@ -128,6 +128,45 @@ fn line_units_preserve_direction_and_do_not_trigger_tool_shortcuts() {
 }
 
 #[test]
+fn bare_line_lengths_use_the_selected_unit_for_preview_and_commit() {
+    let mut h = Harness::new();
+    h.app.doc.display.units.length = ketchup_core::LengthUnit::Centimeters;
+    h.key(Key::L);
+    h.click(h.at(DVec3::ZERO));
+    h.key(Key::ArrowUp);
+    h.frame(
+        vec![egui::Event::PointerMoved(h.at(DVec3::Z))],
+        egui::Modifiers::NONE,
+    );
+    type_dimension(&mut h, "25");
+    let expected = DVec3::Z * 0.25;
+    assert!(h.app.line_preview_snap().unwrap().point.distance(expected) < 1e-7);
+    h.key(Key::Enter);
+    assert_eq!(h.app.doc.model.edges.len(), 1);
+    assert!(h.app.line_start.unwrap().distance(expected) < 1e-7);
+}
+
+#[test]
+fn display_precision_does_not_round_typed_geometry() {
+    let mut h = Harness::new();
+    h.app.doc.display.units.length = ketchup_core::LengthUnit::Centimeters;
+    h.app.doc.display.units.precision.length = Some(0);
+    h.key(Key::L);
+    h.click(h.at(DVec3::ZERO));
+    h.key(Key::ArrowUp);
+    h.frame(
+        vec![egui::Event::PointerMoved(h.at(DVec3::Z))],
+        egui::Modifiers::NONE,
+    );
+    type_dimension(&mut h, "25.123456");
+    let expected = DVec3::Z * 0.25123456;
+    assert!(h.app.line_preview_snap().unwrap().point.distance(expected) < 1e-9);
+    h.key(Key::Enter);
+    assert!(h.app.line_start.unwrap().distance(expected) < 1e-9);
+    assert_eq!(h.app.doc.display.units.format_length(expected.z), "25 cm");
+}
+
+#[test]
 fn rectangles_accept_mixed_units_and_subpixel_dimensions_on_their_drawing_plane() {
     for (input, height) in [
         ("5m,50mm", 0.05),

@@ -178,7 +178,7 @@ impl KetchupApp {
                 .unwrap_or("Connected body");
             ui.label(RichText::new(name).strong());
             if let Ok(volume) = self.doc.model.solid_volume(first) {
-                Self::property(ui, "Volume", &format!("{volume:.3} m³"));
+                Self::property(ui, "Volume", &self.doc.display.units.format_volume(volume));
             }
             if ui.button("Choose first body again").clicked() {
                 self.solid_first = None;

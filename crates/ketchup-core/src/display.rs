@@ -31,6 +31,7 @@ impl FaceStyle {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DisplaySettings {
+    pub units: crate::UnitSettings,
     pub grid: bool,
     pub axes: bool,
     pub guides: bool,
@@ -69,6 +70,7 @@ pub struct DisplaySettings {
 impl Default for DisplaySettings {
     fn default() -> Self {
         Self {
+            units: crate::UnitSettings::default(),
             grid: false,
             axes: true,
             guides: true,
