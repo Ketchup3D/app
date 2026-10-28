@@ -61,8 +61,8 @@ fn groups_twenty_rails_and_two_posts_with_nominal_stock_and_real_cut_lengths() {
         "4x4 nominal",
         "38 mm x 89 mm",
         "89 mm x 89 mm",
-        "600 mm",
-        "2100 mm",
+        "60 cm",
+        "210 cm",
     ] {
         assert!(pdf.contains(text), "Missing {text}");
     }
@@ -144,6 +144,92 @@ fn dimensions_follow_rotation_translation_scaling_and_axis_permutations() {
         let plan = CuttingPlan::collect(&model, &BTreeSet::new()).unwrap();
         assert_eq!(plan.groups[0].dimensions, [760, 1780, 12000]);
         assert!(plan.groups[0].rectangular);
+    }
+}
+
+#[test]
+fn short_steps_keep_the_group_width_and_cut_direction_even_when_selected_alone() {
+    let mut model = Model::default();
+    let mut entities = BTreeSet::new();
+    for (index, length) in [1.2, 1.1, 1., 0.9, 0.8, 0.2].into_iter().enumerate() {
+        entities.extend(model.paste_entities(
+            &blank(DVec3::new(0.038, 0.3, length)),
+            DVec3::X * (index * 2) as f64,
+        ));
+    }
+    let steps = model.make_object(&entities, false, "Steps").unwrap();
+    let short_face = *model.objects[&steps]
+        .entities
+        .iter()
+        .find(|id| {
+            model.faces.get(id).is_some_and(|face| {
+                face.vertices
+                    .iter()
+                    .all(|vertex| model.vertices[vertex].position.x > 9.9)
+            })
+        })
+        .unwrap();
+    // A different hierarchy with the same leaf name has its own orientation.
+    let other = add_board(
+        &mut model,
+        DVec3::new(0.038, 0.3, 0.2),
+        DVec3::X * 20.,
+        "Steps",
+        false,
+    );
+    model
+        .make_object(&BTreeSet::from([other]), false, "Other")
+        .unwrap();
+    // Hidden geometry must not determine the group's cutting direction.
+    let hidden = add_board(
+        &mut model,
+        DVec3::new(0.038, 2., 0.2),
+        DVec3::X * 30.,
+        "Steps",
+        false,
+    );
+    model.hidden.insert(hidden);
+
+    for rotation in [
+        glam::DQuat::IDENTITY,
+        glam::DQuat::from_rotation_y(0.71) * glam::DQuat::from_rotation_z(0.31),
+    ] {
+        let mut rotated = model.clone();
+        for vertex in rotated.vertices.values_mut() {
+            vertex.position = rotation * vertex.position;
+        }
+        let before = rotated.clone();
+        let plan = CuttingPlan::collect(&rotated, &BTreeSet::new()).unwrap();
+        let steps: Vec<_> = plan
+            .groups
+            .iter()
+            .filter(|group| group.parts == ["Steps"])
+            .map(|group| group.dimensions)
+            .collect();
+        assert_eq!(
+            steps,
+            [2000, 8000, 9000, 10000, 11000, 12000].map(|length| [380, 3000, length])
+        );
+        let other = plan
+            .groups
+            .iter()
+            .find(|group| group.parts == ["Other/Steps"])
+            .unwrap();
+        assert_eq!(other.dimensions, [380, 2000, 3000]);
+        let selected = CuttingPlan::collect(&rotated, &BTreeSet::from([short_face])).unwrap();
+        assert_eq!(selected.groups.len(), 1);
+        assert_eq!(selected.groups[0].dimensions, [380, 3000, 2000]);
+        assert_eq!(selected.groups[0].parts, ["Steps"]);
+        assert_eq!(rotated, before, "Planning must never edit the document");
+        for group_stock in [false, true] {
+            let pdf = String::from_utf8(plan.pdf("Steps", false, group_stock)).unwrap();
+            assert!(pdf.contains("(38 mm x 30 cm)"));
+            assert!(pdf.contains("(20 cm)"));
+            if group_stock {
+                assert!(pdf.contains("Custom stock: 38 mm x 30 cm"));
+                assert!(pdf.contains("- 30 cm x 20 cm"));
+            }
+        }
     }
 }
 
@@ -249,8 +335,20 @@ fn open_or_irregular_geometry_is_separated_and_marked_as_a_bounding_blank() {
 
 #[test]
 fn fractional_dimensions_are_retained_and_nominal_labels_never_replace_actual_sizes() {
-    assert_eq!(mm(381), "38.1");
-    assert_eq!(mm(6000), "600");
+    for (tenths, expected) in [
+        (0, "0 mm"),
+        (381, "38.1 mm"),
+        (999, "99.9 mm"),
+        (1000, "100 mm"),
+        (1001, "10.01 cm"),
+        (1010, "10.1 cm"),
+        (1100, "11 cm"),
+        (6000, "60 cm"),
+        (6004, "60.04 cm"),
+        (10000, "100 cm"),
+    ] {
+        assert_eq!(metric_length(tenths), expected);
+    }
     assert_eq!(nominal_stock(381, 889), Some("2x4"));
     assert_eq!(nominal_stock(889, 889), Some("4x4"));
     assert_eq!(
@@ -260,13 +358,18 @@ fn fractional_dimensions_are_retained_and_nominal_labels_never_replace_actual_si
     );
     assert_eq!(nominal_stock(400, 900), None);
     let model = blank(DVec3::new(0.0381, 0.0889, 0.6004));
-    assert_eq!(
-        CuttingPlan::collect(&model, &BTreeSet::new())
-            .unwrap()
-            .groups[0]
-            .dimensions,
-        [381, 889, 6004]
-    );
+    let plan = CuttingPlan::collect(&model, &BTreeSet::new()).unwrap();
+    assert_eq!(plan.groups[0].dimensions, [381, 889, 6004]);
+    for group_stock in [false, true] {
+        let pdf = String::from_utf8(plan.pdf("Fractional cuts", false, group_stock)).unwrap();
+        assert!(pdf.contains("Dimensions in mm or cm"));
+        assert!(pdf.contains("(38.1 mm x 88.9 mm)"));
+        assert!(pdf.contains("(60.04 cm)"));
+        if group_stock {
+            assert!(pdf.contains("Stock: 244 cm x 88.9 mm"));
+            assert!(pdf.contains("- 88.9 mm x 60.04 cm"));
+        }
+    }
 }
 
 #[test]
@@ -492,6 +595,54 @@ fn optional_stock_grouping_combines_different_cuts_and_reports_area_or_linear_to
 }
 
 #[test]
+fn cut_list_sorts_by_group_then_descending_quantity_and_cut_length() {
+    let plan = CuttingPlan {
+        groups: [
+            ("Zeta", 4, 8000),
+            ("Beta", 2, 6000),
+            ("Alpha", 1, 7000),
+            ("Beta", 2, 9000),
+            ("Beta", 3, 5000),
+        ]
+        .into_iter()
+        .map(|(name, quantity, length)| CutGroup {
+            dimensions: [380, 890, length],
+            rectangular: true,
+            parts: vec![name.into(); quantity],
+        })
+        .collect(),
+        skipped: 0,
+    };
+    for group_stock in [false, true] {
+        let pdf = String::from_utf8(plan.pdf_with_layout(
+            "Sorted cuts",
+            false,
+            group_stock,
+            LayoutSettings {
+                board_length_mm: 1000.,
+                ..LayoutSettings::default()
+            },
+        ))
+        .unwrap();
+        let mut remaining = pdf.as_str();
+        for (index, length) in [70, 50, 90, 60, 80].into_iter().enumerate() {
+            remaining = remaining
+                .split_once(&format!("(P{:03})", index + 1))
+                .expect("Part labels follow the sorted rows")
+                .1;
+            let (row, tail) = remaining.split_once(&format!("({length} cm)")).unwrap();
+            assert!(!row.contains("(P00"), "Cut lengths follow the sorted rows");
+            remaining = tail;
+        }
+        if group_stock {
+            for (index, length) in [70, 50, 90, 60, 80].into_iter().enumerate() {
+                assert!(pdf.contains(&format!("P{:03} x1 - 89 mm x {length} cm", index + 1)));
+            }
+        }
+    }
+}
+
+#[test]
 fn stock_grouping_preserves_visible_only_collection() {
     let mut model = Model::default();
     let size = DVec3::new(0.018, 0.3, 0.6);
@@ -525,7 +676,7 @@ fn stock_pdf_includes_colored_coded_diagrams_and_uses_the_selected_kerf() {
     assert!(with_kerf.contains("BOARD 1 of 2"));
     assert!(with_kerf.contains("BOARD 2 of 2"));
     assert!(with_kerf.contains("Kerf: 3 mm"));
-    assert!(with_kerf.contains("P001 x1 - 89 x 500 mm"));
+    assert!(with_kerf.contains("P001 x1 - 89 mm x 50 cm"));
     assert!(
         with_kerf.contains(" re B Q"),
         "Diagrams and color swatches use vector rectangles"
@@ -564,7 +715,7 @@ fn oversized_cuts_are_reported_without_silently_increasing_the_stock_size() {
     };
     let pdf = String::from_utf8(plan.pdf("Cabinet", false, true)).unwrap();
     assert!(pdf.contains("DOES NOT FIT SELECTED STOCK"));
-    assert!(pdf.contains("P001: 1 piece, 1300 x 3000 mm"));
+    assert!(pdf.contains("P001: 1 piece, 130 cm x 300 cm"));
     assert!(!pdf.contains("SHEET 1"));
 }
 

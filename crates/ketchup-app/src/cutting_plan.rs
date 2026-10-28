@@ -10,7 +10,8 @@ mod tests;
 
 #[derive(Debug)]
 pub(crate) struct CutGroup {
-    /// Thickness, width, length in tenths of a millimetre.
+    /// Thickness, width, cut length in tenths of a millimetre. A short cut can
+    /// be shorter than its width when aligned with other parts in its group.
     pub dimensions: [u64; 3],
     pub rectangular: bool,
     /// One named group hierarchy per piece; repeated names still count as pieces.
@@ -21,6 +22,12 @@ pub(crate) struct CutGroup {
 pub(crate) struct CuttingPlan {
     pub groups: Vec<CutGroup>,
     pub skipped: usize,
+}
+
+struct MeasuredPart {
+    dimensions: [u64; 3],
+    axes: [DVec3; 3],
+    rectangular: bool,
 }
 
 /// Stock types are suggestions from dimensions, never material assignments.
@@ -58,9 +65,15 @@ impl SuggestedStock {
 
     fn title(&self) -> String {
         match self {
-            Self::Plywood(t) => format!("Suggested stock: {} mm plywood", mm(*t)),
+            Self::Plywood(t) => format!("Suggested stock: {} plywood", metric_length(*t)),
             Self::Lumber(nominal) => format!("Suggested stock: nominal {nominal} lumber"),
-            Self::Custom([t, w]) => format!("Custom stock: {} x {} mm", mm(*t), mm(*w)),
+            Self::Custom([t, w]) => {
+                format!(
+                    "Custom stock: {} x {}",
+                    metric_length(*t),
+                    metric_length(*w)
+                )
+            }
             Self::Review => "Check shape / stock manually".into(),
         }
     }
@@ -86,7 +99,7 @@ impl CuttingPlan {
                 .or_default()
                 .insert(*id);
         }
-        let mut groups: BTreeMap<([u64; 3], bool), Vec<String>> = BTreeMap::new();
+        let mut parts = Vec::new();
         let mut skipped = 0;
         for (scope, mut remaining) in scopes {
             let vertices: BTreeMap<_, _> = remaining
@@ -115,11 +128,11 @@ impl CuttingPlan {
                         }
                     }
                 }
-                if !selected.is_empty() && component.is_disjoint(&requested) {
-                    continue;
-                }
-                let Some((dimensions, rectangular)) = measure(model, &component) else {
-                    skipped += 1;
+                let included = selected.is_empty() || !component.is_disjoint(&requested);
+                let Some(part) = measure(model, &component) else {
+                    if included {
+                        skipped += 1;
+                    }
                     continue;
                 };
                 let mut path = Vec::new();
@@ -132,11 +145,43 @@ impl CuttingPlan {
                     parent = parents.get(&id).copied();
                 }
                 path.reverse();
-                groups
-                    .entry((dimensions, rectangular))
-                    .or_default()
-                    .push(path.join("/"));
+                parts.push((path.join("/"), part, included));
             }
+        }
+        // Infer a common cutting direction from the longest visible blank in
+        // each named group and thickness. Include unselected parts so selecting
+        // just a short cut does not change its width/length assignment.
+        let mut references: BTreeMap<_, &MeasuredPart> = BTreeMap::new();
+        for (path, part, _) in &parts {
+            if path.is_empty() || !part.rectangular {
+                continue;
+            }
+            let reference = references
+                .entry((path.as_str(), part.dimensions[0]))
+                .or_insert(part);
+            if part.dimensions[2] > reference.dimensions[2] {
+                *reference = part;
+            }
+        }
+        let mut groups: BTreeMap<([u64; 3], bool), Vec<String>> = BTreeMap::new();
+        for (path, part, included) in &parts {
+            if !included {
+                continue;
+            }
+            let mut dimensions = part.dimensions;
+            if part.rectangular {
+                if let Some(reference) = references.get(&(path.as_str(), dimensions[0])) {
+                    if part.axes[0].dot(reference.axes[0]).abs() > 1. - 1e-8
+                        && part.axes[1].dot(reference.axes[2]).abs() > 1. - 1e-8
+                    {
+                        dimensions.swap(1, 2);
+                    }
+                }
+            }
+            groups
+                .entry((dimensions, part.rectangular))
+                .or_default()
+                .push(path.clone());
         }
         if groups.is_empty() {
             return Err("No three-dimensional parts found in visible geometry. Model each board as a separate group/component or disconnected solid. Select a board or assembly, or use the whole project.".into());
@@ -178,7 +223,7 @@ impl CuttingPlan {
         pdf.heading("CUT LIST", 18.);
         pdf.paragraph(
             &format!(
-                "{count} pieces  |  {} sizes  |  All dimensions in mm",
+                "{count} pieces  |  {} sizes  |  Dimensions in mm or cm",
                 self.groups.len()
             ),
             10.,
@@ -193,10 +238,17 @@ impl CuttingPlan {
             );
         }
         pdf.gap(8.);
+        let mut groups: Vec<_> = self.groups.iter().collect();
+        groups.sort_by(|a, b| {
+            group_names(a)
+                .cmp(&group_names(b))
+                .then_with(|| b.parts.len().cmp(&a.parts.len()))
+                .then_with(|| b.dimensions[2].cmp(&a.dimensions[2]))
+        });
         if group_stock {
             let mut stock_groups: BTreeMap<SuggestedStock, Vec<(usize, &CutGroup)>> =
                 BTreeMap::new();
-            for (index, group) in self.groups.iter().enumerate() {
+            for (index, group) in groups.into_iter().enumerate() {
                 stock_groups
                     .entry(SuggestedStock::for_group(group))
                     .or_default()
@@ -253,7 +305,7 @@ impl CuttingPlan {
                 if let Some(layout) = &layout {
                     pdf.paragraph(
                         &format!(
-                            "Stock required: {} {} | Saw kerf: {} mm",
+                            "Stock required: {} {} | Saw kerf: {}",
                             layout.stock.len(),
                             match (sheet_stock, layout.stock.len()) {
                                 (true, 1) => "sheet",
@@ -261,7 +313,7 @@ impl CuttingPlan {
                                 (false, 1) => "board",
                                 (false, _) => "boards",
                             },
-                            mm(cutting_layout::tenths(settings.kerf_mm))
+                            metric_length(cutting_layout::tenths(settings.kerf_mm))
                         ),
                         9.,
                     );
@@ -285,7 +337,7 @@ impl CuttingPlan {
             }
         } else {
             pdf.table_header();
-            for (index, group) in self.groups.iter().enumerate() {
+            for (index, group) in groups.into_iter().enumerate() {
                 if pdf.y < 115. {
                     pdf.new_page();
                     pdf.table_header();
@@ -303,14 +355,17 @@ fn automatic_group_name(name: &str) -> bool {
         .is_some_and(|id| !id.is_empty() && id.bytes().all(|c| c.is_ascii_digit()))
 }
 
-fn group_lines(group: &CutGroup) -> Vec<String> {
-    let names: BTreeSet<_> = group
+fn group_names(group: &CutGroup) -> BTreeSet<&str> {
+    group
         .parts
         .iter()
         .map(|name| if name.is_empty() { "-" } else { name.as_str() })
-        .collect();
+        .collect()
+}
+
+fn group_lines(group: &CutGroup) -> Vec<String> {
     let mut lines = Vec::new();
-    for name in names {
+    for name in group_names(group) {
         let characters: Vec<_> = name
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
@@ -344,8 +399,12 @@ fn cut_row(pdf: &mut Pdf, index: usize, group: &CutGroup, colored: bool) {
         }
         if !continued {
             pdf.cell(286., 34., &group.parts.len().to_string());
-            pdf.cell(330., 132., &format!("{} mm x {} mm", mm(t), mm(w)));
-            pdf.cell(474., 79., &format!("{} mm", mm(l)));
+            pdf.cell(
+                330.,
+                132.,
+                &format!("{} x {}", metric_length(t), metric_length(w)),
+            );
+            pdf.cell(474., 79., &metric_length(l));
         } else {
             pdf.text(100., pdf.y, 8., "(continued)");
             pdf.y -= 12.;
@@ -404,12 +463,12 @@ fn draw_layout(
             let group = groups.iter().find(|(index, _)| *index == mark).unwrap().1;
             pdf.paragraph(
                 &format!(
-                    "P{:03}: {} piece{}, {} x {} mm - choose larger stock",
+                    "P{:03}: {} piece{}, {} x {} - choose larger stock",
                     mark + 1,
                     quantity,
                     if quantity == 1 { "" } else { "s" },
-                    mm(group.dimensions[1]),
-                    mm(group.dimensions[2])
+                    metric_length(group.dimensions[1]),
+                    metric_length(group.dimensions[2])
                 ),
                 9.,
             );
@@ -440,10 +499,10 @@ fn draw_layout(
         pdf.paragraph(title, 9.);
         pdf.paragraph(
             &format!(
-                "Stock: {} x {} mm | Kerf: {} mm | Gray: offcut / kerf",
-                mm(stock.length),
-                mm(stock.width),
-                mm(cutting_layout::tenths(settings.kerf_mm))
+                "Stock: {} x {} | Kerf: {} | Gray: offcut / kerf",
+                metric_length(stock.length),
+                metric_length(stock.width),
+                metric_length(cutting_layout::tenths(settings.kerf_mm))
             ),
             8.,
         );
@@ -468,9 +527,9 @@ fn draw_layout(
                     &label,
                 );
                 let dimensions = if sheet {
-                    format!("{} x {}", mm(r.length), mm(r.width))
+                    format!("{} x {}", metric_length(r.length), metric_length(r.width))
                 } else {
-                    format!("{} mm", mm(r.length))
+                    metric_length(r.length)
                 };
                 if h >= 30. && dimensions.len() as f64 * 4.2 + 4. <= w {
                     pdf.text(
@@ -498,11 +557,11 @@ fn draw_layout(
                 pdf.y,
                 9.,
                 &format!(
-                    "P{:03} x{} - {} x {} mm{}",
+                    "P{:03} x{} - {} x {}{}",
                     mark + 1,
                     quantity,
-                    mm(group.dimensions[1]),
-                    mm(group.dimensions[2]),
+                    metric_length(group.dimensions[1]),
+                    metric_length(group.dimensions[2]),
                     if rotated { " (rotation used)" } else { "" }
                 ),
             );
@@ -526,7 +585,7 @@ fn entity_vertices(model: &Model, id: u64) -> BTreeSet<u64> {
     }
 }
 
-fn measure(model: &Model, entities: &BTreeSet<u64>) -> Option<([u64; 3], bool)> {
+fn measure(model: &Model, entities: &BTreeSet<u64>) -> Option<MeasuredPart> {
     if !entities.iter().any(|id| model.faces.contains_key(id)) {
         return None;
     }
@@ -589,14 +648,19 @@ fn measure(model: &Model, entities: &BTreeSet<u64>) -> Option<([u64; 3], bool)> 
             }
         }
     }
-    let mut sizes = (bounds.1 - bounds.0).to_array();
+    let sizes = (bounds.1 - bounds.0).to_array();
     if sizes.iter().any(|v| !v.is_finite() || *v < 0.00005) {
         return None;
     }
-    sizes.sort_by(f64::total_cmp);
-    let dimensions = sizes.map(|value| (value * 10_000.).round() as u64);
+    let mut order = [0, 1, 2];
+    order.sort_by(|a, b| sizes[*a].total_cmp(&sizes[*b]));
+    let dimensions = order.map(|axis| (sizes[axis] * 10_000.).round() as u64);
     let rectangular = is_box(model, entities, origin, basis, bounds);
-    Some((dimensions, rectangular))
+    Some(MeasuredPart {
+        dimensions,
+        axes: order.map(|axis| basis[axis]),
+        rectangular,
+    })
 }
 
 fn project(p: DVec3, axes: [DVec3; 3]) -> DVec3 {
@@ -650,11 +714,15 @@ fn is_box(
     sides.len() == 6 && boundaries.values().all(|count| *count == 2)
 }
 
-fn mm(tenths: u64) -> String {
+fn metric_length(tenths: u64) -> String {
+    if tenths > 1000 {
+        let value = format!("{}.{:02}", tenths / 100, tenths % 100);
+        return format!("{} cm", value.trim_end_matches('0').trim_end_matches('.'));
+    }
     if tenths.is_multiple_of(10) {
-        (tenths / 10).to_string()
+        format!("{} mm", tenths / 10)
     } else {
-        format!("{}.{:01}", tenths / 10, tenths % 10)
+        format!("{}.{:01} mm", tenths / 10, tenths % 10)
     }
 }
 
