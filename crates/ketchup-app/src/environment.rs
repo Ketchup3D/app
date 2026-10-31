@@ -1,3 +1,4 @@
+use crate::inspector_table::{Column, InspectorTable};
 use eframe::egui::{self, Color32, Rect};
 use ketchup_core::{Camera, DisplaySettings, Projection};
 
@@ -135,38 +136,60 @@ pub fn controls(ui: &mut egui::Ui, display: &mut DisplaySettings) -> bool {
     let mut themed = for_theme(display, ui.visuals().dark_mode);
     ui.label("Environment");
     ui.separator();
-    egui::Grid::new("environment_colors").show(ui, |ui| {
-        ui.checkbox(&mut display.sky, "Sky");
-        ui.add_enabled_ui(display.sky, |ui| {
-            if ui.color_edit_button_srgb(&mut themed.sky_color).changed() {
-                display.sky_color = themed.sky_color;
+    let mut table = InspectorTable::new(ui.available_width(), [Column::flex(1.), Column::flex(1.)]);
+    for (row, label) in ["Sky", "Ground", "Horizon", "Background"]
+        .into_iter()
+        .enumerate()
+    {
+        table.row(ui, ("environment_colors", row), |column, ui| {
+            if column == 0 {
+                match row {
+                    0 => {
+                        ui.checkbox(&mut display.sky, label);
+                    }
+                    1 => {
+                        ui.checkbox(&mut display.ground, label);
+                    }
+                    _ => {
+                        ui.label(label);
+                    }
+                }
+            } else {
+                // Color wells use exact sizing rather than layout justification.
+                ui.spacing_mut().interact_size.x = ui.available_width();
+                match row {
+                    0 => {
+                        ui.add_enabled_ui(display.sky, |ui| {
+                            if ui.color_edit_button_srgb(&mut themed.sky_color).changed() {
+                                display.sky_color = themed.sky_color;
+                            }
+                        });
+                    }
+                    1 => {
+                        ui.add_enabled_ui(display.ground, |ui| {
+                            if ui
+                                .color_edit_button_srgb(&mut themed.ground_color)
+                                .changed()
+                            {
+                                display.ground_color = themed.ground_color;
+                            }
+                        });
+                    }
+                    2 => {
+                        ui.add_enabled_ui(display.sky || display.ground, |ui| {
+                            if ui
+                                .color_edit_button_srgb(&mut themed.horizon_color)
+                                .changed()
+                            {
+                                display.horizon_color = themed.horizon_color;
+                            }
+                        });
+                    }
+                    _ => background_control(ui, display),
+                }
             }
         });
-        ui.end_row();
-        ui.checkbox(&mut display.ground, "Ground");
-        ui.add_enabled_ui(display.ground, |ui| {
-            if ui
-                .color_edit_button_srgb(&mut themed.ground_color)
-                .changed()
-            {
-                display.ground_color = themed.ground_color;
-            }
-        });
-        ui.end_row();
-        ui.label("Horizon");
-        ui.add_enabled_ui(display.sky || display.ground, |ui| {
-            if ui
-                .color_edit_button_srgb(&mut themed.horizon_color)
-                .changed()
-            {
-                display.horizon_color = themed.horizon_color;
-            }
-        });
-        ui.end_row();
-        ui.label("Background");
-        background_control(ui, display);
-        ui.end_row();
-    });
+    }
     if ui.button("Reset environment colors").clicked() {
         let defaults = DisplaySettings::default();
         display.sky_color = defaults.sky_color;

@@ -1,9 +1,10 @@
 mod app;
 mod brand_mark;
-mod cutting_plan;
 mod cutting_layout;
+mod cutting_plan;
 mod environment;
 mod icons;
+mod inspector_table;
 mod interchange;
 mod modal;
 mod picking;
