@@ -33,6 +33,11 @@ impl FaceStyle {
 pub struct DisplaySettings {
     pub units: crate::UnitSettings,
     pub grid: bool,
+    pub grid_auto_size: bool,
+    pub grid_spacing: f64,
+    pub axis_colors: [[u8; 3]; 3],
+    pub inference_color: [u8; 3],
+    pub midpoint_color: [u8; 3],
     pub axes: bool,
     pub guides: bool,
     pub dimensions: bool,
@@ -72,6 +77,11 @@ impl Default for DisplaySettings {
         Self {
             units: crate::UnitSettings::default(),
             grid: false,
+            grid_auto_size: true,
+            grid_spacing: 1.,
+            axis_colors: [[192, 94, 76], [97, 145, 92], [90, 133, 176]],
+            inference_color: [97, 145, 92],
+            midpoint_color: [85, 150, 183],
             axes: true,
             guides: true,
             dimensions: true,
@@ -110,7 +120,8 @@ impl Default for DisplaySettings {
 }
 impl DisplaySettings {
     pub fn valid(&self) -> bool {
-        (1. ..=8.).contains(&self.profile_width)
+        (0.000001..=1e6).contains(&self.grid_spacing)
+            && (1. ..=8.).contains(&self.profile_width)
             && self.section_height.is_finite()
             && self.section_height.abs() <= 1e10
             && (0. ..=1.).contains(&self.shadow_darkness)
@@ -127,6 +138,22 @@ impl DisplaySettings {
 mod tests {
     use super::*;
     use crate::Document;
+    #[test]
+    fn older_display_settings_default_grid_and_colors_and_reject_invalid_spacing() {
+        let display: DisplaySettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(display, DisplaySettings::default());
+        assert!(display.grid_auto_size);
+        for spacing in [0., -1., f64::NAN, f64::INFINITY, 1e7] {
+            assert!(
+                !DisplaySettings {
+                    grid_spacing: spacing,
+                    ..display.clone()
+                }
+                .valid()
+            );
+        }
+    }
+
     #[test]
     fn display_settings_round_trip_default_old_documents_and_validate_ranges() {
         let mut doc = Document::default();
