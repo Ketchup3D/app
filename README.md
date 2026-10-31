@@ -1,6 +1,6 @@
 # KetchUp
 
-![KetchUp editor screenshot](assets/screenshots/ketchup.png)
+![KetchUp editor screenshot](assets/screenshots/ketchup.jpg)
 
 [![Try KetchUp in your browser](https://img.shields.io/badge/Try_KetchUp_in_your_browser-d63b32?style=for-the-badge)](https://ketchup3d.github.io/app/play/)
 
@@ -259,7 +259,7 @@ networks.
 | Polygon | G; click the center, then a vertex or type a radius + Enter; choose 3–64 sides in the drawing menu |
 | Freehand | D; drag to draw connected edges; release to finish, or type a total stroke length + Enter |
 | Push/Pull | P; click a face, move along its normal, click to confirm or type a length + Enter |
-| Union flyout | Union button in the left toolbar: Flip, Outer Shell, Union, Intersect, Trim, Split |
+| Union flyout | Union button in the left toolbar: Flip, Combine, Union, Intersect, Trim, Split |
 | Flip | Choose Flip, then click a colored mirror plane or use Right / Left / Up for X / Y / Z |
 | Scale | S; select geometry, click a reference point, move or type a uniform scale factor + Enter |
 | Offset | F; click near a face boundary, move inward/outward, click or type a length + Enter |
@@ -282,7 +282,8 @@ networks.
 | Pan | **Hold Shift while orbiting**, including middle-drag |
 | Zoom | Mouse wheel; anchors at the pointer on the camera target plane |
 | Fit all geometry | Fit view button |
-| Emphasize current group/component | Enabled by default. Emphasize group checkbox before the Snap options, or Tab, toggles the group/component currently being edited solid and everything else in muted wireframe, regardless of selection. Has no visual effect outside a group/component |
+| Emphasize current group/component | Enabled by default. Emphasize group checkbox before the Snap options toggles the group/component currently being edited solid and everything else in muted wireframe, regardless of selection. Has no visual effect outside a group/component |
+| Toggle right sidebar | Tab, or the model inspector button |
 | Ground, sky, and horizon colors | Model inspector → Display → Environment; color pickers, Sky/Ground toggles, and reset colors |
 | Undo | Ctrl/Command Z |
 | Redo | Ctrl/Command Shift Z, or Ctrl Y |
@@ -322,17 +323,17 @@ The toolbar is ordered Select, Line, Erase, Orbit, Push/Pull, Scale, Offset, Mov
 
 Hover over a toolbar tool or flyout entry for one second to see its name, keyboard shortcut (when available), and usage instructions.
 
-The **Union** flyout keeps Flip, Outer Shell, Union, Intersect, Trim, and Split together. Flip mirrors the selection through its bounds center using a colored plane, an inspector axis button, or the X/Y/Z arrow shortcuts. Mirrored component instances retain their links and placement when their definition is edited.
+The **Union** flyout keeps Flip, Combine, Union, Intersect, Trim, and Split together. Flip mirrors the selection through its bounds center using a colored plane, an inspector axis button, or the X/Y/Z arrow shortcuts. Mirrored component instances retain their links and placement when their definition is edited.
 
-Boolean tools work on closed solid groups/components or separate connected loose bodies. Nested groups and components are combined as volumes, including overlapping child solids. Fill missing faces and remove stray/internal edges first. For Union, Outer Shell, Intersect, or Split, either select two bodies before choosing the tool, or click the first and second body. For Trim, click the cutter first and the target second; the cutter stays. Escape cancels the first-body choice.
+Boolean tools work on closed solid groups/components or separate connected loose bodies. Nested groups and components are combined as volumes, including overlapping child solids. Fill missing faces and remove stray/internal edges first. For Union, Combine, Intersect, or Split, either select two bodies before choosing the tool, or click the first and second body. For Trim, click the cutter first and the target second; the cutter stays. Escape cancels the first-body choice.
 
 Intersect also accepts a face or open surface group/component against a closed body, in either order, and keeps the portion of the surface inside or on the body. Two coplanar faces or surface groups/components keep their shared area. These surface intersections replace both inputs with an editable surface group and preserve face colors; they do not require the result to enclose volume.
 
-Union combines volumes while retaining enclosed voids. Outer Shell also removes surfaces around fully enclosed voids; through-holes remain open. Intersect keeps shared volume for two closed bodies. Split produces separate groups for the overlap and each body's remainder, omitting empty pieces. Union, Outer Shell, Intersect, and Split replace their two input bodies; Trim replaces only the target. Results are editable groups with planar faces and preserved face colors. Operations support undo/redo, local saving, and scoped group/component editing. Locked or excessively complex bodies, unsupported open bodies, and unrepresentable results are rejected without modifying the model.
+Union combines volumes while retaining enclosed voids. Combine also removes surfaces around fully enclosed voids; through-holes remain open. Intersect keeps shared volume for two closed bodies. Split produces separate groups for the overlap and each body's remainder, omitting empty pieces. Union, Combine, Intersect, and Split replace their two input bodies; Trim replaces only the target. Results are editable groups with planar faces and preserved face colors. Operations support undo/redo, local saving, and scoped group/component editing. Locked or excessively complex bodies, unsupported open bodies, and unrepresentable results are rejected without modifying the model.
 
 ## Right sidebar
 
-The Model inspector has independent, collapsible Outliner, Entity Info, Components, Tags, and Display sections. It scrolls when the sections exceed the window height.
+The Model inspector has independent, collapsible Outliner, Entity Info, Components, Tags, and Display sections. Each area scrolls independently when its sections exceed its height. The current section's header stays at the top until the next section pushes it away; pinned headers can still collapse or drag their sections.
 
 The app remembers the active tool, tool-menu choices, polygon sides, Move copy mode, axis lock, snapping options, Emphasize group, shortcut search, cutting-plan scope and stock settings, screenshot settings, and all Display options across reloads and app restarts. The left and right sidebars remember their scroll positions, including the floating inspector. The Outliner remembers horizontal tree scrolling and each nested geometry list's vertical scroll position. The sidebar also remembers its visibility, width, section order, expanded/collapsed sections (including nested groups and the Outliner tree), searches, and paint settings. Changes are saved immediately in local application preferences. New projects inherit the current Display and snapping options; opening an existing project uses that project's saved display and snapping settings while keeping the Emphasize group preference. **Reset display** also updates the remembered preferences.
 
