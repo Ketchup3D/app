@@ -11,7 +11,7 @@ Every future user-facing option, setting, tool choice, and expandable section th
 
 # Release workflow
 
-Whenever the user asks to deploy, treat it as a request to push a new version tag and follow this release workflow. Unless the user specifies a version or bump type, increment the minor version and reset the patch version to zero.
+Whenever the user asks to deploy, treat it as a request to push a new version tag and follow this release workflow. Unless the user specifies a version or bump type, increment the patch version.
 
 Whenever the user asks to push a new version tag:
 
@@ -28,3 +28,7 @@ Only at the end of each change, immediately before reporting completion, check t
 # Modal actions
 
 In every modal, place the least impactful action (usually Cancel or Close) on the right. Use the shared `Modal` shell in `crates/ketchup-app/src/modal.rs`; its footer renders right to left, so declare actions from least to most impactful. For unsaved changes, the visual order is Discard changes, Save, Cancel. Apply this convention to all future modals.
+
+# Inspector tables
+
+All current and future right-sidebar tables use `crate::inspector_table::InspectorTable` with shared columns for headers and rows. Tables fill the available width, cells align to consistent column boundaries and row tops, and inputs fill their cells. Use minimum column widths with the existing persisted horizontal scroll helpers for wide catalogs; do not introduce standalone `egui::Grid` layouts in the inspector.
