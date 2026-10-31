@@ -13,10 +13,29 @@ pub enum ObjectKind {
     },
 }
 
+/// A purchasing material definition shared by ID within a document.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct StockMaterial {
+    pub name: String,
+    /// Thickness, width and length in tenths of a millimetre.
+    pub dimensions: [u64; 3],
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Object {
     pub id: u64,
     pub name: String,
+    #[serde(default)]
+    pub surface_treatment: crate::surface_treatment::Settings,
+    /// Distinguishes an explicit all-disabled override from an unconfigured object.
+    #[serde(default)]
+    pub surface_treatment_customized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_material: Option<StockMaterial>,
+    /// Stable purchasing-material reference. `stock_material` is legacy input
+    /// migrated by the application when the reusable catalog becomes available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_material_id: Option<crate::MaterialId>,
     /// Sibling display position in the Outliner; older models use entity IDs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outliner_order: Option<u64>,
@@ -29,7 +48,64 @@ pub struct Object {
     pub definition_entities: BTreeMap<u64, u64>,
 }
 
+impl Object {
+    pub fn surface_treatment_override(&self) -> Option<&crate::surface_treatment::Settings> {
+        // Preserve non-default configurations saved before the override flag existed.
+        (self.surface_treatment_customized
+            || self.surface_treatment != crate::surface_treatment::Settings::default())
+        .then_some(&self.surface_treatment)
+    }
+}
+
 impl Model {
+    pub fn object_stock_material<'a>(&'a self, object: &'a Object) -> Option<&'a StockMaterial> {
+        if let Some(id) = object.stock_material_id {
+            self.stock_materials.get(&id)
+        } else {
+            object.stock_material.as_ref()
+        }
+    }
+
+    /// Upgrade old inline assignments once and refresh referenced definitions.
+    /// A missing catalog item retains its project definition for portability.
+    pub fn sync_stock_materials(
+        &mut self,
+        catalog: &BTreeMap<crate::MaterialId, StockMaterial>,
+    ) -> bool {
+        let mut changed = false;
+        for object in self.objects.values_mut() {
+            if let Some(legacy) = object.stock_material.take() {
+                if object.stock_material_id.is_none() {
+                    let matches: Vec<_> = catalog
+                        .iter()
+                        .filter(|(_, value)| **value == legacy)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    let id = if matches.len() == 1 {
+                        matches[0]
+                    } else {
+                        self.stock_materials
+                            .iter()
+                            .find(|(_, value)| **value == legacy)
+                            .map(|(id, _)| *id)
+                            .unwrap_or_else(crate::MaterialId::new_v4)
+                    };
+                    self.stock_materials.entry(id).or_insert(legacy);
+                    object.stock_material_id = Some(id);
+                }
+                changed = true;
+            }
+            if let Some(id) = object.stock_material_id
+                && let Some(material) = catalog.get(&id)
+                && self.stock_materials.get(&id) != Some(material)
+            {
+                self.stock_materials.insert(id, material.clone());
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn parent(&self, id: u64) -> Option<u64> {
         self.objects
             .values()
@@ -250,6 +326,13 @@ impl Model {
         copy.clean_entity_state();
         let used_tags: BTreeSet<_> = copy.entity_tags.values().copied().collect();
         copy.tags.retain(|id, _| used_tags.contains(id));
+        let used_materials: BTreeSet<_> = copy
+            .objects
+            .values()
+            .filter_map(|object| object.stock_material_id)
+            .collect();
+        copy.stock_materials
+            .retain(|id, _| used_materials.contains(id));
         copy.edit_context = None;
         copy
     }
@@ -382,6 +465,11 @@ impl Model {
                 }
             }
         }
+        for (id, material) in &source.stock_materials {
+            self.stock_materials
+                .entry(*id)
+                .or_insert_with(|| material.clone());
+        }
         for object in source.objects.values() {
             let mut o = object.clone();
             o.id = ids[&o.id];
@@ -478,6 +566,10 @@ impl Model {
             id,
             Object {
                 id,
+                surface_treatment: Default::default(),
+                surface_treatment_customized: false,
+                stock_material: None,
+                stock_material_id: None,
                 outliner_order: None,
                 transform: Some(crate::InstanceTransform::default()),
                 name: if name.trim().is_empty() {

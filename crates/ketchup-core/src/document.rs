@@ -41,6 +41,8 @@ pub struct Model {
     #[serde(default)]
     pub objects: BTreeMap<u64, crate::Object>,
     #[serde(default)]
+    pub stock_materials: BTreeMap<crate::MaterialId, crate::StockMaterial>,
+    #[serde(default)]
     pub hidden: BTreeSet<u64>,
     #[serde(default)]
     pub locked: BTreeSet<u64>,
@@ -348,6 +350,9 @@ impl Model {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Document {
+    /// Assigned when tracking shared material usage; absent in older projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<uuid::Uuid>,
     pub version: u32,
     pub name: String,
     pub model: Model,
@@ -355,6 +360,11 @@ pub struct Document {
     /// Per-viewport framing belongs to this project, unlike reusable layout preferences.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub viewport_cameras: BTreeMap<u64, Camera>,
+    /// Selection belongs to this project, including the object open for editing.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub selection: BTreeSet<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_context: Option<u64>,
     #[serde(default = "enabled")]
     pub snap_to_geometry: bool,
     #[serde(default = "enabled")]
@@ -368,11 +378,14 @@ fn enabled() -> bool {
 impl Default for Document {
     fn default() -> Self {
         Self {
+            project_id: None,
             version: 2,
             name: "Untitled model".into(),
             model: Model::default(),
             camera: Camera::default(),
             viewport_cameras: BTreeMap::new(),
+            selection: BTreeSet::new(),
+            selection_context: None,
             snap_to_geometry: true,
             snap_to_axes: true,
             display: crate::DisplaySettings::default(),

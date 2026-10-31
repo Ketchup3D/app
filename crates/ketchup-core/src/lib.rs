@@ -12,6 +12,7 @@ pub mod objects;
 mod reparent;
 pub mod selection;
 pub mod solids;
+pub mod surface_treatment;
 pub mod tags;
 pub mod units;
 
@@ -26,7 +27,7 @@ pub use inference::{
     infer_with_snapping,
 };
 pub use measurements::{Dimension, DimensionAnchor, angle_arc, angle_degrees};
-pub use objects::{Object, ObjectKind};
+pub use objects::{Object, ObjectKind, StockMaterial};
 pub use solids::SolidOperation;
 pub use tags::Tag;
 pub use units::{AngleUnit, AreaUnit, LengthUnit, UnitPrecision, UnitSettings, VolumeUnit};
@@ -163,7 +164,7 @@ impl Tool {
             Self::Freehand => "Freehand",
             Self::PushPull => "Push/Pull",
             Self::Flip => "Flip",
-            Self::OuterShell => "Outer Shell",
+            Self::OuterShell => "Combine",
             Self::Union => "Union",
             Self::Intersect => "Intersect",
             Self::Trim => "Trim",
@@ -259,3 +260,6 @@ impl Tool {
         }
     }
 }
+
+/// Stable identity shared by catalog entries and document material assignments.
+pub type MaterialId = uuid::Uuid;

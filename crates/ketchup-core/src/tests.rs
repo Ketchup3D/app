@@ -400,6 +400,23 @@ fn fast_erase_stroke_detects_crossed_edge() {
 }
 
 #[test]
+fn document_selection_round_trips_and_defaults_empty_for_older_projects() {
+    let mut doc = Document::default();
+    let edge = doc.model.add_edge(DVec3::ZERO, DVec3::Z).unwrap();
+    doc.selection.insert(edge);
+    let restored = Document::from_json(&serde_json::to_string(&doc).unwrap()).unwrap();
+    assert_eq!(restored.selection, doc.selection);
+    assert_eq!(restored.selection_context, None);
+
+    let mut legacy = serde_json::to_value(&doc).unwrap();
+    legacy.as_object_mut().unwrap().remove("selection");
+    legacy.as_object_mut().unwrap().remove("selection_context");
+    let restored = Document::from_json(&legacy.to_string()).unwrap();
+    assert!(restored.selection.is_empty());
+    assert_eq!(restored.selection_context, None);
+}
+
+#[test]
 fn document_round_trip_and_corruption_validation() {
     let mut doc = Document::default();
     doc.model.add_edge(DVec3::ZERO, DVec3::Z).unwrap();

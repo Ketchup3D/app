@@ -17,7 +17,7 @@ pub enum SolidOperation {
 impl SolidOperation {
     pub fn label(self) -> &'static str {
         match self {
-            Self::OuterShell => "Outer Shell",
+            Self::OuterShell => "Combine",
             Self::Union => "Union",
             Self::Intersect => "Intersect",
             Self::Trim => "Trim",
@@ -667,6 +667,10 @@ fn output(
         id,
         Object {
             id,
+            surface_treatment: Default::default(),
+            surface_treatment_customized: false,
+            stock_material: None,
+            stock_material_id: None,
             outliner_order: None,
             name: name.into(),
             kind: ObjectKind::Group,

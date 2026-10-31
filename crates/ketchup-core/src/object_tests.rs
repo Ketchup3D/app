@@ -127,6 +127,10 @@ fn drawing_on_a_hidden_grouped_import_preserves_geometry_and_undo() {
             Object {
                 id,
                 name: "Imported part".into(),
+                surface_treatment: Default::default(),
+                surface_treatment_customized: false,
+                stock_material: None,
+                stock_material_id: None,
                 outliner_order: None,
                 kind: ObjectKind::Group,
                 entities,
@@ -145,6 +149,10 @@ fn drawing_on_a_hidden_grouped_import_preserves_geometry_and_undo() {
         Object {
             id,
             name: "Import".into(),
+            surface_treatment: Default::default(),
+            surface_treatment_customized: false,
+            stock_material: None,
+            stock_material_id: None,
             outliner_order: None,
             kind: ObjectKind::Group,
             entities: groups,
@@ -489,4 +497,84 @@ fn bulk_root_bounds_and_lock_queries_preserve_inherited_state() {
     model.tags.get_mut(&tag).unwrap().visible = false;
     assert_eq!(model.bounds(), Some((DVec3::Y * 10., DVec3::Y * 11.)));
     model.validate().unwrap();
+}
+
+#[test]
+fn material_ids_survive_rename_copy_paste_and_document_round_trip() {
+    let mut model = Model::default();
+    let edge = model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    let object = model
+        .make_object(&BTreeSet::from([edge]), false, "Board")
+        .unwrap();
+    let id = MaterialId::new_v4();
+    let definition = StockMaterial {
+        name: "Oak".into(),
+        dimensions: [190, 890, 24400],
+    };
+    model.stock_materials.insert(id, definition.clone());
+    model.objects.get_mut(&object).unwrap().stock_material_id = Some(id);
+    let mut catalog = std::collections::BTreeMap::from([(id, definition)]);
+    catalog.get_mut(&id).unwrap().name = "Renamed oak".into();
+    catalog.get_mut(&id).unwrap().dimensions[1] = 1400;
+    assert!(model.sync_stock_materials(&catalog));
+    assert!(!model.sync_stock_materials(&catalog));
+    assert_eq!(model.objects[&object].stock_material_id, Some(id));
+    assert_eq!(
+        model
+            .object_stock_material(&model.objects[&object])
+            .unwrap()
+            .name,
+        "Renamed oak"
+    );
+    let copy = model.copy_entities(&BTreeSet::from([object]));
+    let mut target = Model::default();
+    let pasted = target.paste_entities(&copy, DVec3::Y);
+    assert_eq!(
+        target.objects[&*pasted.first().unwrap()].stock_material_id,
+        Some(id)
+    );
+    assert_eq!(target.stock_materials[&id], catalog[&id]);
+    assert!(!target.sync_stock_materials(&Default::default()));
+    let doc = Document {
+        model: target,
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&doc).unwrap();
+    let restored = Document::from_json(&json).unwrap();
+    assert_eq!(restored.model, doc.model);
+    let saved = serde_json::to_value(&doc.model.objects[&*pasted.first().unwrap()]).unwrap();
+    assert!(saved.get("stock_material").is_none());
+    assert_eq!(saved["stock_material_id"], id.to_string());
+}
+
+#[test]
+fn old_inline_assignments_migrate_once_without_guessing_between_duplicate_names() {
+    let mut model = Model::default();
+    let edge = model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    let object = model
+        .make_object(&BTreeSet::from([edge]), false, "Board")
+        .unwrap();
+    let legacy = StockMaterial {
+        name: "Oak".into(),
+        dimensions: [190, 890, 24400],
+    };
+    model.objects.get_mut(&object).unwrap().stock_material = Some(legacy.clone());
+    let id = MaterialId::new_v4();
+    let mut other = legacy.clone();
+    other.dimensions[1] = 1400;
+    let catalog =
+        std::collections::BTreeMap::from([(id, legacy.clone()), (MaterialId::new_v4(), other)]);
+    assert!(model.sync_stock_materials(&catalog));
+    assert_eq!(model.objects[&object].stock_material_id, Some(id));
+    assert!(model.objects[&object].stock_material.is_none());
+    assert!(!model.sync_stock_materials(&catalog));
+    model.objects.get_mut(&object).unwrap().stock_material_id = None;
+    model.objects.get_mut(&object).unwrap().stock_material = Some(legacy.clone());
+    model.stock_materials.clear();
+    let ambiguous =
+        std::collections::BTreeMap::from([(id, legacy.clone()), (MaterialId::new_v4(), legacy)]);
+    assert!(model.sync_stock_materials(&ambiguous));
+    let assigned = model.objects[&object].stock_material_id.unwrap();
+    assert!(!ambiguous.contains_key(&assigned));
+    assert!(model.stock_materials.contains_key(&assigned));
 }
