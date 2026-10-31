@@ -178,7 +178,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Validate all platforms and checksum release files
+      - name: Validate all platforms, remove packaging metadata, and checksum release files
         env:
           TAG_NAME: ${{ github.ref_name }}
         run: python scripts/desktop_release.py validate --tag "$TAG_NAME"

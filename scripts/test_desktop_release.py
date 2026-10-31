@@ -115,6 +115,30 @@ class DesktopReleaseTests(unittest.TestCase):
         self.assertEqual(first, (self.directory / "SHA256SUMS").read_bytes())
         self.assertEqual(len(first.splitlines()), 9)
 
+    def test_publication_removes_only_packaging_metadata_before_checksumming(self):
+        for platform, (channel, _, _, _) in release.PLATFORMS.items():
+            self.assets(platform)
+            (self.directory / f"assets.{channel}.json").write_text("{}")
+            (self.directory / f"RELEASES-{channel}").write_text("legacy feed")
+        (self.directory / "example-Portable.zip").write_bytes(b"portable")
+        expected = {
+            file.name for file in self.directory.iterdir()
+            if not file.name.startswith(("assets.", "RELEASES-"))
+        }
+        # An existing checksum file must also be refreshed after pruning.
+        (self.directory / "SHA256SUMS").write_text("stale metadata checksums")
+        subprocess.run(
+            [sys.executable, str(release.ROOT / "scripts/desktop_release.py"),
+             "validate", "--tag", self.tag, "--output-dir", str(self.directory)],
+            check=True, capture_output=True, text=True,
+        )
+        self.assertEqual({file.name for file in self.directory.iterdir()}, expected | {"SHA256SUMS"})
+        lines = (self.directory / "SHA256SUMS").read_text().splitlines()
+        self.assertEqual({line.split("  ", 1)[1] for line in lines}, expected)
+        for line in lines:
+            checksum, name = line.split("  ", 1)
+            self.assertEqual(checksum, hashlib.sha256((self.directory / name).read_bytes()).hexdigest())
+
     def test_corrupt_package_prevents_publication(self):
         _, asset = self.assets("linux-x64")
         # Same length: this must exercise the checksum, not only the size gate.

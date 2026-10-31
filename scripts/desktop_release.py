@@ -164,6 +164,14 @@ def validate_assets(directory, current, platforms):
             raise ValueError(f"Missing installer/AppImage for {channel}.")
 
 
+def remove_packaging_metadata(directory):
+    """Omit build manifests and legacy Squirrel feeds from published assets."""
+    for pattern in ("assets.*.json", "RELEASES-*"):
+        for file in directory.glob(pattern):
+            if file.is_file():
+                file.unlink()
+
+
 def checksums(directory):
     lines = []
     for file in sorted(directory.iterdir()):
@@ -196,6 +204,7 @@ def main():
             package(args.platform, args.tag, args.pack_dir, args.output_dir)
         else:
             validate_assets(args.output_dir, current, PLATFORMS)
+            remove_packaging_metadata(args.output_dir)
             checksums(args.output_dir)
     except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Desktop release failed: {error}\n")
