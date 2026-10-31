@@ -376,7 +376,6 @@ fn invalid_import_keeps_current_geometry_selection_and_history() {
 fn cutting_plan_defaults_to_selection_and_blocks_other_file_actions_until_cancelled() {
     let ctx = egui::Context::default();
     let mut app = KetchupApp::with_document(Document::default(), None, true);
-    assert!(app.project.cutting_plan_group_stock);
     assert!(app.project.cutting_plan_layout.allow_rotation);
     app.prepare_cutting_plan();
     assert_eq!(app.project.cutting_plan_selection, Some(false));
@@ -429,7 +428,6 @@ fn cutting_plan_export_failure_preserves_project_selection_and_history() {
         app.doc.name.clone(),
         app.doc.model.clone(),
         app.selected.clone(),
-        false,
         crate::cutting_layout::Settings::default(),
     ));
     for _ in 0..100 {
@@ -443,7 +441,7 @@ fn cutting_plan_export_failure_preserves_project_selection_and_history() {
         app.project
             .error
             .as_deref()
-            .is_some_and(|error| error.contains("No three-dimensional parts"))
+            .is_some_and(|error| error.contains("No visible three-dimensional parts with assigned stock materials"))
     );
     assert_eq!(app.doc.model, before);
     assert_eq!(app.selected, BTreeSet::from([edge]));

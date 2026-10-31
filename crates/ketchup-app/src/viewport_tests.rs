@@ -511,6 +511,8 @@ fn hovering_an_inactive_view_does_not_activate_it_but_pressing_does() {
         harness.frame(vec![egui::Event::PointerMoved(left)]);
         harness.frame(vec![egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             delta: egui::vec2(0., 30.),
             modifiers: egui::Modifiers::NONE,
         }]);

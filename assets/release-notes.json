@@ -1,5 +1,38 @@
 [
   {
+    "version": "0.5.0",
+    "date": "2026-10-31",
+    "title": "A customizable workspace and project estimates",
+    "sections": [
+      {
+        "title": "Workspace and settings",
+        "changes": [
+          "Rearrange, dock, and float inspector panes, with independent scrolling and sticky section headers. Workspace layouts and control preferences are remembered across restarts.",
+          "Browse inspector information in full-width tables with aligned columns and remembered horizontal scrolling for wide catalogs.",
+          "Customize keyboard shortcuts in Settings and toggle the right sidebar with Tab.",
+          "Rename viewport tabs independently and restore saved project selections when reopening a project."
+        ]
+      },
+      {
+        "title": "Materials, finishes, and estimates",
+        "changes": [
+          "Create reusable stock material and surface treatment catalogs, assign them to model parts, and retain material definitions when copying and pasting.",
+          "Generate cutting plans from assigned stock materials.",
+          "Estimate material costs and finishing time from model surfaces, with configurable prices, currency, treatment steps, and per-part overrides."
+        ]
+      },
+      {
+        "title": "Modeling and display",
+        "changes": [
+          "Configure grid spacing and inference colors, and toggle edge and face snapping targets independently.",
+          "Use entity dimension gizmos and improved Push/Pull snapping for precise modeling.",
+          "The Outer Shell solid tool is now called Combine.",
+          "Improved dialog focus and cached scene meshes, Outliner data, and solid measurements for a smoother workspace."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.4.0",
     "date": "2026-10-28",
     "title": "More views and precise measurements",

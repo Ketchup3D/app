@@ -418,7 +418,12 @@ impl KetchupApp {
             general: self.general_settings.clone(),
             visible: self.inspector,
             width: self.inspector_width,
-            docking: self.inspector_layout.dock.clone(),
+            // Capture the effective layout even before the inspector first renders.
+            docking: InspectorLayout::restore(
+                self.inspector_layout.dock.as_ref(),
+                &self.inspector_order,
+            )
+            .dock,
             component_filter: self.component_filter.clone(),
             outliner_filter: self.outliner_filter.clone(),
             shortcut_filter: self.shortcut_filter.clone(),
@@ -935,7 +940,7 @@ mod preference_tests {
         assert!(!render(&ctx, size, false, vec![]).0);
         let (body_visible, panel, header) = render(&ctx, size, true, vec![]);
         assert!(body_visible);
-        assert!(panel.size().distance(size) < 0.5, "{panel:?}");
+        assert!((panel.size() - size).length() < 0.5, "{panel:?}");
         for pressed in [true, false] {
             assert!(
                 render(
@@ -958,7 +963,7 @@ mod preference_tests {
         let resized = egui::vec2(260., 600.);
         let (body_visible, panel, _) = render(&ctx, resized, true, vec![]);
         assert!(body_visible);
-        assert!(panel.size().distance(resized) < 0.5, "{panel:?}");
+        assert!((panel.size() - resized).length() < 0.5, "{panel:?}");
         assert!(!render(&ctx, resized, false, vec![]).0);
         let mut app = KetchupApp::with_document(Document::default(), None, true);
         let mut storage = SavedPreferences::default();
@@ -2161,9 +2166,7 @@ mod preference_tests {
             }
         }
         let ctx = egui::Context::default();
-        let mut style = (*ctx.style()).clone();
-        style.animation_time = 0.;
-        ctx.set_style(style);
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.);
         ctx.options_mut(|options| options.warn_on_id_clash = true);
         let mut app = KetchupApp::with_document(Document::default(), None, true);
         app.time_estimates.pre_stain.enabled = true;

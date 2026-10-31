@@ -335,7 +335,9 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.);
-        let mut currency = "USD".to_owned();
+        // Start at the top so the wheel can scroll downward regardless of
+        // egui automatically revealing the selected currency on open.
+        let mut currency = "AED".to_owned();
         let mut filter = String::new();
         frame(&ctx, &mut currency, &mut filter, vec![]);
         let (center, _) = frame(&ctx, &mut currency, &mut filter, vec![]);
@@ -347,10 +349,6 @@ mod tests {
         let search_rect = ctx.read_response(search_id).unwrap().rect;
         let pointer = search_rect.left_bottom() + egui::vec2(30., 80.);
         let (_, before) = frame(&ctx, &mut currency, &mut filter, vec![]);
-        let before_euro = before
-            .iter()
-            .find(|(text, _)| text == "EUR — Euro")
-            .map(|(_, pos)| pos.y);
         frame(
             &ctx,
             &mut currency,
@@ -359,6 +357,8 @@ mod tests {
                 egui::Event::PointerMoved(pointer),
                 egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
                     delta: egui::vec2(0., -120.),
                     modifiers: egui::Modifiers::NONE,
                 },
@@ -368,20 +368,23 @@ mod tests {
             frame(&ctx, &mut currency, &mut filter, vec![]);
         }
         let (_, labels) = frame(&ctx, &mut currency, &mut filter, vec![]);
-        let euro_y = labels
+        // Track a visible row shared by both frames; clipped rows need not
+        // appear in egui's paint output.
+        let (scrolled_label, scrolled_pos) = labels
             .iter()
-            .find(|(text, _)| text == "EUR — Euro")
-            .unwrap()
-            .1
-            .y;
-        if let Some(before) = before_euro {
-            assert!(euro_y < before - 20., "The results must move when scrolled");
-        }
+            .find(|(text, pos)| {
+                text.contains(" — ")
+                    && before
+                        .iter()
+                        .any(|(old_text, old_pos)| old_text == text && pos.y < old_pos.y - 20.)
+            })
+            .unwrap_or_else(|| panic!("Results must move: before={before:?}, after={labels:?}"));
+        let euro_y = scrolled_pos.y;
         for _ in 0..30 {
             let (_, labels) = frame(&ctx, &mut currency, &mut filter, vec![]);
             let current_y = labels
                 .iter()
-                .find(|(text, _)| text == "EUR — Euro")
+                .find(|(text, _)| text == scrolled_label)
                 .unwrap()
                 .1
                 .y;
@@ -396,7 +399,7 @@ mod tests {
                 "Search must remain pinned"
             );
         }
-        assert_eq!(currency, "USD");
+        assert_eq!(currency, "AED");
         assert!(filter.is_empty());
     }
 
