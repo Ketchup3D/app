@@ -344,7 +344,9 @@ impl KetchupApp {
                     rect,
                     model,
                     &dimension,
-                    self.lock.map(axis_color).unwrap_or(colors.green),
+                    self.lock
+                        .map(|axis| self.axis_color(axis))
+                        .unwrap_or(colors.green),
                     self.doc.display.units,
                 ));
             }

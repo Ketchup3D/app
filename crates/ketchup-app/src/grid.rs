@@ -5,8 +5,27 @@ pub(super) fn spacing(camera: &Camera) -> f64 {
     10.0_f64.powf((camera.distance / 15.).log10().floor())
 }
 
+#[cfg(test)]
 pub(super) fn lines(camera: &Camera) -> impl Iterator<Item = (DVec3, DVec3, bool)> {
-    let spacing = spacing(camera);
+    lines_with_spacing(camera, spacing(camera))
+}
+
+pub(super) fn configured_spacing(camera: &Camera, display: &ketchup_core::DisplaySettings) -> f64 {
+    if display.grid_auto_size {
+        spacing(camera)
+    } else {
+        display.grid_spacing.clamp(0.000001, 1e6)
+    }
+}
+
+pub(super) fn configured_lines(
+    camera: &Camera,
+    display: &ketchup_core::DisplaySettings,
+) -> impl Iterator<Item = (DVec3, DVec3, bool)> {
+    lines_with_spacing(camera, configured_spacing(camera, display))
+}
+
+fn lines_with_spacing(camera: &Camera, spacing: f64) -> impl Iterator<Item = (DVec3, DVec3, bool)> {
     let x = (camera.target.x / spacing).round() as i64;
     let y = (camera.target.y / spacing).round() as i64;
     // The camera chooses the visible window, but each line's position and
@@ -66,9 +85,47 @@ impl KetchupApp {
                 .as_ref()
                 .map(|drawing| drawing.normal)
                 .or_else(|| self.measurement_plane().map(|(_, normal)| normal));
-            self.snap = self
-                .snap
-                .map(|point| snap(point, spacing(&self.doc.camera), plane));
+            self.snap = self.snap.map(|point| {
+                snap(
+                    point,
+                    configured_spacing(&self.doc.camera, &self.doc.display),
+                    plane,
+                )
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_grid_and_snapping_share_spacing_at_every_zoom() {
+        let mut camera = Camera::default();
+        let display = ketchup_core::DisplaySettings {
+            grid_auto_size: false,
+            grid_spacing: 0.25,
+            ..Default::default()
+        };
+        for distance in [0.1, 15., 1000.] {
+            camera.distance = distance;
+            let spacing = configured_spacing(&camera, &display);
+            assert_eq!(spacing, 0.25);
+            for (a, b, _) in configured_lines(&camera, &display) {
+                for value in [a.x, a.y, b.x, b.y] {
+                    assert!((value / spacing - (value / spacing).round()).abs() < 1e-9);
+                }
+            }
+            let point = snap(
+                Snap {
+                    point: DVec3::new(0.36, 0.64, 0.),
+                    kind: Inference::Plane,
+                },
+                spacing,
+                None,
+            );
+            assert_eq!(point.point, DVec3::new(0.25, 0.75, 0.));
         }
     }
 }

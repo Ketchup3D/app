@@ -1,4 +1,4 @@
-//! Deterministic, kerf-aware guillotine sheet packing and first-fit board cutting.
+//! Deterministic, kerf-aware guillotine stock packing.
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -182,44 +182,6 @@ pub(crate) fn sheets(pieces: &[Piece], settings: Settings) -> Layout {
                     width: free.width - w - kerf,
                 });
             }
-        }
-    }
-    layout
-}
-
-pub(crate) fn boards(pieces: &[Piece], settings: Settings) -> Layout {
-    let length = tenths(settings.board_length_mm);
-    let width = pieces.iter().map(|p| p.width).max().unwrap_or(1);
-    let kerf = tenths(settings.kerf_mm);
-    let mut pieces = pieces.to_vec();
-    pieces.sort_by_key(|p| (std::cmp::Reverse(p.length), p.mark));
-    let mut layout = Layout::default();
-    let mut used = Vec::new();
-    for piece in pieces {
-        if piece.length > length {
-            layout.oversized.push(piece);
-            continue;
-        }
-        for _ in 0..piece.quantity {
-            let index = used
-                .iter()
-                .position(|end| *end <= length && piece.length <= length - *end)
-                .unwrap_or_else(|| {
-                    layout.stock.push(Stock::new(length, width));
-                    used.push(0_u64);
-                    used.len() - 1
-                });
-            layout.stock[index].placements.push(Placement {
-                mark: piece.mark,
-                rect: Rect {
-                    x: used[index],
-                    y: 0,
-                    length: piece.length,
-                    width,
-                },
-                rotated: false,
-            });
-            used[index] += piece.length + kerf;
         }
     }
     layout

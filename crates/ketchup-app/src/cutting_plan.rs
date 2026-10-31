@@ -8,8 +8,15 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "cutting_plan_tests.rs"]
 mod tests;
 
+type MaterialKey = (
+    Option<ketchup_core::MaterialId>,
+    ketchup_core::StockMaterial,
+);
+
 #[derive(Debug)]
 pub(crate) struct CutGroup {
+    pub material: ketchup_core::StockMaterial,
+    pub material_id: Option<ketchup_core::MaterialId>,
     /// Thickness, width, cut length in tenths of a millimetre. A short cut can
     /// be shorter than its width when aligned with other parts in its group.
     pub dimensions: [u64; 3],
@@ -24,65 +31,71 @@ pub(crate) struct CuttingPlan {
     pub skipped: usize,
 }
 
+/// Purchasing quantities calculated with the same layout used by the PDF.
+pub(crate) struct MaterialRequirement {
+    pub material_id: Option<ketchup_core::MaterialId>,
+    pub material: ketchup_core::StockMaterial,
+    pub quantity: usize,
+    pub excluded: usize,
+}
+
+// Both the estimate and PDF must pack identical marks in identical order.
+fn stock_layout(
+    stock: &ketchup_core::StockMaterial,
+    groups: &[(usize, &CutGroup)],
+    settings: LayoutSettings,
+) -> cutting_layout::Layout {
+    let settings = LayoutSettings {
+        sheet_width_mm: stock.dimensions[1] as f64 / 10.,
+        sheet_length_mm: stock.dimensions[2] as f64 / 10.,
+        ..settings
+    };
+    let mut fitting = Vec::new();
+    let mut excluded = Vec::new();
+    for &(mark, group) in groups {
+        let piece = cutting_layout::Piece {
+            mark,
+            length: group.dimensions[2],
+            width: group.dimensions[1],
+            quantity: group.parts.len(),
+        };
+        // Purchase the full bounding blank, even when the finished part has
+        // notches, holes, or other cuts. Shape checks are informational only;
+        // stock fit depends on the blank's dimensions.
+        if group.dimensions[0] <= stock.dimensions[0] {
+            fitting.push(piece);
+        } else {
+            excluded.push(piece);
+        }
+    }
+    let mut layout = cutting_layout::sheets(&fitting, settings);
+    layout.oversized.extend(excluded);
+    layout
+}
+
 struct MeasuredPart {
     dimensions: [u64; 3],
     axes: [DVec3; 3],
     rectangular: bool,
 }
 
-/// Stock types are suggestions from dimensions, never material assignments.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum SuggestedStock {
-    Plywood(u64),
-    Lumber(&'static str),
-    Custom([u64; 2]),
-    Review,
-}
-
-impl SuggestedStock {
-    fn for_group(group: &CutGroup) -> Self {
-        let [thickness, width, _] = group.dimensions;
-        if !group.rectangular {
-            return Self::Review;
-        }
-        if let Some(nominal) = nominal_stock(thickness, width) {
-            return Self::Lumber(nominal);
-        }
-        // A thin panel can reasonably be cut from sheet goods. Narrow strips
-        // remain custom stock rather than assuming every thin piece is plywood.
-        const SHEET_THICKNESSES: [u64; 12] =
-            [30, 40, 60, 90, 120, 150, 180, 190, 210, 220, 240, 250];
-        if width >= thickness * 4 {
-            if let Some(t) = SHEET_THICKNESSES
-                .iter()
-                .find(|t| thickness.abs_diff(**t) <= 2)
-            {
-                return Self::Plywood(*t);
-            }
-        }
-        Self::Custom([thickness, width])
-    }
-
-    fn title(&self) -> String {
-        match self {
-            Self::Plywood(t) => format!("Suggested stock: {} plywood", metric_length(*t)),
-            Self::Lumber(nominal) => format!("Suggested stock: nominal {nominal} lumber"),
-            Self::Custom([t, w]) => {
-                format!(
-                    "Custom stock: {} x {}",
-                    metric_length(*t),
-                    metric_length(*w)
-                )
-            }
-            Self::Review => "Check shape / stock manually".into(),
-        }
-    }
-}
-
 impl CuttingPlan {
     /// An empty selection means all visible parts in the project.
     /// Selecting a face/edge includes its connected visible geometry in that scope.
     pub fn collect(model: &Model, selected: &BTreeSet<u64>) -> Result<Self, String> {
+        Self::collect_parts(model, selected, false)
+    }
+
+    /// Estimates ignore unassigned geometry entirely, including omission counts.
+    pub fn collect_assigned(model: &Model, selected: &BTreeSet<u64>) -> Result<Self, String> {
+        Self::collect_parts(model, selected, true)
+    }
+
+    fn collect_parts(
+        model: &Model,
+        selected: &BTreeSet<u64>,
+        assigned_only: bool,
+    ) -> Result<Self, String> {
         let requested = model.expand_entities(selected);
         let parents: BTreeMap<_, _> = model
             .objects
@@ -129,6 +142,22 @@ impl CuttingPlan {
                     }
                 }
                 let included = selected.is_empty() || !component.is_disjoint(&requested);
+                // A nested part inherits its nearest assigned assembly material.
+                let mut owner = scope;
+                let mut material = None;
+                while let Some(id) = owner {
+                    if let Some(stock) = model.object_stock_material(&model.objects[&id]) {
+                        material = Some((model.objects[&id].stock_material_id, stock.clone()));
+                        break;
+                    }
+                    owner = parents.get(&id).copied();
+                }
+                let Some(material) = material else {
+                    if included && !assigned_only {
+                        skipped += 1;
+                    }
+                    continue;
+                };
                 let Some(part) = measure(model, &component) else {
                     if included {
                         skipped += 1;
@@ -145,32 +174,32 @@ impl CuttingPlan {
                     parent = parents.get(&id).copied();
                 }
                 path.reverse();
-                parts.push((path.join("/"), part, included));
+                parts.push((path.join("/"), part, included, material));
             }
         }
         // Infer a common cutting direction from the longest visible blank in
         // each named group and thickness. Include unselected parts so selecting
         // just a short cut does not change its width/length assignment.
         let mut references: BTreeMap<_, &MeasuredPart> = BTreeMap::new();
-        for (path, part, _) in &parts {
+        for (path, part, _, material) in &parts {
             if path.is_empty() || !part.rectangular {
                 continue;
             }
             let reference = references
-                .entry((path.as_str(), part.dimensions[0]))
+                .entry((path.as_str(), part.dimensions[0], material))
                 .or_insert(part);
             if part.dimensions[2] > reference.dimensions[2] {
                 *reference = part;
             }
         }
-        let mut groups: BTreeMap<([u64; 3], bool), Vec<String>> = BTreeMap::new();
-        for (path, part, included) in &parts {
+        let mut groups: BTreeMap<([u64; 3], bool, MaterialKey), Vec<String>> = BTreeMap::new();
+        for (path, part, included, material) in &parts {
             if !included {
                 continue;
             }
             let mut dimensions = part.dimensions;
             if part.rectangular {
-                if let Some(reference) = references.get(&(path.as_str(), dimensions[0])) {
+                if let Some(reference) = references.get(&(path.as_str(), dimensions[0], material)) {
                     if part.axes[0].dot(reference.axes[0]).abs() > 1. - 1e-8
                         && part.axes[1].dot(reference.axes[2]).abs() > 1. - 1e-8
                     {
@@ -179,24 +208,61 @@ impl CuttingPlan {
                 }
             }
             groups
-                .entry((dimensions, part.rectangular))
+                .entry((dimensions, part.rectangular, material.clone()))
                 .or_default()
                 .push(path.clone());
         }
         if groups.is_empty() {
-            return Err("No three-dimensional parts found in visible geometry. Model each board as a separate group/component or disconnected solid. Select a board or assembly, or use the whole project.".into());
+            return Err("No visible three-dimensional parts with assigned stock materials found. Assign a material from the stock pricing table in Entity Info. Model each board as a separate group/component or disconnected solid. Select a board or assembly, or use the whole project.".into());
         }
         Ok(Self {
             groups: groups
                 .into_iter()
-                .map(|((dimensions, rectangular), parts)| CutGroup {
-                    dimensions,
-                    rectangular,
-                    parts,
-                })
+                .map(
+                    |((dimensions, rectangular, (material_id, material)), parts)| CutGroup {
+                        material_id,
+                        material,
+                        dimensions,
+                        rectangular,
+                        parts,
+                    },
+                )
                 .collect(),
             skipped,
         })
+    }
+
+    fn ordered_groups(&self) -> Vec<&CutGroup> {
+        let mut groups: Vec<_> = self.groups.iter().collect();
+        groups.sort_by(|a, b| {
+            group_names(a)
+                .cmp(&group_names(b))
+                .then_with(|| b.parts.len().cmp(&a.parts.len()))
+                .then_with(|| b.dimensions[2].cmp(&a.dimensions[2]))
+        });
+        groups
+    }
+
+    pub fn material_requirements(&self, settings: LayoutSettings) -> Vec<MaterialRequirement> {
+        let mut materials: BTreeMap<MaterialKey, Vec<(usize, &CutGroup)>> = BTreeMap::new();
+        for (mark, group) in self.ordered_groups().into_iter().enumerate() {
+            materials
+                .entry((group.material_id, group.material.clone()))
+                .or_default()
+                .push((mark, group));
+        }
+        materials
+            .into_iter()
+            .map(|((material_id, material), groups)| {
+                let layout = stock_layout(&material, &groups, settings);
+                MaterialRequirement {
+                    material_id,
+                    material,
+                    quantity: layout.stock.len(),
+                    excluded: layout.oversized.iter().map(|piece| piece.quantity).sum(),
+                }
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -231,76 +297,51 @@ impl CuttingPlan {
         if self.skipped > 0 {
             pdf.paragraph(
                 &format!(
-                    "Omitted: {} flat or line-only connected items (no usable thickness).",
+                    "Omitted: {} items without assigned stock material or usable thickness.",
                     self.skipped
                 ),
                 9.,
             );
         }
         pdf.gap(8.);
-        let mut groups: Vec<_> = self.groups.iter().collect();
-        groups.sort_by(|a, b| {
-            group_names(a)
-                .cmp(&group_names(b))
-                .then_with(|| b.parts.len().cmp(&a.parts.len()))
-                .then_with(|| b.dimensions[2].cmp(&a.dimensions[2]))
-        });
+        let groups = self.ordered_groups();
         if group_stock {
-            let mut stock_groups: BTreeMap<SuggestedStock, Vec<(usize, &CutGroup)>> =
-                BTreeMap::new();
+            let mut stock_groups: BTreeMap<MaterialKey, Vec<(usize, &CutGroup)>> = BTreeMap::new();
             for (index, group) in groups.into_iter().enumerate() {
                 stock_groups
-                    .entry(SuggestedStock::for_group(group))
+                    .entry((group.material_id, group.material.clone()))
                     .or_default()
                     .push((index, group));
             }
-            for (stock, groups) in stock_groups {
+            for ((_, stock), groups) in stock_groups {
                 pdf.ensure(170.);
-                let title = stock.title();
+                let title = format!(
+                    "Material: {} ({} x {} x {})",
+                    stock.name,
+                    metric_length(stock.dimensions[0]),
+                    metric_length(stock.dimensions[1]),
+                    metric_length(stock.dimensions[2])
+                );
+                let settings = LayoutSettings {
+                    sheet_width_mm: stock.dimensions[1] as f64 / 10.,
+                    sheet_length_mm: stock.dimensions[2] as f64 / 10.,
+                    board_length_mm: stock.dimensions[2] as f64 / 10.,
+                    ..settings
+                };
                 pdf.heading(&title, 11.);
                 let quantity: usize = groups.iter().map(|(_, g)| g.parts.len()).sum();
                 let pieces = format!("{quantity} piece{}", if quantity == 1 { "" } else { "s" });
-                let cuts: Vec<_> = groups
+                let packed = stock_layout(&stock, &groups, settings);
+                let layout = Some(packed);
+                let sheet_stock = true;
+                let area: f64 = groups
                     .iter()
-                    .map(|(mark, g)| cutting_layout::Piece {
-                        mark: *mark,
-                        length: g.dimensions[2],
-                        width: g.dimensions[1],
-                        quantity: g.parts.len(),
+                    .map(|(_, g)| {
+                        g.dimensions[1] as f64 * g.dimensions[2] as f64 * g.parts.len() as f64
+                            / 100_000_000.
                     })
-                    .collect();
-                let layout = match &stock {
-                    SuggestedStock::Plywood(_) => Some(cutting_layout::sheets(&cuts, settings)),
-                    SuggestedStock::Lumber(_) | SuggestedStock::Custom(_) => {
-                        Some(cutting_layout::boards(&cuts, settings))
-                    }
-                    SuggestedStock::Review => None,
-                };
-                let sheet_stock = matches!(&stock, SuggestedStock::Plywood(_));
-                let summary = match &stock {
-                    SuggestedStock::Plywood(_) => {
-                        let area: f64 = groups
-                            .iter()
-                            .map(|(_, g)| {
-                                g.dimensions[1] as f64
-                                    * g.dimensions[2] as f64
-                                    * g.parts.len() as f64
-                                    / 100_000_000.
-                            })
-                            .sum();
-                        format!("{pieces} | Net cut area: {area:.2} m2")
-                    }
-                    SuggestedStock::Lumber(_) | SuggestedStock::Custom(_) => {
-                        let length: f64 = groups
-                            .iter()
-                            .map(|(_, g)| g.dimensions[2] as f64 * g.parts.len() as f64 / 10_000.)
-                            .sum();
-                        format!("{pieces} | Total cut length: {length:.2} m")
-                    }
-                    SuggestedStock::Review => {
-                        format!("{pieces} | Review blank dimensions")
-                    }
-                };
+                    .sum();
+                let summary = format!("{pieces} | Net cut area: {area:.2} m2");
                 pdf.paragraph(&summary, 9.);
                 if let Some(layout) = &layout {
                     pdf.paragraph(
@@ -308,8 +349,8 @@ impl CuttingPlan {
                             "Stock required: {} {} | Saw kerf: {}",
                             layout.stock.len(),
                             match (sheet_stock, layout.stock.len()) {
-                                (true, 1) => "sheet",
-                                (true, _) => "sheets",
+                                (true, 1) => "stock piece",
+                                (true, _) => "stock pieces",
                                 (false, 1) => "board",
                                 (false, _) => "boards",
                             },
@@ -490,7 +531,7 @@ fn draw_layout(
         pdf.heading(
             &format!(
                 "{} {} of {}",
-                if sheet { "SHEET" } else { "BOARD" },
+                if sheet { "STOCK" } else { "BOARD" },
                 number + 1,
                 layout.stock.len()
             ),

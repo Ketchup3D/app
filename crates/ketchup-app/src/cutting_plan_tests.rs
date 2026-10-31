@@ -1,5 +1,18 @@
 use super::*;
 
+fn material() -> ketchup_core::StockMaterial {
+    ketchup_core::StockMaterial {
+        name: "Catalog oak".into(),
+        dimensions: [1000, 12200, 24400],
+    }
+}
+
+fn assign_raw(model: &mut Model) {
+    let roots = model.root_entities();
+    let id = model.make_object(&roots, false, "").unwrap();
+    model.objects.get_mut(&id).unwrap().stock_material = Some(material());
+}
+
 fn blank(size: DVec3) -> Model {
     let mut model = Model::default();
     let corners = [
@@ -21,7 +34,9 @@ fn blank(size: DVec3) -> Model {
 
 fn add_board(model: &mut Model, size: DVec3, offset: DVec3, name: &str, component: bool) -> u64 {
     let entities = model.paste_entities(&blank(size), offset);
-    model.make_object(&entities, component, name).unwrap()
+    let id = model.make_object(&entities, component, name).unwrap();
+    model.objects.get_mut(&id).unwrap().stock_material = Some(material());
+    id
 }
 
 #[test]
@@ -131,7 +146,8 @@ fn nested_assembly_and_part_selection_count_each_instance_once() {
 
 #[test]
 fn dimensions_follow_rotation_translation_scaling_and_axis_permutations() {
-    let original = blank(DVec3::new(0.038, 0.089, 0.6));
+    let mut original = blank(DVec3::new(0.038, 0.089, 0.6));
+    assign_raw(&mut original);
     for rotation in [
         glam::DQuat::IDENTITY,
         glam::DQuat::from_rotation_y(0.71) * glam::DQuat::from_rotation_z(0.31),
@@ -158,6 +174,7 @@ fn short_steps_keep_the_group_width_and_cut_direction_even_when_selected_alone()
         ));
     }
     let steps = model.make_object(&entities, false, "Steps").unwrap();
+    model.objects.get_mut(&steps).unwrap().stock_material = Some(material());
     let short_face = *model.objects[&steps]
         .entities
         .iter()
@@ -273,6 +290,7 @@ fn whole_project_excludes_hidden_parts_but_keeps_visible_locked_parts_outside_th
 fn disconnected_raw_geometry_is_split_and_edge_selection_expands_only_its_body() {
     let mut model = blank(DVec3::new(0.02, 0.1, 0.8));
     model.paste_entities(&blank(DVec3::new(0.02, 0.1, 0.8)), DVec3::X);
+    assign_raw(&mut model);
     let edge = *model.edges.keys().next().unwrap();
     assert_eq!(
         CuttingPlan::collect(&model, &BTreeSet::new())
@@ -324,6 +342,7 @@ fn open_or_irregular_geometry_is_separated_and_marked_as_a_bounding_blank() {
     let mut open = model.clone();
     open.faces.pop_first();
     model.paste_entities(&open, DVec3::X);
+    assign_raw(&mut model);
     let plan = CuttingPlan::collect(&model, &BTreeSet::new()).unwrap();
     assert_eq!(plan.groups.len(), 2);
     assert_eq!(plan.groups[0].dimensions, plan.groups[1].dimensions);
@@ -331,6 +350,60 @@ fn open_or_irregular_geometry_is_separated_and_marked_as_a_bounding_blank() {
     let pdf = String::from_utf8(plan.pdf("Open shape", true, false)).unwrap();
     assert!(pdf.contains("CHECK SHAPE"));
     assert!(pdf.contains("bounding blank only"));
+}
+
+#[test]
+fn notches_and_holes_purchase_the_same_full_blank_as_an_uncut_panel() {
+    for cutout in ["none", "corner", "hole"] {
+        let mut model = Model::default();
+        let outline = if cutout == "corner" {
+            vec![
+                (0., 0.), (2., 0.), (2., 1.9), (1.9, 1.9), (1.9, 2.), (0., 2.),
+            ]
+        } else {
+            vec![(0., 0.), (2., 0.), (2., 2.), (0., 2.)]
+        };
+        let mut ring = |points: &[(f64, f64)]| {
+            for i in 0..points.len() {
+                let (x, y) = points[i];
+                let (next_x, next_y) = points[(i + 1) % points.len()];
+                model
+                    .add_edge(DVec3::new(x, y, 0.), DVec3::new(next_x, next_y, 0.))
+                    .unwrap();
+            }
+        };
+        ring(&outline);
+        if cutout == "hole" {
+            ring(&[(0.9, 0.9), (1., 0.9), (1., 1.), (0.9, 1.)]);
+            let inner = model
+                .faces
+                .values()
+                .find(|face| model.face_area(face) < 0.02)
+                .unwrap()
+                .id;
+            model.erase(&BTreeSet::from([inner]));
+        }
+        let face = *model.faces.keys().next().unwrap();
+        model.push_pull(face, 0.018).unwrap();
+        assign_raw(&mut model);
+        let object = model.objects.values_mut().next().unwrap();
+        object.stock_material.as_mut().unwrap().dimensions = [180, 20000, 20000];
+        let before = model.clone();
+        // Whole-project and object selections must each count one full blank.
+        for selected in [BTreeSet::new(), model.objects.keys().copied().collect()] {
+            let plan = CuttingPlan::collect(&model, &selected).unwrap();
+            assert_eq!(plan.groups.len(), 1, "{cutout}");
+            assert_eq!(plan.groups[0].dimensions, [180, 20000, 20000], "{cutout}");
+            assert_eq!(plan.groups[0].rectangular, cutout == "none");
+            let required = plan.material_requirements(LayoutSettings::default());
+            assert_eq!(required[0].quantity, 1, "{cutout}");
+            assert_eq!(required[0].excluded, 0, "{cutout}");
+            let pdf = String::from_utf8(plan.pdf("Panel", false, true)).unwrap();
+            assert!(pdf.contains("Stock required: 1 stock piece"), "{cutout}");
+            assert!(!pdf.contains("DOES NOT FIT SELECTED STOCK"), "{cutout}");
+        }
+        assert_eq!(model, before);
+    }
 }
 
 #[test]
@@ -357,7 +430,8 @@ fn fractional_dimensions_are_retained_and_nominal_labels_never_replace_actual_si
         "Full two by four inches is not dressed 2x4"
     );
     assert_eq!(nominal_stock(400, 900), None);
-    let model = blank(DVec3::new(0.0381, 0.0889, 0.6004));
+    let mut model = blank(DVec3::new(0.0381, 0.0889, 0.6004));
+    assign_raw(&mut model);
     let plan = CuttingPlan::collect(&model, &BTreeSet::new()).unwrap();
     assert_eq!(plan.groups[0].dimensions, [381, 889, 6004]);
     for group_stock in [false, true] {
@@ -366,7 +440,7 @@ fn fractional_dimensions_are_retained_and_nominal_labels_never_replace_actual_si
         assert!(pdf.contains("(38.1 mm x 88.9 mm)"));
         assert!(pdf.contains("(60.04 cm)"));
         if group_stock {
-            assert!(pdf.contains("Stock: 244 cm x 88.9 mm"));
+            assert!(pdf.contains("Stock: 244 cm x 122 cm"));
             assert!(pdf.contains("- 88.9 mm x 60.04 cm"));
         }
     }
@@ -381,6 +455,8 @@ fn pdf_escapes_names_paginates_the_summary_and_has_valid_cross_reference_offsets
     let plan = CuttingPlan {
         groups: (0..70)
             .map(|i| CutGroup {
+                material_id: None,
+                material: material(),
                 dimensions: [380, 890, 6000 + i * 10],
                 rectangular: i % 2 == 0,
                 parts: vec![format!(
@@ -506,92 +582,81 @@ fn visibility_respects_hidden_ancestors_and_tags_for_both_export_scopes() {
 }
 
 #[test]
-fn stock_suggestions_distinguish_panels_lumber_custom_sizes_and_irregular_shapes() {
-    let group = |dimensions, rectangular| CutGroup {
-        dimensions,
-        rectangular,
-        parts: vec!["Part".into()],
-    };
-    assert_eq!(
-        SuggestedStock::for_group(&group([180, 3000, 6000], true)),
-        SuggestedStock::Plywood(180)
+fn only_assigned_objects_are_included_and_materials_keep_equal_cuts_separate() {
+    let mut model = Model::default();
+    let a = add_board(
+        &mut model,
+        DVec3::new(0.038, 0.089, 0.6),
+        DVec3::ZERO,
+        "Assigned",
+        false,
     );
-    assert_eq!(
-        SuggestedStock::for_group(&group([181, 4000, 8000], true)),
-        SuggestedStock::Plywood(180)
+    let b = add_board(
+        &mut model,
+        DVec3::new(0.038, 0.089, 0.6),
+        DVec3::X,
+        "Unassigned",
+        false,
     );
-    assert_eq!(
-        SuggestedStock::for_group(&group([890, 890, 21000], true)),
-        SuggestedStock::Lumber("4x4")
+    model.objects.get_mut(&b).unwrap().stock_material = None;
+    assert!(
+        CuttingPlan::collect(&model, &BTreeSet::from([b]))
+            .unwrap_err()
+            .contains("Assign a material")
     );
-    assert_eq!(
-        SuggestedStock::for_group(&group([889, 889, 6000], true)),
-        SuggestedStock::Lumber("4x4")
+    let plan = CuttingPlan::collect(&model, &BTreeSet::new()).unwrap();
+    assert_eq!(plan.groups.len(), 1);
+    assert_eq!(plan.skipped, 1);
+    let mut other = material();
+    other.name = "Catalog pine".into();
+    model.objects.get_mut(&b).unwrap().stock_material = Some(other);
+    let plan = CuttingPlan::collect(&model, &BTreeSet::new()).unwrap();
+    assert_eq!(plan.groups.len(), 2);
+    let pdf = String::from_utf8(plan.pdf("Materials", false, true)).unwrap();
+    assert!(pdf.contains("Material: Catalog oak"));
+    assert!(pdf.contains("Material: Catalog pine"));
+    assert!(!pdf.contains("Suggested stock"));
+    // Assignment survives document round-trips and copies, and defaults for old data.
+    let saved = serde_json::to_string(&model).unwrap();
+    let restored: Model = serde_json::from_str(&saved).unwrap();
+    assert_eq!(restored, model);
+    let copy = model.copy_entities(&BTreeSet::from([a]));
+    assert!(
+        copy.objects
+            .values()
+            .any(|o| o.stock_material == Some(material()))
     );
-    assert_eq!(
-        SuggestedStock::for_group(&group([380, 890, 6000], true)),
-        SuggestedStock::Lumber("2x4")
-    );
-    // Recognized lumber wins over sheet-thickness guesses.
-    assert_eq!(
-        SuggestedStock::for_group(&group([190, 890, 6000], true)),
-        SuggestedStock::Lumber("1x4")
-    );
-    // Neither narrow strips nor arbitrary thicknesses imply plywood.
-    assert_eq!(
-        SuggestedStock::for_group(&group([180, 500, 6000], true)),
-        SuggestedStock::Custom([180, 500])
-    );
-    assert_eq!(
-        SuggestedStock::for_group(&group([173, 3000, 6000], true)),
-        SuggestedStock::Custom([173, 3000])
-    );
-    assert_eq!(
-        SuggestedStock::for_group(&group([180, 3000, 6000], false)),
-        SuggestedStock::Review
-    );
+    let mut legacy = serde_json::to_value(&model.objects[&a]).unwrap();
+    legacy.as_object_mut().unwrap().remove("stock_material");
+    let legacy: ketchup_core::Object = serde_json::from_value(legacy).unwrap();
+    assert!(legacy.stock_material.is_none());
 }
 
 #[test]
-fn optional_stock_grouping_combines_different_cuts_and_reports_area_or_linear_totals() {
-    let plan = CuttingPlan {
-        groups: vec![
-            CutGroup {
-                dimensions: [180, 3000, 6000],
-                rectangular: true,
-                parts: vec!["Side A".into(), "Side B".into()],
-            },
-            CutGroup {
-                dimensions: [180, 4000, 8000],
-                rectangular: true,
-                parts: vec!["Shelf".into()],
-            },
-            CutGroup {
-                dimensions: [890, 890, 21000],
-                rectangular: true,
-                parts: vec!["Post A".into(), "Post B".into()],
-            },
-            CutGroup {
-                dimensions: [890, 890, 6000],
-                rectangular: true,
-                parts: vec!["Short post".into()],
-            },
-        ],
-        skipped: 0,
-    };
-    let grouped = String::from_utf8(plan.pdf("Cabinet", false, true)).unwrap();
-    assert!(grouped.contains("Suggested stock: 18 mm plywood"));
-    assert!(grouped.contains("Suggested stock: nominal 4x4 lumber"));
-    assert!(grouped.contains("3 pieces | Net cut area: 0.68 m2"));
-    assert!(grouped.contains("3 pieces | Total cut length: 4.80 m"));
-    for mark in ["P001", "P002", "P003", "P004"] {
-        assert!(grouped.contains(mark));
-    }
-    assert!(!grouped.contains("PART REFERENCES"));
-    let plain = String::from_utf8(plan.pdf("Cabinet", false, false)).unwrap();
-    assert!(!plain.contains("Suggested stock:"));
-    assert!(!plain.contains("Net cut area:"));
-    assert_eq!(plan.groups[0].dimensions, [180, 3000, 6000]);
+fn assembly_material_is_inherited_and_child_assignment_overrides_it() {
+    let mut model = blank(DVec3::new(0.038, 0.089, 0.6));
+    assign_raw(&mut model);
+    let roots = model.root_entities();
+    let assembly = model.make_object(&roots, false, "Assembly").unwrap();
+    let mut parent_material = material();
+    parent_material.name = "Parent".into();
+    model.objects.get_mut(&assembly).unwrap().stock_material = Some(parent_material.clone());
+    let child = *model.objects[&assembly].entities.first().unwrap();
+    assert_eq!(
+        CuttingPlan::collect(&model, &BTreeSet::new())
+            .unwrap()
+            .groups[0]
+            .material,
+        material()
+    );
+    model.objects.get_mut(&child).unwrap().stock_material = None;
+    assert_eq!(
+        CuttingPlan::collect(&model, &BTreeSet::new())
+            .unwrap()
+            .groups[0]
+            .material,
+        parent_material
+    );
 }
 
 #[test]
@@ -606,6 +671,8 @@ fn cut_list_sorts_by_group_then_descending_quantity_and_cut_length() {
         ]
         .into_iter()
         .map(|(name, quantity, length)| CutGroup {
+            material_id: None,
+            material: material(),
             dimensions: [380, 890, length],
             rectangular: true,
             parts: vec![name.into(); quantity],
@@ -651,7 +718,7 @@ fn stock_grouping_preserves_visible_only_collection() {
     model.hidden.insert(hidden);
     let plan = CuttingPlan::collect(&model, &BTreeSet::new()).unwrap();
     let pdf = String::from_utf8(plan.pdf("Cabinet", false, true)).unwrap();
-    assert!(pdf.contains("Suggested stock: 18 mm plywood"));
+    assert!(pdf.contains("Material: Catalog oak"));
     assert!(pdf.contains("1 piece | Net cut area: 0.18 m2"));
 }
 
@@ -659,6 +726,11 @@ fn stock_grouping_preserves_visible_only_collection() {
 fn stock_pdf_includes_colored_coded_diagrams_and_uses_the_selected_kerf() {
     let plan = CuttingPlan {
         groups: vec![CutGroup {
+            material_id: None,
+            material: ketchup_core::StockMaterial {
+                name: "Oak board".into(),
+                dimensions: [380, 890, 10000],
+            },
             dimensions: [380, 890, 5000],
             rectangular: true,
             parts: vec!["A".into(), "B".into()],
@@ -672,9 +744,14 @@ fn stock_pdf_includes_colored_coded_diagrams_and_uses_the_selected_kerf() {
     };
     let with_kerf =
         String::from_utf8(plan.pdf_with_layout("Bench", false, true, settings)).unwrap();
-    assert!(with_kerf.contains("Stock required: 2 boards"));
-    assert!(with_kerf.contains("BOARD 1 of 2"));
-    assert!(with_kerf.contains("BOARD 2 of 2"));
+    assert!(with_kerf.contains("Stock required: 2 stock pieces"));
+    let required = plan.material_requirements(settings);
+    assert_eq!(required.len(), 1);
+    assert_eq!(required[0].quantity, 2);
+    assert_eq!(required[0].excluded, 0);
+    assert_eq!(plan.material_requirements(LayoutSettings { kerf_mm: 0., ..settings })[0].quantity, 1);
+    assert!(with_kerf.contains("STOCK 1 of 2"));
+    assert!(with_kerf.contains("STOCK 2 of 2"));
     assert!(with_kerf.contains("Kerf: 3 mm"));
     assert!(with_kerf.contains("P001 x1 - 89 mm x 50 cm"));
     assert!(
@@ -691,10 +768,10 @@ fn stock_pdf_includes_colored_coded_diagrams_and_uses_the_selected_kerf() {
         },
     ))
     .unwrap();
-    assert!(no_kerf.contains("Stock required: 1 board"));
-    assert!(!no_kerf.contains("BOARD 2"));
+    assert!(no_kerf.contains("Stock required: 1 stock piece"));
+    assert!(!no_kerf.contains("STOCK 2"));
     let plain = String::from_utf8(plan.pdf_with_layout("Bench", false, false, settings)).unwrap();
-    assert!(!plain.contains("BOARD 1"));
+    assert!(!plain.contains("STOCK 1"));
     assert!(!plain.contains(" re B Q"));
     for i in 0..100 {
         for j in 0..i {
@@ -707,6 +784,8 @@ fn stock_pdf_includes_colored_coded_diagrams_and_uses_the_selected_kerf() {
 fn oversized_cuts_are_reported_without_silently_increasing_the_stock_size() {
     let plan = CuttingPlan {
         groups: vec![CutGroup {
+            material_id: None,
+            material: material(),
             dimensions: [180, 13000, 30000],
             rectangular: true,
             parts: vec!["Too large".into()],
@@ -716,7 +795,7 @@ fn oversized_cuts_are_reported_without_silently_increasing_the_stock_size() {
     let pdf = String::from_utf8(plan.pdf("Cabinet", false, true)).unwrap();
     assert!(pdf.contains("DOES NOT FIT SELECTED STOCK"));
     assert!(pdf.contains("P001: 1 piece, 130 cm x 300 cm"));
-    assert!(!pdf.contains("SHEET 1"));
+    assert!(!pdf.contains("STOCK 1"));
 }
 
 #[test]
@@ -779,18 +858,22 @@ fn group_column_deduplicates_paths_wraps_long_names_and_handles_unnamed_parts() 
         assert!(!automatic_group_name(name));
     }
     let group = CutGroup {
+        material_id: None,
+        material: material(),
         dimensions: [180, 3000, 6000],
         rectangular: true,
         parts: vec!["Bench/Frame/Leg".into(), "Bench/Frame/Leg".into()],
     };
     assert_eq!(group_lines(&group), ["Bench/Frame/Leg"]);
     let group = CutGroup {
+        material_id: None,
         parts: vec!["".into()],
         ..group
     };
     assert_eq!(group_lines(&group), ["-"]);
     let long = "LongParent/".repeat(200);
     let group = CutGroup {
+        material_id: None,
         parts: vec![long.clone()],
         ..group
     };
@@ -804,4 +887,79 @@ fn group_column_deduplicates_paths_wraps_long_names_and_handles_unnamed_parts() 
     let pdf = String::from_utf8(plan.pdf("Long hierarchy", false, false)).unwrap();
     assert!(pdf.matches("/Type /Page /").count() > 1);
     assert!(pdf.contains("continued"));
+}
+
+#[test]
+fn assigned_stock_rejects_cuts_that_exceed_thickness_or_width() {
+    for (dimensions, rectangular) in [
+        ([400, 890, 5000], true),
+        ([380, 900, 5000], true),
+        ([400, 890, 5000], false),
+        ([380, 900, 5000], false),
+    ] {
+        let plan = CuttingPlan {
+            groups: vec![CutGroup {
+                material_id: None,
+                material: ketchup_core::StockMaterial {
+                    name: "Narrow stock".into(),
+                    dimensions: [380, 890, 10000],
+                },
+                dimensions,
+                rectangular,
+                parts: vec!["Too large".into()],
+            }],
+            skipped: 0,
+        };
+        let pdf = String::from_utf8(plan.pdf_with_layout(
+            "Fit",
+            false,
+            true,
+            LayoutSettings {
+                allow_rotation: false,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        let required = plan.material_requirements(LayoutSettings {
+            allow_rotation: false,
+            ..Default::default()
+        });
+        assert_eq!(required[0].quantity, 0);
+        assert_eq!(required[0].excluded, 1);
+        assert!(pdf.contains("DOES NOT FIT SELECTED STOCK"));
+        assert!(!pdf.contains("STOCK 1"));
+    }
+}
+
+#[test]
+fn material_ids_keep_identical_catalog_entries_in_separate_cut_groups() {
+    let mut model = Model::default();
+    let a = add_board(
+        &mut model,
+        DVec3::new(0.019, 0.089, 0.6),
+        DVec3::ZERO,
+        "A",
+        false,
+    );
+    let b = add_board(
+        &mut model,
+        DVec3::new(0.019, 0.089, 0.6),
+        DVec3::X,
+        "B",
+        false,
+    );
+    let first = ketchup_core::MaterialId::new_v4();
+    let second = ketchup_core::MaterialId::new_v4();
+    for (object, id) in [(a, first), (b, second)] {
+        model.objects.get_mut(&object).unwrap().stock_material = None;
+        model.objects.get_mut(&object).unwrap().stock_material_id = Some(id);
+        model.stock_materials.insert(id, material());
+    }
+    let plan = CuttingPlan::collect(&model, &BTreeSet::new()).unwrap();
+    assert_eq!(plan.groups.len(), 2);
+    assert_ne!(plan.groups[0].material_id, plan.groups[1].material_id);
+    let required = plan.material_requirements(LayoutSettings::default());
+    assert_eq!(required.len(), 2);
+    assert_ne!(required[0].material_id, required[1].material_id);
+    assert!(required.iter().all(|item| item.quantity == 1));
 }

@@ -30,7 +30,7 @@ impl KetchupApp {
             }
             self.snap = None;
         } else {
-            self.snap = ketchup_core::inference::infer_with_face_query(
+            self.snap = ketchup_core::inference::infer_with_targets(
                 &self.doc.model,
                 &self.doc.camera,
                 dv(self.viewport.size()),
@@ -44,6 +44,7 @@ impl KetchupApp {
                         .picking_cache
                         .snap_query(&self.face_cache, &self.entity_cache),
                 ),
+                self.snap_targets(),
             );
             // Leader text starts on geometry, not on the drawing plane.
             if self
@@ -201,7 +202,6 @@ impl KetchupApp {
                 save = ui.ctx().input_mut(|i| {
                     !i.modifiers.shift && i.consume_key(egui::Modifiers::NONE, Key::Enter)
                 });
-                Self::focus_name_input(ui, &editor.text, input_id);
                 ui.add(
                     egui::TextEdit::multiline(&mut editor.text)
                         .id(input_id)
@@ -209,6 +209,7 @@ impl KetchupApp {
                         .desired_rows(4)
                         .hint_text("Enter label text"),
                 );
+                Self::focus_name_input(ui, &editor.text, input_id);
                 if editor.text.len() > 4096 {
                     editor.text.truncate(editor.text.floor_char_boundary(4096));
                 }

@@ -1,6 +1,89 @@
 use super::*;
 use ketchup_core::SolidOperation;
 
+// Solid volume imports and unions object geometry. Reuse both successful and
+// failed measurements across redraws and selection changes. Model collections
+// permit direct edits, so compare a snapshot to catch edits, undo and project
+// changes even when entity IDs are reused.
+#[derive(Default)]
+pub(super) struct VolumeCache {
+    source: Option<Model>,
+    volumes: std::collections::BTreeMap<u64, Result<f64, &'static str>>,
+    selection_size: Option<(BTreeSet<u64>, Option<DVec3>)>,
+    #[cfg(test)]
+    pub(super) computations: usize,
+}
+
+impl VolumeCache {
+    fn update(&mut self, model: &Model) {
+        if self.source.as_ref() != Some(model) {
+            self.source = Some(model.clone());
+            self.volumes.clear();
+            self.selection_size = None;
+        }
+    }
+
+    pub(super) fn volume(&mut self, model: &Model, id: u64) -> Result<f64, &'static str> {
+        self.update(model);
+        *self.volumes.entry(id).or_insert_with(|| {
+            #[cfg(test)]
+            {
+                self.computations += 1;
+            }
+            model.solid_volume(id)
+        })
+    }
+
+    pub(super) fn solid_selection_size(
+        &mut self,
+        model: &Model,
+        selected: &BTreeSet<u64>,
+    ) -> Option<DVec3> {
+        self.update(model);
+        if let Some((previous, size)) = &self.selection_size
+            && previous == selected
+        {
+            return *size;
+        }
+        // Restrict validation to the selection so selecting one face does not
+        // silently measure the rest of an unselected connected body.
+        let copy = model.copy_entities(selected);
+        let mut bounds = None;
+        collect_solid_bounds(&copy, &mut bounds);
+        let size = bounds.map(|(min, max)| max - min);
+        self.selection_size = Some((selected.clone(), size));
+        size
+    }
+}
+
+fn collect_solid_bounds(model: &Model, bounds: &mut Option<(DVec3, DVec3)>) {
+    let mut visited = BTreeSet::new();
+    for id in model.root_entities() {
+        if visited.contains(&id)
+            || !(model.objects.contains_key(&id) || model.faces.contains_key(&id))
+        {
+            continue;
+        }
+        let Ok(body) = model.solid_entities(id) else {
+            continue;
+        };
+        visited.extend(model.expand_entities(&body));
+        if model.solid_volume(id).is_ok_and(|volume| volume > 0.) {
+            for vertex in model.selection_vertices(&body) {
+                let point = model.vertices[&vertex].position;
+                *bounds = Some(match *bounds {
+                    Some((min, max)) => (min.min(point), max.max(point)),
+                    None => (point, point),
+                });
+            }
+        } else if let Some(contents) = model.object_contents(id) {
+            // Assemblies can contain both solid parts and non-solid items.
+            // Rejecting the assembly must not discard its valid child solids.
+            collect_solid_bounds(&contents, bounds);
+        }
+    }
+}
+
 fn operation(tool: Tool) -> Option<SolidOperation> {
     Some(match tool {
         Tool::OuterShell => SolidOperation::OuterShell,
@@ -159,7 +242,7 @@ impl KetchupApp {
                     if ui
                         .add_enabled(
                             !self.selected.is_empty(),
-                            egui::Button::new(RichText::new(label).color(axis_color(axis))),
+                            egui::Button::new(RichText::new(label).color(self.axis_color(axis))),
                         )
                         .clicked()
                     {
@@ -177,7 +260,7 @@ impl KetchupApp {
                 .map(|o| o.name.as_str())
                 .unwrap_or("Connected body");
             ui.label(RichText::new(name).strong());
-            if let Ok(volume) = self.doc.model.solid_volume(first) {
+            if let Ok(volume) = self.solid_volume_cache.volume(&self.doc.model, first) {
                 Self::property(ui, "Volume", &self.doc.display.units.format_volume(volume));
             }
             if ui.button("Choose first body again").clicked() {
@@ -277,7 +360,7 @@ impl KetchupApp {
                 .map(|pt| self.doc.camera.project(*pt, size).map(|v| rect.min + pv(v)))
                 .collect();
             if let Some(points) = screen {
-                let color = axis_color(axis);
+                let color = self.axis_color(axis);
                 let alpha = if self.flip_hover == Some(axis) {
                     65
                 } else {

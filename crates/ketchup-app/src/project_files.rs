@@ -476,16 +476,12 @@ pub fn export_cutting_plan(
     name: String,
     model: ketchup_core::Model,
     selected: std::collections::BTreeSet<u64>,
-    group_stock: bool,
     layout_settings: crate::cutting_layout::Settings,
 ) -> Pending {
     run(ctx, move || {
-        if group_stock {
-            layout_settings.validate()?;
-        }
+        layout_settings.validate()?;
         let plan = crate::cutting_plan::CuttingPlan::collect(&model, &selected)?;
-        let contents =
-            plan.pdf_with_layout(&name, !selected.is_empty(), group_stock, layout_settings);
+        let contents = plan.pdf_with_layout(&name, !selected.is_empty(), true, layout_settings);
         let Some(path) = rfd::FileDialog::new()
             .set_title("Export woodworking cutting plan")
             .add_filter("PDF document", &["pdf"])
@@ -512,24 +508,20 @@ pub fn export_cutting_plan(
     name: String,
     model: ketchup_core::Model,
     selected: std::collections::BTreeSet<u64>,
-    group_stock: bool,
     layout_settings: crate::cutting_layout::Settings,
 ) -> Pending {
     let (sender, receiver) = mpsc::channel();
-    let result = (if group_stock {
-        layout_settings.validate()
-    } else {
-        Ok(())
-    })
-    .and_then(|()| crate::cutting_plan::CuttingPlan::collect(&model, &selected))
-    .and_then(|plan| {
-        open_pdf(&plan.pdf_with_layout(&name, !selected.is_empty(), group_stock, layout_settings))
-            .map(|_| Outcome::Exported)
-            .map_err(|e| {
-                e.as_string()
-                    .unwrap_or_else(|| "The browser could not open this PDF".into())
-            })
-    });
+    let result = layout_settings
+        .validate()
+        .and_then(|()| crate::cutting_plan::CuttingPlan::collect(&model, &selected))
+        .and_then(|plan| {
+            open_pdf(&plan.pdf_with_layout(&name, !selected.is_empty(), true, layout_settings))
+                .map(|_| Outcome::Exported)
+                .map_err(|e| {
+                    e.as_string()
+                        .unwrap_or_else(|| "The browser could not open this PDF".into())
+                })
+        });
     let _ = sender.send(result);
     ctx.request_repaint();
     receiver

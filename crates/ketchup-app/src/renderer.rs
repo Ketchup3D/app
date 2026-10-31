@@ -12,12 +12,64 @@ struct Vertex {
     lateral: f32,
 }
 
+// Compare document data because callers can edit Model collections directly.
+// Share one snapshot across panes and sidebar summaries, rather than cloning a
+// large document separately for each camera.
+#[derive(Default)]
+pub struct ModelSnapshot {
+    model: Option<Model>,
+    revision: u64,
+}
+
+impl ModelSnapshot {
+    pub fn update(&mut self, model: &Model) -> u64 {
+        if self.model.as_ref() != Some(model) {
+            self.model = Some(model.clone());
+            self.revision = self.revision.wrapping_add(1);
+        }
+        self.revision
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct SceneKey {
+    pub model_revision: u64,
+    pub camera: Camera,
+    pub size: DVec2,
+    pub pixels_per_point: f32,
+    pub display: ketchup_core::DisplaySettings,
+    pub dark: bool,
+    pub tool: ketchup_core::Tool,
+    pub selected: std::collections::BTreeSet<u64>,
+    pub hover: Option<u64>,
+    pub outliner_hover: std::collections::BTreeSet<u64>,
+}
+
 #[derive(Default)]
 pub struct SceneCache {
     occlusion: Occlusion,
     edge_surfaces: BTreeMap<(u64, u64), Vec<DVec2>>,
     buffers: BufferPool,
     gpu_buffers: GpuBufferPool,
+    retained: Option<Arc<SceneCallback>>,
+    pub key: Option<SceneKey>,
+    #[cfg(test)]
+    pub mesh_builds: usize,
+}
+
+impl SceneCache {
+    pub fn repaint(&self, key: &SceneKey, painter: &egui::Painter, rect: Rect) -> bool {
+        if self.key.as_ref() == Some(key) {
+            if let Some(callback) = &self.retained {
+                painter.add(egui_wgpu::Callback::new_paint_callback(
+                    rect,
+                    SharedScene(Arc::clone(callback)),
+                ));
+                return true;
+            }
+        }
+        false
+    }
 }
 
 type BufferPool = Arc<Mutex<Vec<MeshBuffers>>>;
@@ -66,6 +118,11 @@ impl Mesh {
         }
     }
     pub fn cached(camera: &Camera, size: DVec2, cache: &mut SceneCache) -> Self {
+        cache.key = None;
+        #[cfg(test)]
+        {
+            cache.mesh_builds += 1;
+        }
         let mut mesh = Self::new(camera, size);
         mesh.buffer_pool = Some(Arc::clone(&cache.buffers));
         mesh.gpu_pool = Arc::clone(&cache.gpu_buffers);
@@ -526,8 +583,32 @@ impl Mesh {
         self.edge_surfaces
             .retain(|_, surfaces| !surfaces.is_empty());
         cache.edge_surfaces = std::mem::take(&mut self.edge_surfaces);
-        self.paint(painter, rect);
+        let callback = self.retain(cache);
+        painter.add(egui_wgpu::Callback::new_paint_callback(
+            rect,
+            SharedScene(callback),
+        ));
     }
+
+    // Compare the actual render output, including previews and annotations.
+    // Even rebuilt frames can keep unchanged meshes resident on the GPU,
+    // including those using the uncached preview and annotation paths.
+    fn retain(mut self, cache: &mut SceneCache) -> Arc<SceneCallback> {
+        self.normalize_parallel_depth();
+        let candidate = Arc::new(self.into_callback());
+        if let Some(previous) = &cache.retained {
+            if bytemuck::cast_slice::<Vertex, u8>(&previous.vertices)
+                == bytemuck::cast_slice::<Vertex, u8>(&candidate.vertices)
+                && previous.indices == candidate.indices
+                && previous.triangle_ranges == candidate.triangle_ranges
+            {
+                return Arc::clone(previous);
+            }
+        }
+        cache.retained = Some(Arc::clone(&candidate));
+        candidate
+    }
+
     fn normalize_parallel_depth(&mut self) {
         if !self.parallel {
             return;
@@ -559,19 +640,15 @@ impl Mesh {
         }
     }
 
-    pub fn paint(mut self, painter: &egui::Painter, rect: Rect) {
-        self.normalize_parallel_depth();
-        painter.add(egui_wgpu::Callback::new_paint_callback(
-            rect,
-            SceneCallback {
-                vertices: self.vertices,
-                indices: self.indices,
-                triangle_ranges: self.triangle_ranges,
-                buffer_pool: self.buffer_pool,
-                gpu_pool: self.gpu_pool,
-                gpu_buffers: OnceLock::new(),
-            },
-        ));
+    fn into_callback(self) -> SceneCallback {
+        SceneCallback {
+            vertices: self.vertices,
+            indices: self.indices,
+            triangle_ranges: self.triangle_ranges,
+            buffer_pool: self.buffer_pool,
+            gpu_pool: self.gpu_pool,
+            gpu_buffers: OnceLock::new(),
+        }
     }
 }
 
@@ -1306,6 +1383,30 @@ struct SceneCallback {
     gpu_buffers: OnceLock<GpuBuffers>,
 }
 
+struct SharedScene(Arc<SceneCallback>);
+
+impl egui_wgpu::CallbackTrait for SharedScene {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: &egui_wgpu::ScreenDescriptor,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        self.0.prepare(device, queue, screen, encoder, resources)
+    }
+
+    fn paint(
+        &self,
+        info: egui::PaintCallbackInfo,
+        pass: &mut wgpu::RenderPass<'static>,
+        resources: &egui_wgpu::CallbackResources,
+    ) {
+        self.0.paint(info, pass, resources);
+    }
+}
+
 impl Drop for SceneCallback {
     fn drop(&mut self) {
         if let Some(buffers) = self.gpu_buffers.take() {
@@ -1346,7 +1447,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         // Every callback owns its buffers until egui releases it. All prepare
         // calls precede all paint calls, so a shared buffer would render only
         // the last camera in every pane. Pool allocations between frames.
-        let buffers = self.gpu_buffers.get_or_init(|| {
+        self.gpu_buffers.get_or_init(|| {
             let vertex_bytes = (self.vertices.len() * std::mem::size_of::<Vertex>()) as u64;
             let index_bytes = (self.indices.len() * std::mem::size_of::<u32>()) as u64;
             let cached = self.gpu_pool.lock().ok().and_then(|mut pool| pool.pop());
@@ -1363,7 +1464,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
             } else {
                 (None, None)
             };
-            GpuBuffers {
+            let buffers = GpuBuffers {
                 vertices: vertices
                     .filter(|buffer| buffer.size() >= vertex_bytes)
                     .unwrap_or_else(|| {
@@ -1382,14 +1483,15 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                             "KetchUp indices",
                         )
                     }),
+            };
+            if !self.vertices.is_empty() {
+                queue.write_buffer(&buffers.vertices, 0, bytemuck::cast_slice(&self.vertices));
             }
+            if !self.indices.is_empty() {
+                queue.write_buffer(&buffers.indices, 0, bytemuck::cast_slice(&self.indices));
+            }
+            buffers
         });
-        if !self.vertices.is_empty() {
-            queue.write_buffer(&buffers.vertices, 0, bytemuck::cast_slice(&self.vertices));
-        }
-        if !self.indices.is_empty() {
-            queue.write_buffer(&buffers.indices, 0, bytemuck::cast_slice(&self.indices));
-        }
         vec![]
     }
     fn paint(
@@ -1435,12 +1537,16 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
 pub struct FaceCache {
     faces: BTreeMap<u64, CachedFace>,
     source_vertices: Vec<(u64, DVec3)>,
+    adjacent_faces: BTreeMap<(u64, u64), Vec<u64>>,
     revision: u64,
+    #[cfg(test)]
+    topology_builds: usize,
 }
 pub struct CachedFace {
     boundary: Face,
     positions: Vec<DVec3>,
     pub normal: DVec3,
+    pub center: DVec3,
     pub triangles: Vec<[DVec3; 3]>,
     pub area: f64,
     pub bounds: (DVec3, DVec3),
@@ -1451,12 +1557,13 @@ impl FaceCache {
     pub fn update(&mut self, model: &Model) {
         // Hover and orbit do not change topology. Validate in collection
         // order rather than looking up every face endpoint in the model.
-        if self.faces.len() == model.faces.len()
+        let same_topology = self.faces.len() == model.faces.len()
             && self
                 .faces
                 .values()
                 .zip(model.faces.values())
-                .all(|(cached, face)| cached.boundary == *face)
+                .all(|(cached, face)| cached.boundary == *face);
+        if same_topology
             && self
                 .source_vertices
                 .iter()
@@ -1464,6 +1571,24 @@ impl FaceCache {
                 .eq(model.vertices.iter().map(|(&id, v)| (id, v.position)))
         {
             return;
+        }
+        if !same_topology {
+            self.adjacent_faces.clear();
+            for face in model.faces.values() {
+                for ring in std::iter::once(&face.vertices).chain(face.holes.iter()) {
+                    for i in 0..ring.len() {
+                        let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                        self.adjacent_faces
+                            .entry((a.min(b), a.max(b)))
+                            .or_default()
+                            .push(face.id);
+                    }
+                }
+            }
+            #[cfg(test)]
+            {
+                self.topology_builds += 1;
+            }
         }
         let previous_len = self.faces.len();
         self.faces.retain(|id, _| model.faces.contains_key(id));
@@ -1489,6 +1614,12 @@ impl FaceCache {
                 .map(|[a, b, c]| (*b - *a).cross(*c - *a).length() * 0.5)
                 .sum();
             let points: Vec<_> = positions().collect();
+            let center = points
+                .iter()
+                .take(face.vertices.len())
+                .copied()
+                .sum::<DVec3>()
+                / face.vertices.len() as f64;
             let bounds = points.iter().fold(
                 (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
                 |(lo, hi), p| (lo.min(*p), hi.max(*p)),
@@ -1512,6 +1643,7 @@ impl FaceCache {
                     boundary: face.clone(),
                     positions: points,
                     normal: plane.map_or(DVec3::Z, |plane| plane.normal),
+                    center,
                     triangles,
                     area,
                     bounds,
@@ -1526,6 +1658,11 @@ impl FaceCache {
     }
     pub fn get(&self, id: u64) -> &CachedFace {
         &self.faces[&id]
+    }
+    pub fn adjacent_faces(&self, a: u64, b: u64) -> &[u64] {
+        self.adjacent_faces
+            .get(&(a.min(b), a.max(b)))
+            .map_or(&[], Vec::as_slice)
     }
     pub fn revision(&self) -> u64 {
         self.revision
@@ -1596,6 +1733,89 @@ impl CachedFace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_mesh_reuses_identical_output_and_keeps_old_frames_alive() {
+        let camera = Camera::default();
+        let size = DVec2::new(640., 480.);
+        let mut cache = SceneCache::default();
+        let build = |cache: &mut SceneCache, color| {
+            let mut mesh = Mesh::cached(&camera, size, cache);
+            mesh.world_triangle(&camera, [DVec3::ZERO, DVec3::X, DVec3::Y], color);
+            mesh.retain(cache)
+        };
+        let first = build(&mut cache, Color32::WHITE);
+        let same = build(&mut cache, Color32::WHITE);
+        assert!(Arc::ptr_eq(&first, &same));
+        assert_eq!(cache.buffers.lock().unwrap().len(), 1);
+        let changed = build(&mut cache, Color32::RED);
+        assert!(!Arc::ptr_eq(&first, &changed));
+        assert_eq!(first.vertices[0].color, Color32::WHITE.to_array());
+        assert_eq!(changed.vertices[0].color, Color32::RED.to_array());
+        assert!(Arc::ptr_eq(cache.retained.as_ref().unwrap(), &changed));
+        // Retained frames keep their allocations until their last reference ends.
+        assert!(cache.buffers.lock().unwrap().is_empty());
+        drop(first);
+        drop(same);
+        assert_eq!(cache.buffers.lock().unwrap().len(), 1);
+        assert!(!changed.vertices.is_empty());
+    }
+
+    #[test]
+    fn retained_mesh_compares_indices_draw_ranges_and_normalized_parallel_depth() {
+        let camera = Camera {
+            projection: ketchup_core::Projection::Parallel,
+            ..Default::default()
+        };
+        let size = DVec2::new(640., 480.);
+        let mut cache = SceneCache::default();
+        let build = |cache: &mut SceneCache| {
+            let mut mesh = Mesh::cached(&camera, size, cache);
+            mesh.world_triangle(&camera, [DVec3::ZERO, DVec3::X, DVec3::Y], Color32::WHITE);
+            mesh
+        };
+        let first = build(&mut cache).retain(&mut cache);
+        let same = build(&mut cache).retain(&mut cache);
+        assert!(Arc::ptr_eq(&first, &same));
+        let mut mesh = build(&mut cache);
+        mesh.indices.swap(0, 1);
+        let reordered = mesh.retain(&mut cache);
+        assert!(!Arc::ptr_eq(&first, &reordered));
+        let mut mesh = build(&mut cache);
+        mesh.triangle_ranges.clear();
+        let strokes = mesh.retain(&mut cache);
+        assert!(!Arc::ptr_eq(&first, &strokes));
+    }
+
+    #[test]
+    fn adjacency_survives_vertex_movement_and_refreshes_after_topology_edits() {
+        let mut model = Model::default();
+        for (a, b) in [
+            (DVec3::ZERO, DVec3::X),
+            (DVec3::X, DVec3::Y),
+            (DVec3::Y, DVec3::ZERO),
+        ] {
+            model.add_edge(a, b).unwrap();
+        }
+        let face = model.faces.values().next().unwrap().clone();
+        let (a, b) = (face.vertices[0], face.vertices[1]);
+        let mut cache = FaceCache::default();
+        cache.update(&model);
+        assert_eq!(cache.adjacent_faces(a, b), &[face.id]);
+        for vertex in model.vertices.values_mut() {
+            vertex.position.z += 1.;
+        }
+        cache.update(&model);
+        assert_eq!(cache.adjacent_faces(a, b), &[face.id]);
+        assert_eq!(cache.topology_builds, 1);
+        model.faces.clear();
+        cache.update(&model);
+        assert!(cache.adjacent_faces(a, b).is_empty());
+        model.faces.insert(face.id, face.clone());
+        cache.update(&model);
+        assert_eq!(cache.adjacent_faces(b, a), &[face.id]);
+        assert_eq!(cache.topology_builds, 3);
+    }
 
     #[test]
     fn parallel_faces_remain_distinct_after_webgl_depth_conversion() {
@@ -2556,6 +2776,7 @@ pub struct EntityCache {
     states: BTreeMap<u64, EntityState>,
     tags: BTreeMap<u64, ketchup_core::Tag>,
     entity_tags: BTreeMap<u64, u64>,
+    revision: u64,
 }
 impl EntityCache {
     pub fn update(&mut self, model: &Model) {
@@ -2573,6 +2794,7 @@ impl EntityCache {
         {
             return;
         }
+        self.revision = self.revision.wrapping_add(1);
         self.tags.clone_from(&model.tags);
         self.entity_tags.clone_from(&model.entity_tags);
         self.context = model.edit_context;
@@ -2645,6 +2867,9 @@ impl EntityCache {
                 },
             );
         }
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
     pub fn get(&self, id: u64) -> EntityState {
         self.states.get(&id).copied().unwrap_or(EntityState {

@@ -8,6 +8,11 @@ mod view_controls;
 
 #[path = "outliner.rs"]
 mod outliner;
+pub(super) use outliner::OutlinerCache;
+
+#[path = "inspector_docking.rs"]
+mod docking;
+pub(super) use docking::InspectorLayout;
 
 const ORDER_PREFERENCE_KEY: &str = "ketchup.inspector-order.v1";
 
@@ -19,8 +24,10 @@ const OUTLINER_SEARCH_ID: &str = "outliner_search";
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(super) struct InspectorPreferences {
+    general: settings::GeneralSettings,
     visible: bool,
     width: f32,
+    docking: Option<docking::DockLayout>,
     component_filter: String,
     outliner_filter: String,
     shortcut_filter: String,
@@ -29,6 +36,9 @@ pub(super) struct InspectorPreferences {
     tools: ToolPreferences,
     snapping: Option<SnappingPreferences>,
     cutting_plan: CuttingPlanPreferences,
+    time_estimates: time_estimates::Settings,
+    finish_product_filters: std::collections::BTreeMap<String, String>,
+    stock_material_filter: String,
     last_seen_release_notes: Option<String>,
     display: Option<DisplaySettings>,
     camera: Option<CameraPreferences>,
@@ -41,8 +51,10 @@ pub(super) struct InspectorPreferences {
 impl Default for InspectorPreferences {
     fn default() -> Self {
         Self {
+            general: Default::default(),
             visible: true,
             width: 300.,
+            docking: None,
             component_filter: String::new(),
             outliner_filter: String::new(),
             shortcut_filter: String::new(),
@@ -51,6 +63,9 @@ impl Default for InspectorPreferences {
             tools: ToolPreferences::default(),
             snapping: None,
             cutting_plan: CuttingPlanPreferences::default(),
+            time_estimates: Default::default(),
+            finish_product_filters: Default::default(),
+            stock_material_filter: String::new(),
             last_seen_release_notes: None,
             display: None,
             camera: None,
@@ -133,6 +148,8 @@ impl ToolPreferences {
 #[serde(default)]
 struct SnappingPreferences {
     geometry: bool,
+    edges: bool,
+    faces: bool,
     axes: bool,
     grid: bool,
 }
@@ -141,6 +158,8 @@ impl Default for SnappingPreferences {
     fn default() -> Self {
         Self {
             geometry: true,
+            edges: true,
+            faces: true,
             axes: true,
             grid: false,
         }
@@ -150,7 +169,6 @@ impl Default for SnappingPreferences {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct CuttingPlanPreferences {
-    group_stock: bool,
     layout: crate::cutting_layout::Settings,
     selection: Option<bool>,
 }
@@ -158,7 +176,6 @@ struct CuttingPlanPreferences {
 impl Default for CuttingPlanPreferences {
     fn default() -> Self {
         Self {
-            group_stock: true,
             layout: Default::default(),
             selection: None,
         }
@@ -324,10 +341,19 @@ impl KetchupApp {
         let mut preferences = storage
             .and_then(|storage| eframe::get_value::<InspectorPreferences>(storage, PREFERENCE_KEY))
             .unwrap_or_default();
+        self.inspector_layout =
+            InspectorLayout::restore(preferences.docking.as_ref(), &self.inspector_order);
+        self.inspector_order = self.inspector_layout.order();
         for position in preferences.scroll_positions.values_mut() {
             *position = valid_scroll_position(*position);
         }
+        self.general_settings = preferences.general.clone();
+        self.general_settings.normalize();
         preferences.tools.restore(self);
+        self.time_estimates = preferences.time_estimates.clone();
+        self.time_estimates.sanitize();
+        self.finish_product_filters = preferences.finish_product_filters.clone();
+        self.stock_material_filter = preferences.stock_material_filter.clone();
         self.inspector = preferences.visible;
         self.inspector_width = if preferences.width.is_finite() {
             preferences.width.clamp(260., 2000.)
@@ -340,7 +366,6 @@ impl KetchupApp {
         self.paint_color = preferences.paint_color;
         self.paint_target = preferences.paint_target;
         self.screenshot.settings = preferences.screenshot.clone();
-        self.project.cutting_plan_group_stock = preferences.cutting_plan.group_stock;
         self.project.cutting_plan_layout = if preferences.cutting_plan.layout.validate().is_ok() {
             preferences.cutting_plan.layout
         } else {
@@ -351,6 +376,8 @@ impl KetchupApp {
             self.doc.snap_to_geometry = snapping.geometry;
             self.doc.snap_to_axes = snapping.axes;
         }
+        self.snap_to_edge = preferences.snapping.as_ref().is_none_or(|s| s.edges);
+        self.snap_to_face = preferences.snapping.as_ref().is_none_or(|s| s.faces);
         self.snap_to_grid = preferences
             .snapping
             .as_ref()
@@ -383,12 +410,15 @@ impl KetchupApp {
             )
         });
         self.inspector_preferences = preferences;
+        self.sync_stock_materials(ctx);
     }
 
     fn current_inspector_preferences(&self, ctx: &egui::Context) -> InspectorPreferences {
         InspectorPreferences {
+            general: self.general_settings.clone(),
             visible: self.inspector,
             width: self.inspector_width,
+            docking: self.inspector_layout.dock.clone(),
             component_filter: self.component_filter.clone(),
             outliner_filter: self.outliner_filter.clone(),
             shortcut_filter: self.shortcut_filter.clone(),
@@ -397,14 +427,18 @@ impl KetchupApp {
             tools: ToolPreferences::capture(self),
             snapping: Some(SnappingPreferences {
                 geometry: self.doc.snap_to_geometry,
+                edges: self.snap_to_edge,
+                faces: self.snap_to_face,
                 axes: self.doc.snap_to_axes,
                 grid: self.snap_to_grid,
             }),
             cutting_plan: CuttingPlanPreferences {
-                group_stock: self.project.cutting_plan_group_stock,
                 layout: self.project.cutting_plan_layout,
                 selection: self.project.cutting_plan_selection_preference,
             },
+            time_estimates: self.time_estimates.clone(),
+            finish_product_filters: self.finish_product_filters.clone(),
+            stock_material_filter: self.stock_material_filter.clone(),
             last_seen_release_notes: self.release_notes.last_seen_version.clone(),
             display: Some(self.doc.display.clone()),
             camera: Some(CameraPreferences::capture(&self.doc.camera)),
@@ -442,6 +476,11 @@ impl KetchupApp {
         {
             self.save_inspector_preferences(storage);
         }
+        // Selection alone must survive an immediate reload, without marking
+        // the model modified or waiting for the document autosave delay.
+        if self.sync_selection() {
+            self.persist();
+        }
     }
 }
 
@@ -455,6 +494,8 @@ pub(super) enum InspectorSection {
     Display,
     View,
     Units,
+    TimeCostEstimates,
+    Materials,
 }
 
 pub(super) fn restore_order(
@@ -481,7 +522,13 @@ pub(super) fn restore_order(
     for section in InspectorSection::ALL
         .into_iter()
         .filter(|section| *section != InspectorSection::Units)
-        .chain([InspectorSection::Units])
+        .filter(|section| *section != InspectorSection::TimeCostEstimates)
+        .filter(|section| *section != InspectorSection::Materials)
+        .chain([
+            InspectorSection::Units,
+            InspectorSection::TimeCostEstimates,
+            InspectorSection::Materials,
+        ])
     {
         if !order.contains(&section) {
             order.push(section);
@@ -564,6 +611,124 @@ mod preference_tests {
     }
 
     #[test]
+    fn sticky_headers_follow_their_own_area_and_keep_disclosures_persistent() {
+        #[derive(Clone, Copy)]
+        struct SectionFrame {
+            viewport: Rect,
+            section: Rect,
+            header: Rect,
+        }
+        fn render(
+            ctx: &egui::Context,
+            offsets: [f32; 2],
+            events: Vec<egui::Event>,
+        ) -> [SectionFrame; 2] {
+            let mut frames = [SectionFrame {
+                viewport: Rect::NOTHING,
+                section: Rect::NOTHING,
+                header: Rect::NOTHING,
+            }; 2];
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(700., 400.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.columns(2, |columns| {
+                        for (index, column) in columns.iter_mut().enumerate() {
+                            egui::ScrollArea::vertical()
+                                .id_salt(("sticky_test", index))
+                                .max_height(200.)
+                                .auto_shrink([false, false])
+                                .vertical_scroll_offset(offsets[index])
+                                .show(column, |ui| {
+                                    let viewport = ui.clip_rect();
+                                    let id = ["sticky_left", "sticky_right"][index];
+                                    let section = inspector_section_sized(
+                                        ui,
+                                        "First",
+                                        id,
+                                        true,
+                                        None,
+                                        Some(viewport),
+                                        |ui| {
+                                            ui.allocate_space(egui::vec2(180., 500.));
+                                        },
+                                    );
+                                    frames[index] = SectionFrame {
+                                        viewport,
+                                        section: section.response.rect,
+                                        header: section.inner.rect,
+                                    };
+                                    inspector_section_sized(
+                                        ui,
+                                        "Next",
+                                        ["sticky_left_next", "sticky_right_next"][index],
+                                        true,
+                                        None,
+                                        Some(viewport),
+                                        |ui| {
+                                            ui.allocate_space(egui::vec2(180., 300.));
+                                        },
+                                    );
+                                });
+                        }
+                    });
+                },
+            );
+            frames
+        }
+
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.);
+        render(&ctx, [0., 0.], vec![]);
+        let initial = render(&ctx, [0., 0.], vec![]);
+        let scrolled = render(&ctx, [100., 0.], vec![]);
+        assert_eq!(scrolled[0].header.top(), scrolled[0].viewport.top());
+        assert!(scrolled[0].section.top() < scrolled[0].viewport.top());
+        assert_eq!(scrolled[1].header, initial[1].header);
+        let offset = initial[0].section.bottom()
+            - initial[0].viewport.top()
+            - initial[0].header.height() * 0.5;
+        let end = render(&ctx, [offset, 0.], vec![]);
+        assert!(end[0].header.top() < end[0].viewport.top());
+        assert!(end[0].header.bottom() <= end[0].section.bottom());
+
+        // Clicking the visible pinned header must update the shared disclosure
+        // preference immediately, without any model edit.
+        render(&ctx, [100., 0.], vec![]);
+        let pinned = render(&ctx, [100., 0.], vec![])[0].header.center();
+        for pressed in [true, false] {
+            render(
+                &ctx,
+                [100., 0.],
+                vec![
+                    egui::Event::PointerMoved(pinned),
+                    egui::Event::PointerButton {
+                        pos: pinned,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.inspector_preferences.sections["sticky_left"]);
+        assert!(app.inspector_preferences.sections["sticky_right"]);
+        let restored_ctx = egui::Context::default();
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+        assert!(!restored.inspector_preferences.sections["sticky_left"]);
+        assert!(!app.project.modified);
+        assert!(app.dirty_since.is_none());
+    }
+
+    #[test]
     fn sidebar_and_outliner_scroll_positions_save_immediately_and_restore_independently() {
         let ctx = egui::Context::default();
         let mut app = KetchupApp::with_document(Document::default(), None, true);
@@ -574,6 +739,7 @@ mod preference_tests {
             ("outliner_tree", egui::vec2(70., 0.)),
             ("outliner_geometry_rows/None", egui::vec2(0., 180.)),
             ("outliner_geometry_rows/Some(42)", egui::vec2(0., 340.)),
+            (currency::RESULTS_SCROLL_KEY, egui::vec2(0., 120.)),
         ];
         let content = Vec2::splat(1500.);
         for (key, position) in positions {
@@ -723,6 +889,88 @@ mod preference_tests {
     }
 
     #[test]
+    fn lone_sections_fill_the_area_stay_open_and_preserve_the_saved_disclosure() {
+        fn render(
+            ctx: &egui::Context,
+            size: Vec2,
+            fill: bool,
+            events: Vec<egui::Event>,
+        ) -> (bool, Rect, Rect) {
+            let mut body_visible = false;
+            let mut panel = Rect::NOTHING;
+            let mut header = Rect::NOTHING;
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800., 900.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut section_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .scope_id(egui::Id::unique("lone_section_test"))
+                            .max_rect(Rect::from_min_size(egui::pos2(24., 24.), size)),
+                    );
+                    let response = inspector_section_sized(
+                        &mut section_ui,
+                        "Components",
+                        "components",
+                        true,
+                        fill.then_some(size),
+                        Some(Rect::from_min_size(Pos2::ZERO, size + Vec2::splat(48.))),
+                        |ui| {
+                            body_visible = true;
+                            ui.label("Contents");
+                        },
+                    );
+                    panel = response.response.rect;
+                    header = response.inner.rect;
+                },
+            );
+            (body_visible, panel, header)
+        }
+        let ctx = egui::Context::default();
+        set_section_open(&ctx, "components", false);
+        let size = egui::vec2(320., 400.);
+        assert!(!render(&ctx, size, false, vec![]).0);
+        let (body_visible, panel, header) = render(&ctx, size, true, vec![]);
+        assert!(body_visible);
+        assert!(panel.size().distance(size) < 0.5, "{panel:?}");
+        for pressed in [true, false] {
+            assert!(
+                render(
+                    &ctx,
+                    size,
+                    true,
+                    vec![
+                        egui::Event::PointerMoved(header.center()),
+                        egui::Event::PointerButton {
+                            pos: header.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ]
+                )
+                .0
+            );
+        }
+        let resized = egui::vec2(260., 600.);
+        let (body_visible, panel, _) = render(&ctx, resized, true, vec![]);
+        assert!(body_visible);
+        assert!(panel.size().distance(resized) < 0.5, "{panel:?}");
+        assert!(!render(&ctx, resized, false, vec![]).0);
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        let restored_ctx = egui::Context::default();
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+        assert!(!render(&restored_ctx, resized, false, vec![]).0);
+        assert!(!app.project.modified);
+    }
+
+    #[test]
     fn saved_order_survives_recreating_the_app() {
         let mut storage = SavedPreferences::default();
         let mut app = KetchupApp::with_document(Document::default(), None, true);
@@ -766,10 +1014,11 @@ mod preference_tests {
     }
 
     #[test]
-    fn group_emphasis_survives_immediate_reload_and_project_changes() {
+    fn sidebar_tab_survives_immediate_reload_without_changing_group_emphasis() {
         let ctx = egui::Context::default();
         let mut storage = SavedPreferences::default();
         let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
         for enabled in [false, true] {
             let _ = ctx.run_ui(
                 egui::RawInput {
@@ -786,7 +1035,29 @@ mod preference_tests {
                 },
                 |_| app.keyboard(&ctx),
             );
-            assert_eq!(app.doc.display.group_emphasis, enabled);
+            assert_eq!(app.inspector, enabled);
+            assert!(app.doc.display.group_emphasis);
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.inspector, enabled);
+            assert!(restored.doc.display.group_emphasis);
+        }
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert!(old.visible);
+    }
+
+    #[test]
+    fn group_emphasis_survives_immediate_reload_and_project_changes() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        for enabled in [false, true] {
+            app.doc.display.group_emphasis = enabled;
             storage.flushed = false;
             app.persist_inspector_changes(&ctx, Some(&mut storage), false);
             assert!(storage.flushed);
@@ -806,15 +1077,14 @@ mod preference_tests {
 
     #[test]
     fn each_additional_option_saves_independently_without_a_model_edit() {
-        let options: [(&str, fn(&mut KetchupApp)); 13] = [
+        let options: [(&str, fn(&mut KetchupApp)); 14] = [
             ("object snapping", |app| app.doc.snap_to_geometry = false),
             ("axis snapping", |app| app.doc.snap_to_axes = false),
+            ("edge snapping", |app| app.snap_to_edge = false),
+            ("face snapping", |app| app.snap_to_face = false),
             ("grid snapping", |app| app.snap_to_grid = true),
             ("axis lock", |app| app.lock = Some(Axis::Y)),
             ("shortcut filter", |app| app.shortcut_filter = "Move".into()),
-            ("stock grouping", |app| {
-                app.project.cutting_plan_group_stock = false
-            }),
             ("stock rotation", |app| {
                 app.project.cutting_plan_layout.allow_rotation = false
             }),
@@ -879,19 +1149,26 @@ mod preference_tests {
             eframe::set_value(&mut storage, PREFERENCE_KEY, &preferences);
             let mut app = KetchupApp::with_document(Document::default(), None, true);
             assert!(!app.snap_to_grid);
+            assert!(app.snap_to_edge);
+            assert!(app.snap_to_face);
             app.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
             assert!(!app.snap_to_grid);
+            assert!(app.snap_to_edge);
+            assert!(app.snap_to_face);
         }
     }
 
     #[test]
     fn older_and_invalid_export_preferences_keep_safe_defaults() {
         let ctx = egui::Context::default();
-        for json in ["{}", r#"{"cutting_plan":{"layout":{"kerf_mm":5.0}}}"#] {
+        for json in [
+            "{}",
+            r#"{"cutting_plan":{"layout":{"kerf_mm":5.0}}}"#,
+            r#"{"cutting_plan":{"group_stock":false,"layout":{"kerf_mm":4.5}}}"#,
+        ] {
             let preferences: InspectorPreferences = serde_json::from_str(json).unwrap();
             assert!(preferences.snapping.is_none());
             assert!(preferences.shortcut_filter.is_empty());
-            assert!(preferences.cutting_plan.group_stock);
             assert!(preferences.cutting_plan.selection.is_none());
             assert!(preferences.cutting_plan.layout.validate().is_ok());
             let mut storage = SavedPreferences::default();
@@ -1219,6 +1496,340 @@ mod preference_tests {
     }
 
     #[test]
+    fn general_settings_save_immediately_and_restore_without_model_edits() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.general_settings.section = settings::Section::StockPricing;
+        app.general_settings.orbit_speed = 2.;
+        app.general_settings.pan_speed = 0.5;
+        app.general_settings.zoom_speed = 3.;
+        app.general_settings.reverse_zoom = true;
+        app.general_settings.default_units.length = LengthUnit::Inches;
+        app.general_settings.tool_keys.swap(1, 2);
+        app.general_settings.stock.currency = "CAD".into();
+        app.general_settings.stock.units = LengthUnit::Inches;
+        app.general_settings.stock.wood.push(stock_settings::Stock {
+            id: ketchup_core::MaterialId::new_v4(),
+            name: "Pine board".into(),
+            thickness_mm: 19.,
+            width_mm: 89.,
+            length_mm: 2438.4,
+            price: 8.25,
+        });
+        set_section_open(&ctx, "settings/stock/wood", false);
+        app.doc.display.grid_auto_size = false;
+        app.doc.display.grid_spacing = 0.0254;
+        app.doc.display.axis_colors = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+        app.doc.display.inference_color = [10, 11, 12];
+        app.doc.display.midpoint_color = [13, 14, 15];
+        let expected = app.current_inspector_preferences(&ctx);
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        assert!(app.dirty_since.is_none());
+        let restored_ctx = egui::Context::default();
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+        assert_eq!(
+            restored.current_inspector_preferences(&restored_ctx),
+            expected
+        );
+        restored.new_model(&restored_ctx);
+        assert_eq!(restored.doc.display.units.length, LengthUnit::Inches);
+        let mut opened = Document::default();
+        opened.display.units.length = LengthUnit::Millimeters;
+        restored.replace_project(opened, None, &restored_ctx);
+        assert_eq!(restored.doc.display.units.length, LengthUnit::Millimeters);
+        assert_eq!(
+            restored.general_settings.default_units.length,
+            LengthUnit::Inches
+        );
+    }
+
+    #[test]
+    fn currency_changes_save_immediately_and_apply_after_switching_projects() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let mut storage = SavedPreferences::default();
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.general.stock.currency, currency::DEFAULT);
+
+        for code in ["CAD", "EUR", "JPY"] {
+            app.general_settings.stock.currency = code.into();
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+
+            let restored_ctx = egui::Context::default();
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+            assert_eq!(restored.general_settings.stock.currency, code);
+            restored.replace_project(Document::default(), None, &restored_ctx);
+            assert_eq!(restored.general_settings.stock.currency, code);
+            assert!(!restored.project.modified);
+        }
+    }
+
+    #[test]
+    fn currency_search_saves_immediately_and_restores_without_model_edits() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let mut storage = SavedPreferences::default();
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert!(old.general.stock.currency_filter.is_empty());
+
+        for query in ["Canadian", "JPY", ""] {
+            app.general_settings.stock.currency_filter = query.into();
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+
+            let restored_ctx = egui::Context::default();
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+            assert_eq!(restored.general_settings.stock.currency_filter, query);
+            assert_eq!(restored.general_settings.stock.currency, currency::DEFAULT);
+            restored.replace_project(Document::default(), None, &restored_ctx);
+            assert_eq!(restored.general_settings.stock.currency_filter, query);
+            assert!(!restored.project.modified);
+        }
+    }
+
+    #[test]
+    fn stock_material_search_saves_immediately_without_model_edits() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let model = app.doc.model.clone();
+        let mut storage = SavedPreferences::default();
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert!(old.stock_material_filter.is_empty());
+
+        for query in ["Oak 19", "project material", ""] {
+            app.stock_material_filter = query.into();
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert_eq!(app.doc.model, model);
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+
+            let restored_ctx = egui::Context::default();
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+            assert_eq!(restored.stock_material_filter, query);
+            restored.replace_project(Document::default(), None, &restored_ctx);
+            assert_eq!(restored.stock_material_filter, query);
+            assert!(restored.doc.model.stock_materials.is_empty());
+            assert!(!restored.project.modified);
+        }
+    }
+
+    #[test]
+    fn legacy_currency_upgrade_is_saved_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut old = InspectorPreferences::default();
+        old.general.stock.currency = "$".into();
+        let mut storage = SavedPreferences::default();
+        eframe::set_value(&mut storage, PREFERENCE_KEY, &old);
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.restore_inspector_preferences(&ctx, Some(&storage));
+        assert_eq!(app.general_settings.stock.currency, "USD");
+        storage.flushed = false;
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        assert!(app.dirty_since.is_none());
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!(restored.general_settings.stock.currency, "USD");
+    }
+
+    #[test]
+    fn finishing_products_and_disclosure_save_immediately_without_model_edits() {
+        use finish_settings::{ContainerUnit, Finish, FinishType};
+
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.general_settings.section = settings::Section::StockPricing;
+        app.general_settings.stock.finishes = vec![
+            Finish {
+                name: "Pre-stain conditioner".into(),
+                finish_type: FinishType::PreStain,
+                container_size: 946.,
+                container_unit: ContainerUnit::Milliliters,
+                price: 18.75,
+                ..Default::default()
+            },
+            Finish {
+                name: "Clear varnish".into(),
+                finish_type: FinishType::Varnish,
+                container_size: 1.,
+                container_unit: ContainerUnit::UsQuarts,
+                price: 25.50,
+                ..Default::default()
+            },
+        ];
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+
+        // Editing existing products and closing the section are preferences,
+        // so neither operation needs a document edit to be written to storage.
+        app.general_settings.stock.finishes[1].finish_type = FinishType::Paint;
+        app.general_settings.stock.finishes[1].name = "White paint".into();
+        app.general_settings.stock.finishes[1].price = 30.;
+        app.general_settings.stock.finishes[1].coverage_m2_per_container = Some(12.5);
+        set_section_open(&ctx, "settings/stock/finishes", false);
+        storage.flushed = false;
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        assert!(app.dirty_since.is_none());
+
+        let restored_ctx = egui::Context::default();
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+        assert_eq!(restored.general_settings, app.general_settings);
+        let _ = restored_ctx.run_ui(Default::default(), |ui| {
+            assert_eq!(
+                restored_header_open(ui, "settings/stock/finishes", true),
+                Some(false)
+            );
+        });
+
+        // Catalog edits and section expansion also survive a different project.
+        restored.replace_project(Document::default(), None, &restored_ctx);
+        assert_eq!(
+            restored.general_settings.stock.finishes,
+            app.general_settings.stock.finishes
+        );
+        assert!(restored.doc.model.stock_materials.is_empty());
+        restored.general_settings.stock.finishes.remove(0);
+        set_section_open(&restored_ctx, "settings/stock/finishes", true);
+        storage.flushed = false;
+        restored.persist_inspector_changes(&restored_ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!restored.project.modified);
+        let final_ctx = egui::Context::default();
+        app.restore_inspector_preferences(&final_ctx, Some(&storage));
+        assert_eq!(
+            app.general_settings.stock.finishes,
+            restored.general_settings.stock.finishes
+        );
+        let _ = final_ctx.run_ui(Default::default(), |ui| {
+            assert_eq!(
+                restored_header_open(ui, "settings/stock/finishes", false),
+                Some(true)
+            );
+        });
+    }
+
+    #[test]
+    fn material_project_usage_persists_across_restarts() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let stock = stock_settings::Stock::default();
+        let id = stock.id;
+        app.general_settings.stock.wood.push(stock);
+        let edge = app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+        let object = app
+            .doc
+            .model
+            .make_object(&BTreeSet::from([edge]), false, "Board")
+            .unwrap();
+        app.doc
+            .model
+            .objects
+            .get_mut(&object)
+            .unwrap()
+            .stock_material_id = Some(id);
+        app.doc.name = "Desk".into();
+        app.project.path = Some("desk.ketchup".into());
+        app.sync_stock_materials(&ctx);
+        let project_id = app.doc.project_id;
+        app.project.path = Some("desk-copy.ketchup".into());
+        app.sync_stock_materials(&ctx);
+        assert_eq!(
+            app.general_settings.stock.projects.len(),
+            2,
+            "Save As retains the original file's last-known usage"
+        );
+        assert_eq!(app.doc.project_id, project_id);
+        app.replace_project(Document::default(), None, &ctx);
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!(
+            restored.general_settings.stock.projects,
+            app.general_settings.stock.projects
+        );
+        assert!(
+            restored
+                .general_settings
+                .stock
+                .projects
+                .values()
+                .all(|usage| usage.materials.get(&id) == Some(&1))
+        );
+    }
+
+    #[test]
+    fn old_catalog_ids_are_saved_immediately_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut old = InspectorPreferences::default();
+        old.general.stock.wood.push(stock_settings::Stock {
+            id: ketchup_core::MaterialId::nil(),
+            ..Default::default()
+        });
+        let mut storage = SavedPreferences::default();
+        eframe::set_value(&mut storage, PREFERENCE_KEY, &old);
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.restore_inspector_preferences(&ctx, Some(&storage));
+        let id = app.general_settings.stock.wood[0].id;
+        assert!(!id.is_nil());
+        storage.flushed = false;
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!(restored.general_settings.stock.wood[0].id, id);
+    }
+
+    #[test]
+    fn removing_stock_persists_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let mut storage = SavedPreferences::default();
+        app.general_settings
+            .stock
+            .wood
+            .push(stock_settings::Stock::default());
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        app.general_settings.stock.wood.clear();
+        storage.flushed = false;
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        assert!(app.dirty_since.is_none());
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert!(restored.general_settings.stock.wood.is_empty());
+    }
+
+    #[test]
+    fn older_general_preferences_keep_defaults() {
+        let preferences: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(preferences.general, settings::GeneralSettings::default());
+    }
+
+    #[test]
     fn sidebar_preferences_save_immediately_and_restore_without_a_model_edit() {
         let ctx = egui::Context::default();
         let mut app = KetchupApp::with_document(Document::default(), None, true);
@@ -1421,6 +2032,211 @@ mod preference_tests {
     }
 
     #[test]
+    fn time_estimate_controls_save_immediately_and_restore_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let model = app.doc.model.clone();
+        app.general_settings.section = settings::Section::SurfaceTreatment;
+        app.general_settings.stock.finishes =
+            (0..3).map(|_| finish_settings::Finish::default()).collect();
+        for (i, step) in app.time_estimates.sanding.iter_mut().enumerate() {
+            step.enabled = i % 2 == 0;
+            step.minutes_per_m2 = 7. + i as f64;
+        }
+        app.time_estimates.sanding_after_varnish = [false, true, false, true, false, true];
+        for (step, product) in [
+            &mut app.time_estimates.pre_stain,
+            &mut app.time_estimates.stain,
+            &mut app.time_estimates.varnish,
+        ]
+        .into_iter()
+        .zip(&app.general_settings.stock.finishes)
+        {
+            step.enabled = true;
+            step.product_id = Some(product.id);
+            step.minutes_per_m2 = 12.5;
+            step.coats = 2;
+            step.drying_hours = 3.25;
+            step.final_drying_hours = Some(12.5);
+        }
+        set_section_open(&ctx, "time_cost_estimates", false);
+        let subsections = [
+            ("settings/treatment/sanding", false),
+            ("entity/treatment/sanding", true),
+            ("settings/treatment/finishing", true),
+            ("entity/treatment/finishing", false),
+            ("time_estimates_pre_stain", false),
+            ("time_estimates_stain", true),
+            ("time_estimates_varnish", false),
+            ("time_estimates_material_cost", true),
+        ];
+        for (key, open) in subsections {
+            set_section_open(&ctx, key, open);
+        }
+        app.inspector_order.rotate_right(1);
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        assert_eq!(app.doc.model, model);
+        let restored_ctx = egui::Context::default();
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+        assert_eq!(restored.time_estimates, app.time_estimates);
+        assert_eq!(
+            restored.general_settings.stock.finishes,
+            app.general_settings.stock.finishes
+        );
+        assert_eq!(
+            restored.general_settings.section,
+            settings::Section::SurfaceTreatment
+        );
+        assert_eq!(restored.inspector_order, app.inspector_order);
+        assert!(restored.selected.is_empty());
+        assert!(!restored.project.modified);
+        let _ = restored_ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.push_id("floating_estimator", |ui| {
+                assert_eq!(
+                    restored_header_open(ui, "time_cost_estimates", true),
+                    Some(false)
+                );
+                for (key, open) in subsections {
+                    assert_eq!(restored_header_open(ui, key, false), Some(open), "{key}");
+                }
+            });
+        });
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.time_estimates, time_estimates::Settings::default());
+    }
+
+    #[test]
+    fn finishing_product_searches_save_immediately_without_model_edits() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let model = app.doc.model.clone();
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert!(old.finish_product_filters.is_empty());
+        for key in [
+            "settings/treatment/pre_stain",
+            "settings/treatment/stain",
+            "settings/treatment/varnish",
+            "entity/treatment/pre_stain",
+            "entity/treatment/stain",
+            "entity/treatment/varnish",
+        ] {
+            app.finish_product_filters
+                .insert(key.into(), format!("Search for {key}"));
+        }
+        let mut storage = SavedPreferences::default();
+        for query in ["oak stain", ""] {
+            app.finish_product_filters
+                .insert("entity/treatment/stain".into(), query.into());
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert_eq!(app.doc.model, model);
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+            let restored_ctx = egui::Context::default();
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+            assert_eq!(restored.finish_product_filters, app.finish_product_filters);
+            restored.replace_project(Document::default(), None, &restored_ctx);
+            assert_eq!(restored.finish_product_filters, app.finish_product_filters);
+            assert!(!restored.project.modified);
+        }
+    }
+
+    #[test]
+    fn expanded_estimate_panels_render_all_finish_grids_without_id_clashes() {
+        fn collect_text(shape: &egui::Shape, labels: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => labels.push(text.galley.job.text.clone()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect_text(shape, labels);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut style = (*ctx.style()).clone();
+        style.animation_time = 0.;
+        ctx.set_style(style);
+        ctx.options_mut(|options| options.warn_on_id_clash = true);
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.time_estimates.pre_stain.enabled = true;
+        app.time_estimates.stain.enabled = true;
+        app.time_estimates.varnish.enabled = true;
+        for key in [
+            "settings/treatment/sanding",
+            "settings/treatment/finishing",
+            "settings/treatment/pre_stain",
+            "settings/treatment/stain",
+            "settings/treatment/varnish",
+        ] {
+            set_section_open(&ctx, key, true);
+        }
+        for frame in 0..3 {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600., 2000.))),
+                    time: Some(frame as f64 / 60.),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.set_max_width(320.);
+                    time_estimates::treatment_controls(
+                        ui,
+                        &mut app.time_estimates,
+                        true,
+                        &app.general_settings.stock.finishes,
+                        &mut app.finish_product_filters,
+                    );
+                },
+            );
+            let mut labels = Vec::new();
+            for clipped in &output.shapes {
+                collect_text(&clipped.shape, &mut labels);
+            }
+            assert_eq!(
+                labels
+                    .iter()
+                    .filter(|text| text.as_str() == "Minutes / m²")
+                    .count(),
+                3
+            );
+            assert!(
+                !labels.iter().any(|text| text.contains("Grid ID")),
+                "{labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn estimator_appends_to_previously_complete_orders() {
+        let previous = vec![
+            InspectorSection::View,
+            InspectorSection::Units,
+            InspectorSection::Display,
+            InspectorSection::Tags,
+            InspectorSection::Components,
+            InspectorSection::EntityInfo,
+            InspectorSection::Outliner,
+        ];
+        let mut storage = SavedPreferences::default();
+        eframe::set_value(&mut storage, ORDER_PREFERENCE_KEY, &previous);
+        let restored = restore_order(Some(&storage));
+        assert_eq!(&restored[..previous.len()], previous.as_slice());
+        assert_eq!(
+            restored[restored.len() - 2],
+            InspectorSection::TimeCostEstimates
+        );
+        assert_eq!(restored.last(), Some(&InspectorSection::Materials));
+    }
+
+    #[test]
     fn original_fixed_array_order_migrates_without_losing_layout() {
         let original = [
             InspectorSection::Tags,
@@ -1437,6 +2253,8 @@ mod preference_tests {
             InspectorSection::Components,
             InspectorSection::View,
             InspectorSection::Units,
+            InspectorSection::TimeCostEstimates,
+            InspectorSection::Materials,
         ];
         let mut storage = SavedPreferences::default();
         eframe::set_value(&mut storage, ORDER_PREFERENCE_KEY, &original);
@@ -1466,7 +2284,12 @@ mod preference_tests {
         eframe::set_value(&mut storage, ORDER_PREFERENCE_KEY, &previous);
         let restored = restore_order(Some(&storage));
         assert_eq!(&restored[..previous.len()], previous.as_slice());
-        assert_eq!(restored.last(), Some(&InspectorSection::Units));
+        assert_eq!(restored[previous.len()], InspectorSection::Units);
+        assert_eq!(
+            restored[restored.len() - 2],
+            InspectorSection::TimeCostEstimates
+        );
+        assert_eq!(restored.last(), Some(&InspectorSection::Materials));
     }
 
     #[test]
@@ -1578,8 +2401,64 @@ mod preference_tests {
                 InspectorSection::Components,
                 InspectorSection::View,
                 InspectorSection::Units,
+                InspectorSection::TimeCostEstimates,
+                InspectorSection::Materials,
             ]
         );
+    }
+
+    #[test]
+    fn materials_append_to_existing_orders_and_save_without_model_edits() {
+        let previous = vec![
+            InspectorSection::View,
+            InspectorSection::Tags,
+            InspectorSection::Units,
+            InspectorSection::Display,
+            InspectorSection::Outliner,
+            InspectorSection::EntityInfo,
+            InspectorSection::TimeCostEstimates,
+            InspectorSection::Components,
+        ];
+        let mut storage = SavedPreferences::default();
+        eframe::set_value(&mut storage, ORDER_PREFERENCE_KEY, &previous);
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.restore_inspector_preferences(&ctx, Some(&storage));
+        assert_eq!(&app.inspector_order[..previous.len()], previous.as_slice());
+        assert_eq!(
+            app.inspector_order.last(),
+            Some(&InspectorSection::Materials)
+        );
+
+        // Older preferences have no disclosure entry, so Materials starts open.
+        let id = egui::Id::unique("materials_default");
+        restore_section(&ctx, id, "materials", true);
+        assert!(
+            egui::collapsing_header::CollapsingState::load(&ctx, id)
+                .unwrap()
+                .is_open()
+        );
+        let model = app.doc.model.clone();
+        for open in [false, true] {
+            set_section_open(&ctx, "materials", open);
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            assert_eq!(app.doc.model, model);
+
+            let reloaded_ctx = egui::Context::default();
+            let mut reloaded = KetchupApp::with_document(Document::default(), None, true);
+            reloaded.restore_inspector_preferences(&reloaded_ctx, Some(&storage));
+            assert_eq!(reloaded.inspector_order, app.inspector_order);
+            let _ = reloaded_ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.push_id("floating_materials", |ui| {
+                    assert_eq!(restored_header_open(ui, "materials", true), Some(open));
+                });
+            });
+            assert_eq!(reloaded.doc.model, model);
+            assert!(!reloaded.project.modified);
+        }
     }
 
     #[test]
@@ -1725,7 +2604,7 @@ mod preference_tests {
 }
 
 impl InspectorSection {
-    pub(super) const COUNT: usize = 7;
+    pub(super) const COUNT: usize = 9;
 
     pub(super) const ALL: [Self; Self::COUNT] = [
         Self::Outliner,
@@ -1735,6 +2614,8 @@ impl InspectorSection {
         Self::Tags,
         Self::Display,
         Self::View,
+        Self::TimeCostEstimates,
+        Self::Materials,
     ];
 
     fn title(self) -> &'static str {
@@ -1746,6 +2627,8 @@ impl InspectorSection {
             Self::Display => "Display",
             Self::View => "View",
             Self::Units => "Units",
+            Self::TimeCostEstimates => "Time & Cost Estimates",
+            Self::Materials => "Materials",
         }
     }
 
@@ -1758,61 +2641,13 @@ impl InspectorSection {
             Self::Display => "display",
             Self::View => "view",
             Self::Units => "units",
+            Self::TimeCostEstimates => "time_cost_estimates",
+            Self::Materials => "materials",
         }
     }
 
     fn index(self) -> usize {
         self as usize
-    }
-}
-
-#[derive(Default)]
-pub(super) struct InspectorLayout {
-    heights: [f32; InspectorSection::COUNT],
-    header_heights: [f32; InspectorSection::COUNT],
-    drag: Option<InspectorDrag>,
-    floating: Option<InspectorSection>,
-}
-
-struct InspectorDrag {
-    section: InspectorSection,
-    grab_offset: Vec2,
-    order: [InspectorSection; InspectorSection::COUNT],
-}
-
-impl InspectorLayout {
-    fn preview_order(&mut self, header_top: f32) {
-        let Some(drag) = &mut self.drag else {
-            return;
-        };
-        let center = header_top + self.header_heights[drag.section.index()] * 0.5;
-        let mut from = drag.order.iter().position(|s| *s == drag.section).unwrap();
-        // Compare with target slots, rather than animated positions, so panels
-        // cannot oscillate underneath a stationary pointer.
-        while from > 0 {
-            let neighbor = drag.order[from - 1];
-            let top: f32 = drag.order[..from - 1]
-                .iter()
-                .map(|s| self.heights[s.index()])
-                .sum();
-            if center >= top + self.header_heights[neighbor.index()] * 0.5 {
-                break;
-            }
-            drag.order.swap(from, from - 1);
-            from -= 1;
-        }
-        while from + 1 < drag.order.len() {
-            let neighbor = drag.order[from + 1];
-            let top: f32 = drag.order[..=from]
-                .iter()
-                .map(|s| self.heights[s.index()])
-                .sum();
-            if center <= top + self.header_heights[neighbor.index()] * 0.5 {
-                break;
-            }
-            drag.order.swap(from, from + 1);
-            from += 1;
-        }
     }
 }
 
@@ -1933,10 +2768,17 @@ fn face_style_picker(ui: &mut egui::Ui, current: &mut FaceStyle) {
 
 fn inspector_icon_color(ui: &egui::Ui, id: &str) -> Color32 {
     // Keep each section's hue consistent, with lighter strokes on dark surfaces.
-    let (light, dark) = match id {
+    let (light, dark) = match icons::section_icon(id) {
         "outliner" => ([48, 111, 173], [131, 185, 239]),
         "entity_info" => ([17, 129, 133], [103, 207, 211]),
         "units" => ([67, 131, 68], [143, 205, 144]),
+        "time_cost_estimates" => ([183, 92, 19], [242, 170, 100]),
+        "materials" => ([160, 111, 22], [230, 190, 104]),
+        "time_estimates_sanding" => ([160, 111, 22], [230, 190, 104]),
+        "time_estimates_finishing" | "settings/stock/finishes" => ([126, 83, 183], [188, 153, 239]),
+        "time_estimates_pre_stain" => ([17, 129, 133], [103, 207, 211]),
+        "time_estimates_stain" => ([183, 92, 19], [242, 170, 100]),
+        "time_estimates_varnish" => ([67, 131, 68], [143, 205, 144]),
         "components" => ([126, 83, 183], [188, 153, 239]),
         "tags" => ([160, 111, 22], [230, 190, 104]),
         "display" => ([198, 76, 58], [246, 142, 125]),
@@ -1955,17 +2797,31 @@ fn inspector_icon_color(ui: &egui::Ui, id: &str) -> Color32 {
 
 // Keep egui's disclosure behavior, animation, and accessibility while giving
 // inspector groups a shared surface and a full-width click target.
-fn inspector_section<R>(
+pub(super) fn inspector_section<R>(
     ui: &mut egui::Ui,
     title: &str,
     id: &'static str,
     primary: bool,
     contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<egui::Response> {
+    inspector_section_sized(ui, title, id, primary, None, None, contents)
+}
+
+// A lone docked section fills its area and has a fixed-open, draggable header.
+// Its usual disclosure state is left untouched for when it rejoins a stack.
+fn inspector_section_sized<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    id: &'static str,
+    primary: bool,
+    fill_size: Option<Vec2>,
+    sticky_viewport: Option<Rect>,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<egui::Response> {
     let colors = Palette::for_ui(ui);
     let icon_color = inspector_icon_color(ui, id);
     let body_style = ui.style().as_ref().clone();
-    let response = egui::Frame::new()
+    let frame = egui::Frame::new()
         .fill(colors.surface)
         .stroke(Stroke::new(1., colors.border))
         .corner_radius(if primary { 8 } else { 5 })
@@ -1979,227 +2835,240 @@ fn inspector_section<R>(
             }
         } else {
             egui::epaint::Shadow::NONE
-        })
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.scope(|ui| {
-                ui.spacing_mut().button_padding = egui::vec2(10., if primary { 10. } else { 7. });
-                ui.spacing_mut().indent = 52.;
-                let visuals = ui.visuals_mut();
-                visuals.collapsing_header_frame = true;
-                for widget in [
-                    &mut visuals.widgets.inactive,
-                    &mut visuals.widgets.hovered,
-                    &mut visuals.widgets.active,
-                ] {
-                    widget.corner_radius = egui::CornerRadius::same(if primary { 7 } else { 4 });
-                    widget.bg_stroke = Stroke::NONE;
-                    widget.expansion = 0.;
-                }
-                visuals.widgets.inactive.weak_bg_fill =
-                    if primary { colors.canvas } else { colors.paper };
-                visuals.widgets.hovered.weak_bg_fill = colors.hovered;
-                visuals.widgets.active.weak_bg_fill = colors.selected;
-                let open = restored_header_open(ui, id, primary);
-                let header = egui::CollapsingHeader::new(RichText::new(title).strong())
-                    .id_salt(id)
-                    .default_open(primary)
-                    .open(open)
-                    .icon(move |ui, openness, response| {
-                        let center = response.rect.center() - egui::vec2(12., 0.);
-                        icons::line_icon(
-                            ui.painter(),
-                            center + egui::vec2(24., 0.),
-                            id,
-                            icon_color,
-                        );
-                        let rotation =
-                            egui::emath::Rot2::from_angle(openness * std::f32::consts::FRAC_PI_2);
-                        let points = [
-                            egui::vec2(-2., -4.),
-                            egui::vec2(2., 0.),
-                            egui::vec2(-2., 4.),
-                        ]
-                        .map(|point| center + rotation * point);
-                        ui.painter().add(egui::Shape::line(
-                            points.to_vec(),
-                            Stroke::new(
-                                1.6,
-                                if openness > 0. {
-                                    colors.green
-                                } else {
-                                    colors.muted
-                                },
-                            ),
-                        ));
-                    })
-                    .show_unindented(ui, |ui| {
-                        *ui.style_mut() = body_style;
-                        egui::Frame::new().inner_margin(10).show(ui, contents).inner
-                    })
-                    .header_response;
-                remember_section(ui.ctx(), header.id, id);
-                header
-            })
-            .inner
         });
-    ui.add_space(if primary { 4. } else { 1. });
+    let content_size = fill_size.map(|size| (size - frame.total_margin().sum()).max(Vec2::ZERO));
+    let response = frame.show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        if let Some(size) = content_size {
+            ui.set_min_size(size);
+        }
+        ui.scope(|ui| {
+            ui.spacing_mut().button_padding = egui::vec2(10., if primary { 10. } else { 7. });
+            // Reclaim the disclosure slot for lone sections, keeping a little left padding.
+            ui.spacing_mut().indent = if fill_size.is_some() { 34. } else { 52. };
+            let visuals = ui.visuals_mut();
+            visuals.collapsing_header_frame = true;
+            for widget in [
+                &mut visuals.widgets.inactive,
+                &mut visuals.widgets.hovered,
+                &mut visuals.widgets.active,
+            ] {
+                widget.corner_radius = egui::CornerRadius::same(if primary { 7 } else { 4 });
+                widget.bg_stroke = Stroke::NONE;
+                widget.expansion = 0.;
+            }
+            visuals.widgets.inactive.weak_bg_fill =
+                if primary { colors.canvas } else { colors.paper };
+            visuals.widgets.hovered.weak_bg_fill = colors.hovered;
+            visuals.widgets.active.weak_bg_fill = colors.selected;
+            if let Some(viewport) = sticky_viewport {
+                let header_style = ui.style().clone();
+                let height = (ui.text_style_height(&egui::TextStyle::Button)
+                    + ui.spacing().button_padding.y * 2.)
+                    .max(ui.spacing().interact_size.y);
+                let (_, natural_rect) = ui.allocate_space(egui::vec2(ui.available_width(), height));
+                let header_id = ui.make_persistent_id(id);
+                let mut state = fill_size.is_none().then(|| {
+                    restore_section(ui.ctx(), header_id, id, primary);
+                    egui::collapsing_header::CollapsingState::load_with_default_open(
+                        ui.ctx(),
+                        header_id,
+                        primary,
+                    )
+                });
+                let openness = state.as_ref().map_or(1., |state| state.openness(ui.ctx()));
+                *ui.style_mut() = body_style;
+                let body = |ui: &mut egui::Ui| {
+                    egui::Frame::new().inner_margin(10).show(ui, |ui| {
+                        if fill_size.is_some() {
+                            ui.set_min_size(ui.available_size());
+                        }
+                        contents(ui)
+                    });
+                };
+                if let Some(state) = &mut state {
+                    state.show_body_unindented(ui, body);
+                } else {
+                    body(ui);
+                }
+                // Constrain the pinned header to its own section, so the next
+                // section pushes it out as the end of the body scrolls past.
+                let top = natural_rect
+                    .top()
+                    .max(viewport.top())
+                    .min(ui.min_rect().bottom() - height);
+                let rect = natural_rect.translate(egui::vec2(0., top - natural_rect.top()));
+                let layer = egui::LayerId::new(ui.layer_id().order, header_id.with("sticky"));
+                ui.ctx().set_sublayer(ui.layer_id(), layer);
+                let mut header_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt("sticky_header")
+                        .layer_id(layer)
+                        .max_rect(rect),
+                );
+                header_ui.set_clip_rect(viewport.intersect(ui.clip_rect()));
+                header_ui.set_style(header_style);
+                let mut header = header_ui.interact(rect, header_id, Sense::click_and_drag());
+                if let Some(state) = &mut state {
+                    if header.clicked() {
+                        state.toggle(&header_ui);
+                        header.mark_changed();
+                    }
+                    state.store(ui.ctx());
+                    remember_section(ui.ctx(), header_id, id);
+                    ui.ctx().accesskit_node_builder(header_id, |node| {
+                        node.set_expanded(state.is_open());
+                    });
+                }
+                header.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        if state.is_some() {
+                            egui::Role::DisclosureTriangle
+                        } else {
+                            egui::Role::Group
+                        },
+                        ui.is_enabled(),
+                        title,
+                    )
+                });
+                let visuals = header_ui.style().interact(&header);
+                header_ui
+                    .painter()
+                    .rect_filled(rect, 7, visuals.weak_bg_fill);
+                let galley = egui::WidgetText::from(RichText::new(title).strong()).into_galley(
+                    &header_ui,
+                    Some(egui::TextWrapMode::Extend),
+                    (rect.width() - header_ui.spacing().indent).max(0.),
+                    egui::TextStyle::Button,
+                );
+                header_ui.painter().galley(
+                    egui::pos2(
+                        rect.left() + header_ui.spacing().indent,
+                        rect.center().y - galley.size().y * 0.5,
+                    ),
+                    galley,
+                    visuals.text_color(),
+                );
+                let center = egui::pos2(
+                    rect.left() + header_ui.spacing().indent / 2. - 12.,
+                    rect.center().y,
+                );
+                icons::line_icon(
+                    header_ui.painter(),
+                    egui::pos2(
+                        rect.left() + header_ui.spacing().indent - 14.,
+                        rect.center().y,
+                    ),
+                    id,
+                    icon_color,
+                );
+                if state.is_some() {
+                    let rotation =
+                        egui::emath::Rot2::from_angle(openness * std::f32::consts::FRAC_PI_2);
+                    let points = [
+                        egui::vec2(-2., -4.),
+                        egui::vec2(2., 0.),
+                        egui::vec2(-2., 4.),
+                    ]
+                    .map(|point| center + rotation * point);
+                    header_ui.painter().add(egui::Shape::line(
+                        points.to_vec(),
+                        Stroke::new(
+                            1.6,
+                            if openness > 0. {
+                                colors.green
+                            } else {
+                                colors.muted
+                            },
+                        ),
+                    ));
+                }
+                return header;
+            }
+            if fill_size.is_some() {
+                let height = ui.text_style_height(&egui::TextStyle::Button)
+                    + ui.spacing().button_padding.y * 2.;
+                let (rect, header) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), height),
+                    Sense::click_and_drag(),
+                );
+                header.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Group, ui.is_enabled(), title)
+                });
+                let visuals = ui.style().interact(&header);
+                ui.painter().rect_filled(rect, 7, visuals.weak_bg_fill);
+                let galley = egui::WidgetText::from(RichText::new(title).strong()).into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    (rect.width() - ui.spacing().indent).max(0.),
+                    egui::TextStyle::Button,
+                );
+                ui.painter().galley(
+                    egui::pos2(
+                        rect.left() + ui.spacing().indent,
+                        rect.center().y - galley.size().y * 0.5,
+                    ),
+                    galley,
+                    visuals.text_color(),
+                );
+                icons::line_icon(
+                    ui.painter(),
+                    egui::pos2(rect.left() + ui.spacing().indent - 14., rect.center().y),
+                    id,
+                    icon_color,
+                );
+                *ui.style_mut() = body_style;
+                egui::Frame::new().inner_margin(10).show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    contents(ui)
+                });
+                return header;
+            }
+            let open = restored_header_open(ui, id, primary);
+            let header = egui::CollapsingHeader::new(RichText::new(title).strong())
+                .id_salt(id)
+                .default_open(primary)
+                .open(open)
+                .icon(move |ui, openness, response| {
+                    let center = response.rect.center() - egui::vec2(12., 0.);
+                    icons::line_icon(ui.painter(), center + egui::vec2(24., 0.), id, icon_color);
+                    let rotation =
+                        egui::emath::Rot2::from_angle(openness * std::f32::consts::FRAC_PI_2);
+                    let points = [
+                        egui::vec2(-2., -4.),
+                        egui::vec2(2., 0.),
+                        egui::vec2(-2., 4.),
+                    ]
+                    .map(|point| center + rotation * point);
+                    ui.painter().add(egui::Shape::line(
+                        points.to_vec(),
+                        Stroke::new(
+                            1.6,
+                            if openness > 0. {
+                                colors.green
+                            } else {
+                                colors.muted
+                            },
+                        ),
+                    ));
+                })
+                .show_unindented(ui, |ui| {
+                    *ui.style_mut() = body_style;
+                    egui::Frame::new().inner_margin(10).show(ui, contents).inner
+                })
+                .header_response;
+            remember_section(ui.ctx(), header.id, id);
+            header
+        })
+        .inner
+    });
+    if fill_size.is_none() {
+        ui.add_space(if primary { 4. } else { 1. });
+    }
     response
 }
 
 impl KetchupApp {
-    pub(super) fn inspector_contents(&mut self, ui: &mut egui::Ui) {
-        let mut layout = std::mem::take(&mut self.inspector_layout);
-        let origin = ui.cursor().min;
-        let width = ui.available_width();
-        let clip = ui.clip_rect();
-        let drop_rect = Rect::from_min_max(
-            egui::pos2(origin.x, clip.top()),
-            egui::pos2(origin.x + width, clip.bottom()),
-        );
-        let pointer = ui.ctx().pointer_interact_pos();
-        let animation_time = ui.style().animation_time;
-        let spacing = ui.spacing().item_spacing.y;
-        let colors = Palette::for_ui(ui);
-        // egui clears the payload on Escape or release, including a release
-        // while the inspector is hidden. Retain the floating panel as it settles.
-        if !egui::DragAndDrop::has_payload_of_type::<InspectorSection>(ui.ctx()) {
-            layout.drag = None;
-        }
-        if let (Some(drag), Some(pointer)) = (&layout.drag, pointer)
-            && drop_rect.contains(pointer)
-        {
-            let header_top = pointer.y - origin.y - drag.grab_offset.y;
-            layout.preview_order(header_top);
-        }
-        let order = layout
-            .drag
-            .as_ref()
-            .map_or(self.inspector_order, |d| d.order);
-        let mut top = 0.;
-        for section in order {
-            let index = section.index();
-            let id = egui::Id::unique(("inspector_section", section.id()));
-            let target = egui::vec2(0., top);
-            let following = layout.drag.as_ref().filter(|d| d.section == section);
-            let mut floating = layout.floating == Some(section);
-            let desired = following
-                .and_then(|drag| pointer.map(|p| p - origin - drag.grab_offset))
-                .unwrap_or(target);
-            let duration = if following.is_some() {
-                0.
-            } else {
-                animation_time
-            };
-            let position = egui::vec2(
-                ui.ctx()
-                    .animate_value_with_time(id.with("x"), desired.x, duration),
-                ui.ctx()
-                    .animate_value_with_time(id.with("y"), desired.y, duration),
-            );
-            if floating && following.is_none() && (position - target).length() < 0.5 {
-                layout.floating = None;
-                floating = false;
-            }
-            // Reserve the complete panel's slot while its real contents follow
-            // the pointer on a foreground layer. Each panel is rendered once.
-            if following.is_some() {
-                let slot = Rect::from_min_size(
-                    origin + target,
-                    egui::vec2(width, (layout.heights[index] - spacing - 4.).max(0.)),
-                );
-                ui.painter().rect(
-                    slot,
-                    8,
-                    colors.canvas,
-                    Stroke::new(1., colors.green),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            let pos = origin + position;
-            let mut builder = egui::UiBuilder::new()
-                .scope_id(id)
-                .max_rect(Rect::from_min_max(
-                    pos,
-                    egui::pos2(pos.x + width, f32::INFINITY),
-                ))
-                .layout(egui::Layout::top_down(egui::Align::Min));
-            if floating {
-                builder = builder.layer_id(egui::LayerId::new(egui::Order::Tooltip, id));
-            }
-            let mut panel_ui = ui.new_child(builder);
-            if floating {
-                panel_ui.set_clip_rect(ui.ctx().viewport_rect());
-            }
-            let panel =
-                inspector_section(&mut panel_ui, section.title(), section.id(), true, |ui| {
-                    match section {
-                        InspectorSection::Outliner => self.outliner_contents(ui),
-                        InspectorSection::EntityInfo => self.entity_info_contents(ui),
-                        InspectorSection::Components => self.components_contents(ui),
-                        InspectorSection::Tags => self.tags_contents(ui),
-                        InspectorSection::Display => self.display_contents(ui),
-                        InspectorSection::View => self.view_contents(ui),
-                        InspectorSection::Units => self.units_contents(ui),
-                    }
-                });
-            let header = panel
-                .inner
-                .interact(egui::Sense::click_and_drag())
-                .on_hover_cursor(egui::CursorIcon::Grab)
-                .on_hover_text("Drag to reorder this section");
-            layout.heights[index] = panel_ui.min_rect().height() + spacing;
-            layout.header_heights[index] = header.rect.height();
-            top += layout.heights[index];
-            if layout.drag.is_none() && header.drag_started_by(egui::PointerButton::Primary) {
-                let press = ui
-                    .input(|i| i.pointer.press_origin())
-                    .unwrap_or(header.rect.center());
-                layout.drag = Some(InspectorDrag {
-                    section,
-                    grab_offset: press - panel.response.rect.min,
-                    order: self.inspector_order,
-                });
-                layout.floating = Some(section);
-                egui::DragAndDrop::set_payload(ui.ctx(), section);
-                ui.ctx().request_repaint();
-            }
-        }
-        // Only the slots affect scroll extent; a floating panel never pushes
-        // other content or changes the sidebar width.
-        ui.allocate_space(egui::vec2(width, (top - spacing).max(0.)));
-        if let (Some(drag), Some(pointer)) = (&layout.drag, pointer) {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-            if drop_rect.contains(pointer) {
-                let header_top = pointer.y - origin.y - drag.grab_offset.y;
-                layout.preview_order(header_top);
-                if ui.input(|i| i.pointer.primary_down()) {
-                    let edge = 32.;
-                    let speed = ((clip.top() + edge - pointer.y).max(0.)
-                        - (pointer.y - (clip.bottom() - edge)).max(0.))
-                        * 12.;
-                    if speed != 0. {
-                        let dt = ui.input(|i| i.stable_dt.min(0.05));
-                        ui.scroll_with_delta_animation(
-                            egui::vec2(0., speed * dt),
-                            egui::style::ScrollAnimation::none(),
-                        );
-                        ui.ctx().request_repaint();
-                    }
-                }
-            }
-            if ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary)) {
-                if drop_rect.contains(pointer) {
-                    self.inspector_order = layout.drag.as_ref().unwrap().order;
-                }
-                layout.drag = None;
-                egui::DragAndDrop::clear_payload(ui.ctx());
-                ui.ctx().request_repaint();
-            }
-        }
-        self.inspector_layout = layout;
-    }
-
     pub(super) fn begin_component_placement(&mut self, id: u64, ctx: &egui::Context) {
         if !self
             .doc
@@ -2362,6 +3231,10 @@ impl KetchupApp {
                         .on_hover_text("Double-click to rename");
                     if name.double_clicked() {
                         self.tag_rename = Some((tag.id, tag.name.clone()));
+                        Self::request_name_input_focus(
+                            ui.ctx(),
+                            egui::Id::unique("rename_tag_name"),
+                        );
                     }
                     if ui
                         .small_button("Edit")
@@ -2369,6 +3242,10 @@ impl KetchupApp {
                         .clicked()
                     {
                         self.tag_rename = Some((tag.id, tag.name.clone()));
+                        Self::request_name_input_focus(
+                            ui.ctx(),
+                            egui::Id::unique("rename_tag_name"),
+                        );
                     }
                     if ui
                         .small_button("×")
@@ -2386,7 +3263,13 @@ impl KetchupApp {
             if self.doc.model.tags.contains_key(&id) {
                 let mut keep = true;
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut name).desired_width(115.));
+                    let input_id = egui::Id::unique("rename_tag_name");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut name)
+                            .id(input_id)
+                            .desired_width(115.),
+                    );
+                    Self::focus_name_input(ui, &name, input_id);
                     if ui.small_button("Save").clicked() {
                         before.get_or_insert_with(|| self.doc.model.clone());
                         match self.doc.model.rename_tag(id, &name) {
@@ -2482,6 +3365,13 @@ impl KetchupApp {
     }
 
     fn units_contents(&mut self, ui: &mut egui::Ui) {
+        Self::unit_settings_contents(ui, &mut self.doc.display.units);
+    }
+
+    pub(super) fn unit_settings_contents(
+        ui: &mut egui::Ui,
+        units: &mut ketchup_core::UnitSettings,
+    ) {
         fn precision_picker(
             ui: &mut egui::Ui,
             id: &'static str,
@@ -2536,7 +3426,6 @@ impl KetchupApp {
                 .labelled_by(label.id);
         }
 
-        let units = &mut self.doc.display.units;
         picker(
             ui,
             "units_length",

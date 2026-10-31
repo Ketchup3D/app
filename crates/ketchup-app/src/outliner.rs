@@ -27,7 +27,8 @@ struct OutlinerDragHover {
 
 struct Outliner<'a> {
     model: &'a Model,
-    paint: std::collections::BTreeMap<u64, OutlinerPaint>,
+    paint: &'a std::collections::BTreeMap<u64, OutlinerPaint>,
+    materials: &'a std::collections::BTreeMap<u64, OutlinerMaterial>,
     filtered_objects: Option<&'a BTreeSet<u64>>,
     selected: &'a BTreeSet<u64>,
     entities: &'a renderer::EntityCache,
@@ -38,6 +39,128 @@ struct Outliner<'a> {
     drop: Option<OutlinerDrop>,
     drop_hover: Option<u64>,
     drag_hover: Option<OutlinerDragHover>,
+}
+
+// Hierarchy summaries depend on the document, not selection, camera, scroll
+// position or disclosure state. Reuse them while interacting with the scene.
+#[derive(Default)]
+pub(in crate::app) struct OutlinerCache {
+    revision: Option<u64>,
+    roots: BTreeSet<u64>,
+    paint: std::collections::BTreeMap<u64, OutlinerPaint>,
+    materials: std::collections::BTreeMap<u64, OutlinerMaterial>,
+    query: String,
+    filtered_objects: Option<BTreeSet<u64>>,
+    #[cfg(test)]
+    summary_builds: usize,
+}
+
+impl OutlinerCache {
+    fn update(&mut self, model: &Model, revision: u64, query: &str) {
+        let changed = self.revision != Some(revision);
+        if changed {
+            self.roots = model.root_entities();
+            self.materials = outliner_materials(model, &self.roots);
+            self.paint = if model.face_colors.is_empty() {
+                Default::default()
+            } else {
+                outliner_paint(model, &self.roots)
+            };
+            self.revision = Some(revision);
+            #[cfg(test)]
+            {
+                self.summary_builds += 1;
+            }
+        }
+        if changed || self.query != query {
+            self.query = query.to_owned();
+            self.filtered_objects = matching_outliner_objects(model, query);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutlinerMaterial {
+    None,
+    Partial,
+    Full,
+}
+
+impl OutlinerMaterial {
+    fn icon(self) -> &'static str {
+        match self {
+            Self::None => "material_none",
+            Self::Partial => "material_partial",
+            Self::Full => "material_full",
+        }
+    }
+
+    fn color(self, ui: &egui::Ui) -> Color32 {
+        match self {
+            Self::None => Palette::for_ui(ui).muted,
+            Self::Partial => ui.visuals().warn_fg_color,
+            Self::Full => Palette::for_ui(ui).green,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "No material assigned",
+            Self::Partial => "Partial material assignment",
+            Self::Full => "Full material assignment",
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        if self == other { self } else { Self::Partial }
+    }
+}
+
+// Stock assignments inherit from the nearest assigned assembly, just as in the
+// cutting plan. Include hidden and collapsed parts, and aggregate once per frame.
+fn outliner_materials(
+    model: &Model,
+    roots: &BTreeSet<u64>,
+) -> std::collections::BTreeMap<u64, OutlinerMaterial> {
+    fn visit(
+        model: &Model,
+        id: u64,
+        inherited: bool,
+        states: &mut std::collections::BTreeMap<u64, OutlinerMaterial>,
+    ) -> OutlinerMaterial {
+        let assigned = if inherited {
+            OutlinerMaterial::Full
+        } else {
+            OutlinerMaterial::None
+        };
+        let state = if let Some(object) = model.objects.get(&id) {
+            let inherited = inherited || model.object_stock_material(object).is_some();
+            object
+                .entities
+                .iter()
+                .filter(|id| {
+                    model.objects.contains_key(id)
+                        || model.edges.contains_key(id)
+                        || model.faces.contains_key(id)
+                })
+                .map(|id| visit(model, *id, inherited, states))
+                .reduce(OutlinerMaterial::merge)
+                .unwrap_or(if inherited {
+                    OutlinerMaterial::Full
+                } else {
+                    OutlinerMaterial::None
+                })
+        } else {
+            assigned
+        };
+        states.insert(id, state);
+        state
+    }
+    let mut states = std::collections::BTreeMap::new();
+    for id in roots {
+        visit(model, *id, false, &mut states);
+    }
+    states
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,9 +356,16 @@ impl Outliner<'_> {
             .scope_builder(egui::UiBuilder::new().scope_id(row_id), |ui| {
                 ui.horizontal(|ui| {
                     let height = ui.spacing().interact_size.y;
-                    let width = (ui.available_width() - height - ui.spacing().item_spacing.x)
+                    let width = (ui.available_width() - 2. * (height + ui.spacing().item_spacing.x))
                         .max(0.);
                     let response = ui.add_sized(egui::vec2(width, height), button);
+                    let material = self.materials.get(&id).copied().unwrap_or(OutlinerMaterial::None);
+                    let (rect, indicator) = ui.allocate_exact_size(egui::vec2(height, height), Sense::hover());
+                    let color = material.color(ui);
+                    icons::line_icon(ui.painter(), rect.center(), material.icon(), color);
+                    let material_label = format!("{} — {kind}: {label}", material.label());
+                    indicator.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), &material_label));
+                    indicator.on_hover_text(material_label);
                     let hidden = self.model.hidden.contains(&id);
                     let eye_hidden = state.hidden;
                     let eye = egui::Atom::paint(egui::vec2(18., 18.), move |ui, args| {
@@ -552,6 +682,36 @@ impl Outliner<'_> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cached_summaries_survive_navigation_and_refresh_after_document_edits() {
+        let (mut model, _, _) = paintable_model();
+        let face = *model.faces.keys().next().unwrap();
+        model.face_colors.insert(face, [10, 20, 30]);
+        let mut snapshot = renderer::ModelSnapshot::default();
+        let mut cache = OutlinerCache::default();
+        let original = model.clone();
+        for query in ["", "Painted", "missing", ""] {
+            cache.update(&model, snapshot.update(&model), query);
+            assert_eq!(cache.roots, model.root_entities());
+            assert_eq!(cache.materials, outliner_materials(&model, &cache.roots));
+            assert_eq!(cache.paint, outliner_paint(&model, &cache.roots));
+            assert_eq!(
+                cache.filtered_objects,
+                matching_outliner_objects(&model, query)
+            );
+        }
+        assert_eq!(cache.summary_builds, 1);
+        let face = *model.faces.keys().next().unwrap();
+        model.face_colors.insert(face, [150, 70, 30]);
+        cache.update(&model, snapshot.update(&model), "");
+        assert_eq!(cache.paint, outliner_paint(&model, &cache.roots));
+        assert_eq!(cache.summary_builds, 2);
+        model = original;
+        cache.update(&model, snapshot.update(&model), "");
+        assert_eq!(cache.paint, outliner_paint(&model, &cache.roots));
+        assert_eq!(cache.summary_builds, 3);
+    }
+
     fn nested_model() -> (KetchupApp, u64, u64, u64) {
         let mut model = Model::default();
         let edge = model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
@@ -606,6 +766,92 @@ mod tests {
             .unwrap();
         let component = *model.objects[&group].entities.first().unwrap();
         (model, group, component)
+    }
+
+    #[test]
+    fn material_summary_tracks_partial_full_inherited_and_restored_assignments() {
+        let (app, group, component, edge) = nested_model();
+        let mut model = app.doc.model;
+        let roots = model.root_entities();
+        let loose_edge = model.add_edge(DVec3::Y, DVec3::Y + DVec3::X).unwrap();
+        model
+            .objects
+            .get_mut(&group)
+            .unwrap()
+            .entities
+            .insert(loose_edge);
+        let stock = ketchup_core::StockMaterial {
+            name: "Pine".into(),
+            dimensions: [190, 890, 24000],
+        };
+        let material_id = ketchup_core::MaterialId::new_v4();
+        model.stock_materials.insert(material_id, stock.clone());
+        let before = model.clone();
+        assert_eq!(
+            outliner_materials(&model, &roots)[&group],
+            OutlinerMaterial::None
+        );
+        model.objects.get_mut(&component).unwrap().stock_material_id = Some(material_id);
+        model.hidden.insert(component);
+        let partial = outliner_materials(&model, &roots);
+        assert_eq!(partial[&group], OutlinerMaterial::Partial);
+        assert_eq!(partial[&component], OutlinerMaterial::Full);
+        assert_eq!(partial[&edge], OutlinerMaterial::Full);
+        assert_eq!(partial[&loose_edge], OutlinerMaterial::None);
+
+        // An assembly assignment covers its own geometry and unassigned children.
+        model.objects.get_mut(&group).unwrap().stock_material = Some(stock);
+        model.objects.get_mut(&component).unwrap().stock_material_id = None;
+        let full = outliner_materials(&model, &roots);
+        for id in [group, component, edge, loose_edge] {
+            assert_eq!(full[&id], OutlinerMaterial::Full);
+        }
+        let restored = Document::from_json(
+            &serde_json::to_string(&Document {
+                model: model.clone(),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(outliner_materials(&restored.model, &roots), full);
+        let mut history = History::default();
+        history.record("Assign material", before, &model);
+        assert!(history.undo(&mut model));
+        assert_eq!(
+            outliner_materials(&model, &roots)[&group],
+            OutlinerMaterial::None
+        );
+        assert!(history.redo(&mut model));
+        assert_eq!(outliner_materials(&model, &roots), full);
+    }
+
+    #[test]
+    fn material_icons_show_distinct_status_colors_and_filled_boards_in_both_themes() {
+        let ctx = egui::Context::default();
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            ctx.set_theme(theme);
+            for (status, filled_boards) in [
+                (OutlinerMaterial::None, 0),
+                (OutlinerMaterial::Partial, 1),
+                (OutlinerMaterial::Full, 2),
+            ] {
+                let mut color = Color32::TRANSPARENT;
+                let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    color = status.color(ui);
+                    let colors = [
+                        OutlinerMaterial::None.color(ui),
+                        OutlinerMaterial::Partial.color(ui),
+                        OutlinerMaterial::Full.color(ui),
+                    ];
+                    assert_ne!(colors[0], colors[1]);
+                    assert_ne!(colors[1], colors[2]);
+                    assert_ne!(colors[0], colors[2]);
+                    icons::line_icon(ui.painter(), Pos2::new(30., 30.), status.icon(), color);
+                });
+                assert_eq!(output.shapes.iter().filter(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == color)).count(), filled_boards);
+            }
+        }
     }
 
     #[test]
@@ -1038,7 +1284,11 @@ mod tests {
         let eye = bounds(&output, "Hide Component: Handle");
         let parent_eye = bounds(&output, "Hide Group: Cabinet");
         let row = bounds(&output, "Component: Handle");
-        assert!(eye.left() > row.right());
+        let material = bounds(&output, "No material assigned — Component: Handle");
+        let parent_material = bounds(&output, "No material assigned — Group: Cabinet");
+        assert!(material.left() > row.right());
+        assert!(eye.left() > material.right());
+        assert!((material.right() - parent_material.right()).abs() < 1.);
         assert!((eye.right() - parent_eye.right()).abs() < 1.);
 
         for name in ["Show Component: Handle", "Hide Component: Handle"] {
@@ -1101,12 +1351,15 @@ impl KetchupApp {
             search.scroll_to_me(Some(egui::Align::Center));
             self.focus_outliner_search = false;
         }
-        let roots = self.doc.model.root_entities();
+        let revision = self.render_model.update(&self.doc.model);
+        self.outliner_cache
+            .update(&self.doc.model, revision, &self.outliner_filter);
+        let roots = &self.outliner_cache.roots;
         if roots.is_empty() {
             empty_outliner_label(ui, "geometry", "No objects or geometry yet");
             return;
         }
-        let filtered_objects = matching_outliner_objects(&self.doc.model, &self.outliner_filter);
+        let filtered_objects = &self.outliner_cache.filtered_objects;
         if filtered_objects.as_ref().is_some_and(BTreeSet::is_empty) {
             empty_outliner_label(ui, "outliner", "No matching objects");
             return;
@@ -1115,11 +1368,8 @@ impl KetchupApp {
         let hover_id = ui.scope_id().with("outliner_drag_hover");
         let mut tree = Outliner {
             model: &self.doc.model,
-            paint: if self.doc.model.face_colors.is_empty() {
-                Default::default()
-            } else {
-                outliner_paint(&self.doc.model, &roots)
-            },
+            materials: &self.outliner_cache.materials,
+            paint: &self.outliner_cache.paint,
             filtered_objects: filtered_objects.as_ref(),
             selected: &self.selected,
             entities: &self.entity_cache,
@@ -1144,7 +1394,7 @@ impl KetchupApp {
         )
         .show(ui, |ui| {
             ui.spacing_mut().indent = 16.;
-            tree.level(ui, &roots, None);
+            tree.level(ui, roots, None);
             tree.root_drop_target(ui);
         });
         remember_scroll(ui.ctx(), "outliner_tree", scroll.state.clamped_offset());

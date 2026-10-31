@@ -200,3 +200,57 @@ fn grid_snapping_move_and_measurement_use_grid_points() {
     hover(&mut h, DVec3::new(2.3, -1.7, 0.));
     assert!(h.app.snap.unwrap().point.distance(DVec3::new(2., -2., 0.)) < 1e-7);
 }
+
+#[test]
+fn edge_and_face_snapping_menu_toggles_are_independent_preferences() {
+    let mut h = Harness::new();
+    assert!(h.app.snap_to_edge);
+    assert!(h.app.snap_to_face);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "▾"));
+    for label in ["Snap to edge", "Snap to face"] {
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        let checkbox = text_position(&output, label);
+        h.click(checkbox);
+        assert_eq!(h.app.snap_to_edge, label != "Snap to edge");
+        assert_eq!(h.app.snap_to_face, label != "Snap to face");
+        assert!(h.app.doc.snap_to_geometry);
+        assert!(h.app.doc.snap_to_axes);
+        assert!(!h.app.project.modified);
+        h.click(checkbox);
+        assert!(h.app.snap_to_edge);
+        assert!(h.app.snap_to_face);
+    }
+}
+
+#[test]
+fn drawing_uses_edge_and_face_preferences_with_cached_picking() {
+    let mut h = Harness::new();
+    h.app.set_tool(Tool::Line);
+    h.app.doc.snap_to_axes = false;
+    h.app
+        .doc
+        .model
+        .add_edge(DVec3::new(0., 0., 2.), DVec3::new(6., 0., 2.))
+        .unwrap();
+    let edge_target = DVec3::new(1.5, 0., 2.);
+    hover(&mut h, edge_target);
+    assert_eq!(h.app.snap.unwrap().kind, Inference::OnEdge);
+    h.app.snap_to_edge = false;
+    hover(&mut h, edge_target);
+    assert_eq!(h.app.snap.unwrap().kind, Inference::Plane);
+    for (a, b) in [
+        (DVec3::new(-3., -3., 4.), DVec3::new(3., -3., 4.)),
+        (DVec3::new(3., -3., 4.), DVec3::new(3., 3., 4.)),
+        (DVec3::new(3., 3., 4.), DVec3::new(-3., 3., 4.)),
+        (DVec3::new(-3., 3., 4.), DVec3::new(-3., -3., 4.)),
+    ] {
+        h.app.doc.model.add_edge(a, b).unwrap();
+    }
+    let face_target = DVec3::new(0.5, 0.5, 4.);
+    hover(&mut h, face_target);
+    assert_eq!(h.app.snap.unwrap().kind, Inference::OnFace);
+    h.app.snap_to_face = false;
+    hover(&mut h, face_target);
+    assert_eq!(h.app.snap.unwrap().kind, Inference::Plane);
+}

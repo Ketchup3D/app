@@ -9,6 +9,153 @@ fn deliver(app: &mut KetchupApp, result: Result<Outcome, String>, ctx: &egui::Co
 }
 
 #[test]
+fn selection_restores_for_its_project_and_ignores_missing_or_hidden_entities() {
+    let ctx = egui::Context::default();
+    let mut doc = Document::default();
+    let visible = doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    let hidden = doc.model.add_edge(DVec3::Y, DVec3::Y + DVec3::X).unwrap();
+    doc.model.hidden.insert(hidden);
+    doc.selection = BTreeSet::from([visible, hidden, u64::MAX]);
+    let mut app = KetchupApp::with_document(doc, None, true);
+    assert_eq!(app.selected, BTreeSet::from([visible]));
+    assert_eq!(app.doc.selection, app.selected);
+
+    // Integer IDs start over in another project; its own selection must win.
+    let mut other = Document::default();
+    assert_eq!(
+        other.model.add_edge(DVec3::ZERO, DVec3::Z).unwrap(),
+        visible
+    );
+    let selected = other.model.add_edge(DVec3::Y, DVec3::Y + DVec3::Z).unwrap();
+    other.selection.insert(selected);
+    app.replace_project(other, None, &ctx);
+    assert_eq!(app.selected, BTreeSet::from([selected]));
+    assert!(!app.project.modified);
+    app.new_model(&ctx);
+    assert!(app.selected.is_empty());
+    assert!(app.doc.selection.is_empty());
+    assert_eq!(app.doc.selection_context, None);
+}
+
+#[test]
+fn nested_selection_restores_its_editing_context_and_discards_invalid_contexts() {
+    let mut doc = Document::default();
+    let edge = doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    let inner = doc
+        .model
+        .make_object(&BTreeSet::from([edge]), true, "Inner")
+        .unwrap();
+    let outer = doc
+        .model
+        .make_object(&BTreeSet::from([inner]), false, "Outer")
+        .unwrap();
+    let inner = *doc.model.objects[&outer].entities.first().unwrap();
+    let edge = *doc.model.objects[&inner].entities.first().unwrap();
+    doc.selection = BTreeSet::from([edge, outer]);
+    doc.selection_context = Some(inner);
+    let loaded = Document::from_json(&serde_json::to_string(&doc).unwrap()).unwrap();
+    let app = KetchupApp::with_document(loaded, None, true);
+    assert_eq!(app.doc.model.edit_path(), vec![outer, inner]);
+    assert_eq!(app.selected, BTreeSet::from([edge]));
+
+    for context in [inner, u64::MAX] {
+        let mut invalid = doc.clone();
+        invalid.selection_context = Some(context);
+        invalid.model.locked.insert(outer);
+        let app = KetchupApp::with_document(invalid, None, true);
+        assert_eq!(app.doc.model.edit_context, None);
+        assert_eq!(app.selected, BTreeSet::from([outer]));
+    }
+    doc.model.hidden.insert(outer);
+    let app = KetchupApp::with_document(doc, None, true);
+    assert_eq!(app.doc.model.edit_context, None);
+    assert!(app.selected.is_empty());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn selection_changes_save_immediately_without_model_edits_or_preference_storage() {
+    const CHILD: &str = "KETCHUP_SELECTION_AUDIT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "app::project_tests::selection_changes_save_immediately_without_model_edits_or_preference_storage", "--nocapture"])
+            .env(CHILD, "1")
+            .env("KETCHUP_DATA_DIR", directory.path())
+            .output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+
+    let ctx = egui::Context::default();
+    let mut doc = Document::default();
+    let a = doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    let b = doc.model.add_edge(DVec3::Y, DVec3::Y + DVec3::X).unwrap();
+    let c = doc.model.add_edge(DVec3::Z, DVec3::Z + DVec3::X).unwrap();
+    let group = doc
+        .model
+        .make_object(&BTreeSet::from([c]), false, "Group")
+        .unwrap();
+    let child = *doc.model.objects[&group].entities.first().unwrap();
+    let mut app = KetchupApp::with_document(doc, None, true);
+    app.project.modified = false;
+    let model = app.doc.model.clone();
+    for selection in [
+        BTreeSet::from([a]),
+        BTreeSet::from([b]),
+        BTreeSet::from([a, b]),
+        BTreeSet::new(),
+    ] {
+        app.selected = selection.clone();
+        app.persist_inspector_changes(&ctx, None, false);
+        assert!(app.save_error.is_none());
+        assert!(!app.project.modified);
+        assert!(app.dirty_since.is_none());
+        assert_eq!(app.doc.model, model);
+        let saved = storage::load().unwrap().unwrap();
+        assert_eq!(saved.selection, selection);
+        let restarted = KetchupApp::with_document(saved, None, true);
+        assert_eq!(restarted.selected, selection);
+    }
+
+    // An unchanged frame must not rewrite the document.
+    let file = storage::data_dir().unwrap().join("model.json");
+    let contents = std::fs::read(&file).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    app.persist_inspector_changes(&ctx, None, false);
+    assert!(!file.exists());
+    std::fs::write(&file, contents).unwrap();
+
+    // Both entering an empty editing scope and selecting within it are durable.
+    app.enter_object(group, &ctx);
+    app.persist_inspector_changes(&ctx, None, false);
+    let saved = storage::load().unwrap().unwrap();
+    assert_eq!(saved.selection_context, Some(group));
+    assert!(saved.selection.is_empty());
+    app.selected.insert(child);
+    app.persist_inspector_changes(&ctx, None, false);
+    let restarted = KetchupApp::with_document(storage::load().unwrap().unwrap(), None, true);
+    assert_eq!(restarted.doc.model.edit_context, Some(group));
+    assert_eq!(restarted.selected, BTreeSet::from([child]));
+    app.close_edit_context(&ctx);
+    app.persist_inspector_changes(&ctx, None, false);
+    assert_eq!(storage::load().unwrap().unwrap().selection_context, None);
+    assert!(!app.project.modified);
+
+    app.selected.insert(a);
+    eframe::App::on_exit(&mut app);
+    assert_eq!(
+        storage::load().unwrap().unwrap().selection,
+        BTreeSet::from([a])
+    );
+}
+
+#[test]
 fn new_project_clears_geometry_history_and_previous_file() {
     let ctx = egui::Context::default();
     let mut app = KetchupApp::with_document(Document::default(), None, true);

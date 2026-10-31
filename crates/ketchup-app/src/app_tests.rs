@@ -17,6 +17,8 @@ mod outliner_drag;
 mod precision_input;
 #[path = "release_notes_tests.rs"]
 mod release_notes;
+#[path = "rendering_tests.rs"]
+mod rendering;
 #[path = "text_tools_tests.rs"]
 mod text_tools;
 
@@ -3958,6 +3960,151 @@ fn ui_solid_box(model: &mut Model, min: DVec3, max: DVec3) -> u64 {
     let entities = model.paste_entities(&body, DVec3::ZERO);
     model.make_object(&entities, false, "Solid box").unwrap()
 }
+#[test]
+fn selected_object_volume_is_reused_across_inspector_redraws_and_selection_changes() {
+    let mut h = Harness::new();
+    let a = ui_solid_box(&mut h.app.doc.model, DVec3::ZERO, DVec3::splat(2.));
+    let b = ui_solid_box(&mut h.app.doc.model, DVec3::splat(4.), DVec3::splat(5.));
+    h.app.tool = Tool::Union;
+    h.app.solid_first = Some(a);
+    for id in [a, a, b, b, a] {
+        h.app.selected = BTreeSet::from([id]);
+        let _ = h.ctx.run_ui(egui::RawInput::default(), |ui| {
+            h.app.entity_info_contents(ui);
+        });
+    }
+    // Both inspector paths share the result, even when selecting another body.
+    assert_eq!(h.app.solid_volume_cache.computations, 2);
+    h.app.doc.camera.distance *= 2.;
+    h.app.doc.display.units.precision.length = Some(1);
+    let _ = h.ctx.run_ui(egui::RawInput::default(), |ui| {
+        h.app.entity_info_contents(ui);
+    });
+    assert_eq!(h.app.solid_volume_cache.computations, 2);
+}
+
+#[test]
+fn volume_cache_tracks_direct_geometry_edits_undo_context_and_replacement_models() {
+    let mut model = Model::default();
+    let id = ui_solid_box(&mut model, DVec3::ZERO, DVec3::splat(2.));
+    let original = model.clone();
+    let mut cache = solid_tools::VolumeCache::default();
+    assert!((cache.volume(&model, id).unwrap() - 8.).abs() < 1e-6);
+    for vertex in model.vertices.values_mut() {
+        vertex.position.x *= 2.;
+    }
+    assert!((cache.volume(&model, id).unwrap() - 16.).abs() < 1e-6);
+    model = original;
+    assert!((cache.volume(&model, id).unwrap() - 8.).abs() < 1e-6);
+    model.enter_object(id);
+    let error = cache.volume(&model, id);
+    assert!(error.is_err());
+    assert_eq!(cache.volume(&model, id), error);
+    assert_eq!(cache.computations, 4);
+
+    // Opening another project may reuse the same entity IDs.
+    let mut replacement = Model::default();
+    let replacement_id = ui_solid_box(&mut replacement, DVec3::ZERO, DVec3::splat(3.));
+    assert_eq!(replacement_id, id);
+    assert!((cache.volume(&replacement, id).unwrap() - 27.).abs() < 1e-6);
+    replacement.faces.clear();
+    let error = cache.volume(&replacement, id);
+    assert!(error.is_err());
+    assert_eq!(cache.volume(&replacement, id), error);
+    assert_eq!(cache.computations, 6);
+}
+
+#[test]
+fn axis_lengths_only_measure_solids_in_mixed_and_nested_selections() {
+    let mut model = Model::default();
+    let size = DVec3::new(1., 2., 3.);
+    let solid = ui_solid_box(&mut model, DVec3::ZERO, size);
+    let dimension = model
+        .add_dimension(DVec3::ZERO, DVec3::X, DVec3::Y * 100.)
+        .unwrap();
+    let text = model
+        .add_text(DVec3::ZERO, DVec3::splat(200.), "Note")
+        .unwrap();
+    let wire = model
+        .add_edge(DVec3::splat(300.), DVec3::splat(301.))
+        .unwrap();
+    let open = ui_solid_box(&mut model, DVec3::splat(20.), DVec3::splat(25.));
+    let missing_face = *model
+        .expand_entities(&BTreeSet::from([open]))
+        .iter()
+        .find(|id| model.faces.contains_key(id))
+        .unwrap();
+    model.faces.remove(&missing_face);
+    model
+        .objects
+        .get_mut(&open)
+        .unwrap()
+        .entities
+        .remove(&missing_face);
+    let mut cache = solid_tools::VolumeCache::default();
+    for selected in [
+        BTreeSet::from([solid]),
+        BTreeSet::from([solid, dimension, text, wire, open]),
+    ] {
+        assert_eq!(cache.solid_selection_size(&model, &selected), Some(size));
+    }
+    for id in [dimension, text, wire, open, missing_face] {
+        assert_eq!(
+            cache.solid_selection_size(&model, &BTreeSet::from([id])),
+            None
+        );
+    }
+    let contents = model.objects[&solid].entities.clone();
+    let loose = model.copy_entities(&contents);
+    let assembly = model
+        .make_object(
+            &BTreeSet::from([solid, dimension, text, wire, open]),
+            false,
+            "Mixed assembly",
+        )
+        .unwrap();
+    assert_eq!(
+        cache.solid_selection_size(&model, &BTreeSet::from([assembly])),
+        Some(size)
+    );
+    // A fully selected ungrouped body still qualifies; an isolated face does not.
+    assert_eq!(
+        cache.solid_selection_size(&loose, &loose.root_entities()),
+        Some(size)
+    );
+    let face = *loose.faces.keys().next().unwrap();
+    assert_eq!(
+        cache.solid_selection_size(&loose, &BTreeSet::from([face])),
+        None
+    );
+}
+
+#[test]
+fn solid_axis_lengths_refresh_after_geometry_edits_and_model_restoration() {
+    let mut model = Model::default();
+    let solid = ui_solid_box(&mut model, DVec3::ZERO, DVec3::new(1., 2., 3.));
+    let selected = BTreeSet::from([solid]);
+    let original = model.clone();
+    let mut cache = solid_tools::VolumeCache::default();
+    for _ in 0..2 {
+        assert_eq!(
+            cache.solid_selection_size(&model, &selected),
+            Some(DVec3::new(1., 2., 3.))
+        );
+    }
+    for vertex in model.vertices.values_mut() {
+        vertex.position.z *= 2.;
+    }
+    assert_eq!(
+        cache.solid_selection_size(&model, &selected),
+        Some(DVec3::new(1., 2., 6.))
+    );
+    assert_eq!(
+        cache.solid_selection_size(&original, &selected),
+        Some(DVec3::new(1., 2., 3.))
+    );
+}
+
 fn ui_solid_pair(h: &mut Harness) -> (u64, u64) {
     let a = ui_solid_box(&mut h.app.doc.model, DVec3::ZERO, DVec3::splat(2.));
     let b = ui_solid_box(
@@ -3976,7 +4123,7 @@ fn solid_flyout_contains_all_six_tools_and_union_applies_to_selection_with_undo(
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&output, "Union"));
     let menu = h.frame(vec![], egui::Modifiers::NONE);
-    for label in ["Flip", "Outer Shell", "Union", "Intersect", "Trim", "Split"] {
+    for label in ["Flip", "Combine", "Union", "Intersect", "Trim", "Split"] {
         assert_menu_icon(&menu, label);
     }
     h.click(menu_text_position(&menu, "Union"));
@@ -3995,7 +4142,7 @@ fn solid_flyout_contains_all_six_tools_and_union_applies_to_selection_with_undo(
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&output, "Union"));
     let menu = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(menu_text_position(&menu, "Outer Shell"));
+    h.click(menu_text_position(&menu, "Combine"));
     assert_eq!(h.app.solid_tool, Tool::OuterShell);
 }
 #[test]
@@ -4516,17 +4663,17 @@ fn sidebar_sections_collapse_and_display_controls_change_saved_settings() {
 }
 
 #[test]
-fn sidebar_headers_reorder_in_memory_and_keep_their_disclosure_state() {
+fn sidebar_headers_dock_and_rejoin_in_memory_and_keep_their_disclosure_state() {
     use sidebar::InspectorSection;
 
     let mut h = Harness::new();
     h.ctx.style_mut_of(h.ctx.theme(), |s| s.animation_time = 0.);
-    h.size.y = 2000.;
+    h.size.y = 3000.;
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&output, "Components"));
     let output = h.frame(vec![], egui::Modifiers::NONE);
     let from = text_position(&output, "Components");
-    let to = text_position(&output, "Outliner") - egui::vec2(0., 8.);
+    let to = text_position(&output, "Outliner") - egui::vec2(0., 50.);
     h.pointer(from, egui::PointerButton::Primary, true, false);
     h.frame(vec![egui::Event::PointerMoved(to)], egui::Modifiers::NONE);
     h.pointer(to, egui::PointerButton::Primary, false, false);
@@ -4534,14 +4681,14 @@ fn sidebar_headers_reorder_in_memory_and_keep_their_disclosure_state() {
     assert!(!h.app.project.modified);
     let output = h.frame(vec![], egui::Modifiers::NONE);
     assert!(text_position(&output, "Components").y < text_position(&output, "Outliner").y);
-    // The moved section is still collapsed; expanding it still works normally.
-    assert!(text_position(&output, "Outliner").y - text_position(&output, "Components").y < 80.);
+    // A section alone in its area opens automatically and cannot collapse.
     h.click(text_position(&output, "Components"));
     let output = h.frame(vec![], egui::Modifiers::NONE);
     text_position(&output, "No components yet");
 
     let from = text_position(&output, "Components");
-    let to = text_position(&output, "Tags") + egui::vec2(0., 8.);
+    let mut to = text_position(&output, "Tags") + egui::vec2(0., 8.);
+    to.x = h.size.x - h.app.inspector_width * 0.5;
     h.pointer(from, egui::PointerButton::Primary, true, false);
     h.frame(vec![egui::Event::PointerMoved(to)], egui::Modifiers::NONE);
     h.pointer(to, egui::PointerButton::Primary, false, false);
@@ -4555,6 +4702,8 @@ fn sidebar_headers_reorder_in_memory_and_keep_their_disclosure_state() {
             InspectorSection::Components,
             InspectorSection::Display,
             InspectorSection::View,
+            InspectorSection::TimeCostEstimates,
+            InspectorSection::Materials,
         ]
     );
     let order = h.app.inspector_order;
@@ -4569,7 +4718,7 @@ fn sidebar_headers_reorder_in_memory_and_keep_their_disclosure_state() {
 }
 
 #[test]
-fn sidebar_drag_moves_the_entire_panel_and_animates_its_neighbors_and_drop() {
+fn sidebar_drag_moves_the_entire_panel_and_snaps_its_neighbors_and_drop() {
     let mut h = Harness::new();
     h.size.y = 2000.;
     h.ctx
@@ -4580,8 +4729,9 @@ fn sidebar_drag_moves_the_entire_panel_and_animates_its_neighbors_and_drop() {
     let output = h.frame(vec![], egui::Modifiers::NONE);
     let from = text_position(&output, "Components");
     let body_offset = text_position(&output, "No components yet") - from;
-    let neighbor_start = text_position(&output, "Outliner").y;
-    let to = text_position(&output, "Outliner") + egui::vec2(12., -8.);
+    let neighbor_start = text_position(&output, "Tags").y;
+    let mut to = text_position(&output, "Display") + egui::vec2(0., 8.);
+    to.x = h.size.x - h.app.inspector_width * 0.5;
     let viewport = h.app.viewport;
     let order = h.app.inspector_order;
     h.pointer(from, egui::PointerButton::Primary, true, false);
@@ -4589,20 +4739,20 @@ fn sidebar_drag_moves_the_entire_panel_and_animates_its_neighbors_and_drop() {
     let output = h.frame(vec![], egui::Modifiers::NONE);
     assert!(text_position(&output, "Components").distance(to) < 1.);
     assert!((text_position(&output, "No components yet") - to - body_offset).length() < 1.);
-    let neighbor_first = text_position(&output, "Outliner").y;
+    let neighbor_first = text_position(&output, "Tags").y;
     for _ in 0..8 {
         h.frame(vec![], egui::Modifiers::NONE);
     }
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    let neighbor_middle = text_position(&output, "Outliner").y;
+    let neighbor_middle = text_position(&output, "Tags").y;
     for _ in 0..25 {
         h.frame(vec![], egui::Modifiers::NONE);
     }
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    let neighbor_end = text_position(&output, "Outliner").y;
-    assert!(neighbor_first >= neighbor_start);
-    assert!(neighbor_middle > neighbor_first + 1.);
-    assert!(neighbor_end > neighbor_middle + 1.);
+    let neighbor_end = text_position(&output, "Tags").y;
+    assert!(neighbor_first < neighbor_start - 1.);
+    assert!((neighbor_middle - neighbor_first).abs() < 0.01);
+    assert!((neighbor_end - neighbor_first).abs() < 0.01);
     assert!(text_position(&output, "Components").distance(to) < 1.);
     assert_eq!(h.app.inspector_order, order);
     assert_eq!(h.app.viewport, viewport);
@@ -4614,8 +4764,8 @@ fn sidebar_drag_moves_the_entire_panel_and_animates_its_neighbors_and_drop() {
     }
     let output = h.frame(vec![], egui::Modifiers::NONE);
     let dropped = text_position(&output, "Components");
-    assert!(dropping.distance(dropped) > 1.);
-    assert!(dropped.y < text_position(&output, "Outliner").y);
+    assert!(dropping.distance(dropped) < 0.01);
+    assert!(dropped.y > text_position(&output, "Tags").y);
     assert!((dropped.x - from.x).abs() < 1.);
     assert!(!h.app.project.modified);
 }
@@ -4626,7 +4776,7 @@ fn sidebar_header_drag_cancels_on_escape_or_release_outside_the_inspector() {
     h.size.y = 2000.;
     let output = h.frame(vec![], egui::Modifiers::NONE);
     let from = text_position(&output, "Components");
-    let to = text_position(&output, "Outliner") - egui::vec2(0., 8.);
+    let to = text_position(&output, "Outliner") - egui::vec2(0., 50.);
     let order = h.app.inspector_order;
     h.pointer(from, egui::PointerButton::Primary, true, false);
     h.frame(vec![egui::Event::PointerMoved(to)], egui::Modifiers::NONE);
@@ -4787,4 +4937,446 @@ fn generate_screenshot_dialog_supports_multiple_views_and_cancels_without_editin
     assert_eq!(h.app.doc, before);
     assert!(h.app.project.pending.is_none());
     assert!(h.app.history.undo_label().is_none());
+}
+
+#[test]
+fn materials_section_assigns_catalog_material_as_an_undoable_document_edit() {
+    let mut h = Harness::new();
+    h.size.y = 4000.;
+    let edge = h.app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    let object = h
+        .app
+        .doc
+        .model
+        .make_object(&BTreeSet::from([edge]), false, "Board")
+        .unwrap();
+    h.app.selected = BTreeSet::from([object]);
+    h.app
+        .general_settings
+        .stock
+        .wood
+        .push(stock_settings::Stock {
+            id: ketchup_core::MaterialId::new_v4(),
+            name: "Test oak".into(),
+            thickness_mm: 19.,
+            width_mm: 89.,
+            length_mm: 2440.,
+            price: 10.,
+        });
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "Entity Info"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    assert!(text_position(&output, "Materials").y < text_position(&output, "Stock material").y);
+    for label in ["Sanding", "Finishing", "Revert to defaults"] {
+        assert!(!output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == label)
+        }));
+    }
+    h.click(text_position(&output, "Unassigned"));
+    h.frame(vec![], egui::Modifiers::NONE);
+    let before_search = h.app.doc.model.clone();
+    h.frame(
+        vec![egui::Event::Text("TeSt oak".into())],
+        egui::Modifiers::NONE,
+    );
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    text_position(&output, "Test oak (19 × 89 × 2440 mm)");
+    assert_eq!(h.app.doc.model, before_search);
+    assert_eq!(h.app.stock_material_filter, "TeSt oak");
+    h.key(Key::Enter);
+    let material_id = h.app.general_settings.stock.wood[0].id;
+    let assigned = ketchup_core::StockMaterial {
+        name: "Test oak".into(),
+        dimensions: [190, 890, 24400],
+    };
+    assert_eq!(
+        h.app.doc.model.objects[&object].stock_material_id,
+        Some(material_id)
+    );
+    assert!(h.app.doc.model.objects[&object].stock_material.is_none());
+    assert_eq!(h.app.doc.model.stock_materials[&material_id], assigned);
+    assert!(h.app.project.modified);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    assert!(text_position(&output, "Stock material").y < text_position(&output, "Sanding").y);
+    assert!(text_position(&output, "Sanding").y < text_position(&output, "Finishing").y);
+    text_position(&output, "Revert to defaults");
+    h.click(text_position(&output, "Test oak"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "Unassigned"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    for label in ["Sanding", "Finishing", "Revert to defaults"] {
+        assert!(!output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == label)
+        }));
+    }
+    h.app.undo(&h.ctx, false);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    text_position(&output, "Sanding");
+    text_position(&output, "Finishing");
+    h.app.general_settings.stock.wood[0].name = "Renamed oak".into();
+    h.app.general_settings.stock.wood[0].width_mm = 140.;
+    h.app.sync_stock_materials(&h.ctx);
+    assert_eq!(
+        h.app.doc.model.objects[&object].stock_material_id,
+        Some(material_id)
+    );
+    assert_eq!(
+        h.app.doc.model.stock_materials[&material_id].name,
+        "Renamed oak"
+    );
+    assert_eq!(
+        h.app.doc.model.stock_materials[&material_id].dimensions[1],
+        1400
+    );
+    h.app.general_settings.stock.wood.clear();
+    h.app.sync_stock_materials(&h.ctx);
+    assert_eq!(
+        h.app.doc.model.stock_materials[&material_id].name,
+        "Renamed oak"
+    );
+    h.app.undo(&h.ctx, false);
+    assert!(h.app.doc.model.objects[&object].stock_material_id.is_none());
+    h.app.undo(&h.ctx, true);
+    assert_eq!(
+        h.app.doc.model.objects[&object].stock_material_id,
+        Some(material_id)
+    );
+}
+
+#[test]
+fn shared_finishing_editor_selects_products_for_defaults_and_objects() {
+    for defaults in [true, false] {
+        let mut h = Harness::new();
+        h.size.y = 4000.;
+        let product = finish_settings::Finish {
+            name: "Golden oak".into(),
+            ..Default::default()
+        };
+        let product_id = product.id;
+        h.app.general_settings.stock.finishes = vec![
+            product,
+            finish_settings::Finish {
+                name: "Clear topcoat".into(),
+                finish_type: finish_settings::FinishType::Varnish,
+                ..Default::default()
+            },
+        ];
+        h.app.time_estimates.stain.enabled = true;
+        let object = if defaults {
+            h.app.general_settings.section = settings::Section::SurfaceTreatment;
+            h.app.settings_open = true;
+            None
+        } else {
+            let stock = stock_settings::Stock::default();
+            let edge = h.app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+            let id = h
+                .app
+                .doc
+                .model
+                .make_object(&BTreeSet::from([edge]), false, "Board")
+                .unwrap();
+            h.app
+                .doc
+                .model
+                .stock_materials
+                .insert(stock.id, stock.definition());
+            h.app
+                .doc
+                .model
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .stock_material_id = Some(stock.id);
+            h.app.general_settings.stock.wood.push(stock);
+            h.app.selected = BTreeSet::from([id]);
+            let output = h.frame(vec![], egui::Modifiers::NONE);
+            h.click(text_position(&output, "Entity Info"));
+            Some(id)
+        };
+        let before = h.app.doc.model.clone();
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&output, "Finishing"));
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&output, "Stain"));
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&output, "No product"));
+        h.frame(vec![], egui::Modifiers::NONE);
+        h.frame(
+            vec![egui::Event::Text("GoLdEn STAIN".into())],
+            egui::Modifiers::NONE,
+        );
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        text_position(&output, "Golden oak");
+        assert!(!output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == "Clear topcoat")
+        }));
+        assert_eq!(
+            h.app.doc.model, before,
+            "Searching must not edit the document"
+        );
+        assert_eq!(h.app.time_estimates.stain.product_id, None);
+        let filter_key = if defaults {
+            "settings/treatment/stain"
+        } else {
+            "entity/treatment/stain"
+        };
+        assert_eq!(h.app.finish_product_filters[filter_key], "GoLdEn STAIN");
+        h.key(Key::Enter);
+
+        if let Some(id) = object {
+            assert_eq!(
+                h.app.doc.model.objects[&id]
+                    .surface_treatment
+                    .stain
+                    .product_id,
+                Some(product_id)
+            );
+            assert!(h.app.doc.model.objects[&id].surface_treatment_customized);
+            assert_eq!(h.app.time_estimates.stain.product_id, None);
+            assert!(h.app.project.modified);
+            let restored =
+                Document::from_json(&serde_json::to_string(&h.app.doc).unwrap()).unwrap();
+            assert_eq!(
+                restored.model.objects[&id]
+                    .surface_treatment
+                    .stain
+                    .product_id,
+                Some(product_id)
+            );
+            h.app.undo(&h.ctx, false);
+            assert_eq!(h.app.doc.model, before);
+            h.app.undo(&h.ctx, true);
+            assert_eq!(
+                h.app.doc.model.objects[&id]
+                    .surface_treatment
+                    .stain
+                    .product_id,
+                Some(product_id)
+            );
+            h.app.replace_project(Document::default(), None, &h.ctx);
+            assert!(h.app.doc.model.objects.is_empty());
+            assert_eq!(h.app.time_estimates.stain.product_id, None);
+            h.app.replace_project(restored, None, &h.ctx);
+            h.app.selected = BTreeSet::from([id]);
+        } else {
+            assert_eq!(h.app.time_estimates.stain.product_id, Some(product_id));
+            assert_eq!(h.app.doc.model, before);
+            assert!(!h.app.project.modified);
+        }
+
+        // The selection follows the catalog ID through renames and removals.
+        h.app.general_settings.stock.finishes[0].name = "Renamed stain".into();
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        text_position(&output, "Renamed stain");
+        h.app.general_settings.stock.finishes.clear();
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&output, "Unavailable product"));
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        text_position(&output, "No products match your search.");
+        h.click(text_position(&output, "Clear"));
+        assert!(h.app.finish_product_filters[filter_key].is_empty());
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&output, "No product"));
+        if let Some(id) = object {
+            assert_eq!(
+                h.app.doc.model.objects[&id]
+                    .surface_treatment
+                    .stain
+                    .product_id,
+                None
+            );
+        } else {
+            assert_eq!(h.app.time_estimates.stain.product_id, None);
+            assert!(!h.app.project.modified);
+        }
+    }
+}
+
+#[test]
+fn material_removal_warns_about_other_projects_and_requires_confirmation() {
+    let mut h = Harness::new();
+    let stock = stock_settings::Stock::default();
+    let id = stock.id;
+    h.app.general_settings.stock.wood.push(stock.clone());
+    let edge = h.app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    let object = h
+        .app
+        .doc
+        .model
+        .make_object(&BTreeSet::from([edge]), false, "Board")
+        .unwrap();
+    h.app
+        .doc
+        .model
+        .objects
+        .get_mut(&object)
+        .unwrap()
+        .stock_material_id = Some(id);
+    h.app.doc.name = "Cabinet".into();
+    h.app.sync_stock_materials(&h.ctx);
+    let cabinet = h.app.doc.clone();
+    h.app.replace_project(Document::default(), None, &h.ctx);
+    h.app.settings_open = true;
+    h.app.general_settings.section = settings::Section::StockPricing;
+    h.app.material_removal = Some(id);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    text_position(&output, "Cabinet · 1 assigned object");
+    h.click(text_position(&output, "Cancel"));
+    assert!(h.app.material_removal.is_none());
+    assert!(h.app.settings_open);
+    assert_eq!(h.app.general_settings.stock.wood.len(), 1);
+    h.app.material_removal = Some(id);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "Remove material"));
+    assert!(h.app.material_removal.is_none());
+    assert!(h.app.general_settings.stock.wood.is_empty());
+    h.app.replace_project(cabinet, None, &h.ctx);
+    assert_eq!(h.app.doc.model.objects[&object].stock_material_id, Some(id));
+    assert_eq!(h.app.doc.model.stock_materials[&id], stock.definition());
+}
+
+#[test]
+fn push_pull_snaps_to_another_groups_edge_and_honors_preferences() {
+    let mut h = Harness::new();
+    modeling_rectangle(&mut h);
+    let source = h
+        .app
+        .doc
+        .model
+        .make_object(&h.app.doc.model.selectable_entities(), false, "Source")
+        .unwrap();
+    let a = DVec3::new(5., 0., 2.5);
+    let b = DVec3::new(5., 4., 2.5);
+    let edge = h.app.doc.model.add_edge(a, b).unwrap();
+    let target_group = h
+        .app
+        .doc
+        .model
+        .make_object(&BTreeSet::from([edge]), false, "Target")
+        .unwrap();
+    h.app.doc.model.edit_context = Some(source);
+    h.app.set_tool(Tool::PushPull);
+    h.app.doc.snap_to_axes = false;
+    h.app.begin_modeling(h.at(DVec3::new(2., 2., 0.)), &h.ctx);
+    assert!(h.app.modeling.is_some());
+    let target = a.lerp(b, 0.3); // Neither endpoint nor midpoint; off the pull axis.
+    let at = h.at(target);
+    h.app.update_modeling(at);
+    let edit = h.app.modeling.as_ref().unwrap();
+    assert_eq!(edit.snap.unwrap().kind, Inference::OnEdge);
+    assert!((edit.value.abs() - 2.5).abs() < 1e-7);
+    let preview = edit.preview.as_ref().unwrap();
+    assert!(
+        preview
+            .vertices
+            .values()
+            .any(|v| (v.position.z - 2.5).abs() < 1e-7 && v.position.x <= 4.)
+    );
+
+    h.app.snap_to_edge = false;
+    h.app.update_modeling(at);
+    assert!(h.app.modeling.as_ref().unwrap().snap.is_none());
+    h.app.snap_to_edge = true;
+    h.app.doc.snap_to_geometry = false;
+    h.app.update_modeling(at);
+    assert!(h.app.modeling.as_ref().unwrap().snap.is_none());
+    h.app.doc.snap_to_geometry = true;
+    h.app.doc.model.hidden.insert(target_group);
+    h.app.update_modeling(at);
+    assert!(h.app.modeling.as_ref().unwrap().snap.is_none());
+    h.app.doc.model.hidden.remove(&target_group);
+    h.app.update_modeling(at);
+    assert_eq!(
+        h.app.modeling.as_ref().unwrap().snap.unwrap().kind,
+        Inference::OnEdge
+    );
+    h.app.commit_modeling(&h.ctx);
+    assert!(h.app.modeling.is_none());
+    assert!(
+        h.app
+            .doc
+            .model
+            .vertices
+            .values()
+            .any(|v| (v.position.z - 2.5).abs() < 1e-7 && v.position.x <= 4.)
+    );
+    assert_eq!(h.app.history.undo_label(), Some("Push/Pull"));
+}
+
+#[test]
+fn push_pull_face_snapping_yields_to_typed_distances() {
+    let mut h = Harness::new();
+    modeling_rectangle(&mut h);
+    let points = [
+        DVec3::new(5., 0., 3.),
+        DVec3::new(9., 0., 3.),
+        DVec3::new(9., 4., 3.),
+        DVec3::new(5., 4., 3.),
+    ];
+    for i in 0..4 {
+        h.app
+            .doc
+            .model
+            .add_edge(points[i], points[(i + 1) % 4])
+            .unwrap();
+    }
+    h.app.set_tool(Tool::PushPull);
+    h.app.begin_modeling(h.at(DVec3::new(2., 2., 0.)), &h.ctx);
+    let at = h.at(DVec3::new(6.5, 1.5, 3.));
+    h.app.update_modeling(at);
+    assert_eq!(
+        h.app.modeling.as_ref().unwrap().snap.unwrap().kind,
+        Inference::OnFace
+    );
+    assert!((h.app.modeling.as_ref().unwrap().value.abs() - 3.).abs() < 1e-7);
+    h.app.snap_to_face = false;
+    h.app.update_modeling(at);
+    assert!(h.app.modeling.as_ref().unwrap().snap.is_none());
+    h.app.snap_to_face = true;
+    h.app.length_input = "1m".into();
+    h.app.update_modeling(at);
+    assert!(h.app.modeling.as_ref().unwrap().snap.is_none());
+    h.app.commit_modeling(&h.ctx);
+    let cap = h.app.selected.iter().next().unwrap();
+    assert!(
+        h.app.doc.model.faces[cap]
+            .vertices
+            .iter()
+            .all(|id| (h.app.doc.model.vertices[id].position.z - 1.).abs() < 1e-7)
+    );
+}
+
+#[test]
+fn materials_revert_button_clears_only_selected_treatment_overrides_and_is_undoable() {
+    let mut h = Harness::new();
+    h.size.y = 4000.;
+    let edge = h.app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    let object = h.app.doc.model.make_object(&BTreeSet::from([edge]), false, "Board").unwrap();
+    let stock = stock_settings::Stock::default();
+    h.app.doc.model.stock_materials.insert(stock.id, stock.definition());
+    h.app.general_settings.stock.wood.push(stock.clone());
+    let board = h.app.doc.model.objects.get_mut(&object).unwrap();
+    board.stock_material_id = Some(stock.id);
+    board.surface_treatment_customized = true;
+    board.surface_treatment.stain.enabled = true;
+    h.app.selected = BTreeSet::from([object]);
+    let defaults = h.app.time_estimates.clone();
+    let catalog = h.app.general_settings.stock.clone();
+    let customized = h.app.doc.model.clone();
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "Entity Info"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    assert!(text_position(&output, "Revert to defaults").y > text_position(&output, "Finishing").y);
+    h.click(text_position(&output, "Revert to defaults"));
+    assert!(h.app.doc.model.objects[&object].surface_treatment_override().is_none());
+    assert_eq!(h.app.doc.model.objects[&object].stock_material_id, Some(stock.id));
+    assert_eq!(h.app.time_estimates, defaults);
+    assert_eq!(h.app.general_settings.stock, catalog);
+    assert!(h.app.project.modified);
+    // The absence of an override survives saving and follows future Settings defaults.
+    let saved = serde_json::to_string(&h.app.doc).unwrap();
+    let restored: Document = serde_json::from_str(&saved).unwrap();
+    assert!(restored.model.objects[&object].surface_treatment_override().is_none());
+    h.app.undo(&h.ctx, false);
+    assert_eq!(h.app.doc.model, customized);
 }

@@ -82,7 +82,7 @@ impl KetchupApp {
                 .map(|(action, keys)| (*action, (*keys).to_owned()))
                 .collect(),
         };
-        let sections = [
+        let mut sections = [
             section(
                 "Drawing & measuring",
                 &[
@@ -144,7 +144,7 @@ impl KetchupApp {
                     ("Temporary orbit", "Middle drag"),
                     ("Temporary pan", "Shift + middle drag"),
                     ("Zoom to pointer", "Scroll"),
-                    ("Toggle emphasis on current group/component", "Tab"),
+                    ("Toggle sidebar", "Tab"),
                 ],
             ),
             section(
@@ -173,6 +173,25 @@ impl KetchupApp {
                 ],
             ),
         ];
+        for section in &mut sections {
+            for (action, keys) in &mut section.rows {
+                if let Some((tool, _)) = settings::TOOLS.iter().find(|(tool, _)| {
+                    tool.label() == *action
+                        || matches!(
+                            (*tool, *action),
+                            (Tool::Line, "Connected lines")
+                                | (Tool::Paint, "Paint faces")
+                                | (Tool::Erase, "Erase edges or faces")
+                                | (Tool::PushPull, "Push/Pull a face")
+                                | (Tool::Scale, "Scale geometry")
+                                | (Tool::Offset, "Offset a face")
+                                | (Tool::Move, "Move geometry")
+                        )
+                }) {
+                    *keys = self.general_settings.tool_shortcut(*tool).to_owned();
+                }
+            }
+        }
         let width = (ctx.content_rect().width() - 72.).clamp(80., 900.);
         let response = Modal::new("keyboard_shortcuts", 940.).show(ctx, |modal| {
             let mut filter_changed = false;

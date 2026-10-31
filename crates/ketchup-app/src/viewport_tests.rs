@@ -54,7 +54,10 @@ impl UiHarness {
                 events,
                 ..Default::default()
             },
-            |ui| self.app.viewport_panel(ui),
+            |ui| {
+                self.app.viewport_panel(ui);
+                self.app.rename_viewport_window(&self.ctx);
+            },
         )
     }
     fn pointer(&mut self, pos: Pos2, button: egui::PointerButton, pressed: bool) {
@@ -240,6 +243,32 @@ fn edge_drops_split_in_all_directions_and_center_drops_collapse_empty_panes() {
 }
 
 #[test]
+fn split_views_retain_independent_meshes_and_release_closed_pane_caches() {
+    let mut h = UiHarness::new();
+    h.app.gpu_ready = true;
+    let second = h.app.viewports.add(0, &h.app.doc.camera);
+    h.app.viewports.cameras.get_mut(&second).unwrap().yaw += 0.8;
+    h.app.viewports.dock(second, 0, DropSide::Right);
+    h.frame(vec![]);
+    h.frame(vec![]);
+    let builds: BTreeMap<_, _> = h
+        .app
+        .viewports
+        .scene_caches
+        .iter()
+        .map(|(id, cache)| (*id, cache.mesh_builds))
+        .collect();
+    assert_eq!(builds.len(), 2);
+    h.frame(vec![]);
+    for (id, cache) in &h.app.viewports.scene_caches {
+        assert_eq!(cache.mesh_builds, builds[id]);
+    }
+    h.app.viewports.dock(second, 0, DropSide::Center);
+    h.frame(vec![]);
+    assert_eq!(h.app.viewports.scene_caches.len(), 1);
+}
+
+#[test]
 fn nested_splits_moves_and_closes_keep_each_tab_exactly_once() {
     let mut workspace = Workspace::default();
     let a = workspace.add(0, &Camera::default());
@@ -413,5 +442,111 @@ fn drop_preview_matches_the_requested_edge_or_center() {
             preview.area(),
             rect.area() * if side == DropSide::Center { 1. } else { 0.5 }
         );
+    }
+}
+
+#[test]
+fn right_click_renames_a_view_and_saves_without_a_model_edit() {
+    let mut harness = UiHarness::new();
+    let plus = harness.label("+");
+    harness.click(plus);
+    let tab = harness.label("View 1");
+    harness.pointer(tab, egui::PointerButton::Secondary, true);
+    harness.pointer(tab, egui::PointerButton::Secondary, false);
+    let rename = harness.label("Rename…");
+    harness.click(rename);
+    harness.frame(vec![]);
+    assert_eq!(harness.app.viewports.renaming.as_ref().unwrap().0, 1);
+    harness.frame(vec![egui::Event::Text("  Plan  ".to_owned())]);
+    let save = harness.label("Save");
+    harness.click(save);
+    assert!(harness.app.viewports.renaming.is_none());
+    assert_eq!(harness.app.viewports.name(1), "Plan");
+    harness.label("Plan");
+    assert!(!harness.app.project.modified);
+    assert!(harness.app.dirty_since.is_none());
+
+    let mut storage = MemoryStorage::default();
+    harness
+        .app
+        .persist_inspector_changes(&harness.ctx, Some(&mut storage), false);
+    assert_eq!(storage.flushes, 1);
+    let mut restored = KetchupApp::with_document(Document::default(), None, true);
+    restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+    assert_eq!(restored.viewports.name(1), "Plan");
+    assert_eq!(restored.viewports.name(0), "Current");
+    restored.close_viewport(1, &harness.ctx);
+    assert!(!restored.viewports.names.contains_key(&1));
+}
+
+#[test]
+fn rename_cancel_and_empty_names_leave_the_original_name() {
+    let mut harness = UiHarness::new();
+    harness.app.viewports.renaming = Some((0, "   ".to_owned()));
+    harness.frame(vec![]);
+    let save = harness.label("Save");
+    harness.click(save);
+    assert!(harness.app.viewports.renaming.is_some());
+    assert_eq!(harness.app.viewports.name(0), "Current");
+    let cancel = harness.label("Cancel");
+    harness.click(cancel);
+    assert!(harness.app.viewports.renaming.is_none());
+    assert_eq!(harness.app.viewports.name(0), "Current");
+}
+
+#[test]
+fn hovering_an_inactive_view_does_not_activate_it_but_pressing_does() {
+    for button in [
+        egui::PointerButton::Primary,
+        egui::PointerButton::Middle,
+        egui::PointerButton::Secondary,
+    ] {
+        let mut harness = UiHarness::new();
+        let tab = harness.app.viewports.add(0, &harness.app.doc.camera);
+        harness.app.viewports.dock(tab, 0, DropSide::Right);
+        harness.app.activate_viewport(tab);
+        harness.frame(vec![]);
+        let left = egui::pos2(250., harness.app.viewport.center().y);
+        let camera = harness.app.doc.camera.clone();
+        harness.frame(vec![egui::Event::PointerMoved(left)]);
+        harness.frame(vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0., 30.),
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert_eq!(
+            harness.app.viewports.active, tab,
+            "hover and wheel must not activate"
+        );
+        assert_eq!(harness.app.doc.camera, camera);
+        harness.pointer(left, button, true);
+        assert_eq!(
+            harness.app.viewports.active, 0,
+            "activate on press, before routing input"
+        );
+        harness.pointer(left, button, false);
+    }
+}
+
+#[test]
+fn viewport_rename_focuses_and_selects_the_name_when_reopened() {
+    let mut harness = UiHarness::new();
+    for _ in 0..2 {
+        let tab = harness.label("Current");
+        harness.pointer(tab, egui::PointerButton::Secondary, true);
+        harness.pointer(tab, egui::PointerButton::Secondary, false);
+        let rename = harness.label("Rename…");
+        harness.click(rename);
+        harness.frame(vec![]);
+        let input_id = egui::Id::unique("rename_viewport_name");
+        assert_eq!(
+            harness.ctx.memory(|memory| memory.focused()),
+            Some(input_id)
+        );
+        harness.frame(vec![egui::Event::Text("Plan".into())]);
+        assert_eq!(harness.app.viewports.renaming, Some((0, "Plan".into())));
+        let cancel = harness.label("Cancel");
+        harness.click(cancel);
+        assert!(harness.app.viewports.renaming.is_none());
     }
 }

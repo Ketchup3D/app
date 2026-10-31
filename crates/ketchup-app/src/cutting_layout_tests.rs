@@ -19,19 +19,11 @@ fn settings(length: f64, width: f64, kerf: f64) -> Settings {
 }
 
 #[test]
-fn saw_kerf_changes_required_board_and_sheet_counts() {
+fn saw_kerf_changes_required_stock_counts() {
     let cuts = [piece(0, 5000, 1000, 2)];
-    assert_eq!(boards(&cuts, settings(1000., 100., 0.)).stock.len(), 1);
-    assert_eq!(boards(&cuts, settings(1000., 100., 3.)).stock.len(), 2);
     assert_eq!(sheets(&cuts, settings(1000., 100., 0.)).stock.len(), 1);
     assert_eq!(sheets(&cuts, settings(1000., 100., 3.)).stock.len(), 2);
     // Exact edge fits never require an extra kerf outside the stock.
-    assert_eq!(
-        boards(&[piece(0, 10000, 1000, 1)], settings(1000., 100., 3.))
-            .stock
-            .len(),
-        1
-    );
     assert_eq!(
         sheets(&[piece(0, 10000, 1000, 1)], settings(1000., 100., 3.))
             .stock
@@ -64,7 +56,6 @@ fn rotation_is_opt_in_and_oversized_pieces_never_enlarge_stock() {
     }
     let huge = [piece(0, 200_000_000_000_000, 200_000_000_000_000, 2)];
     assert_eq!(sheets(&huge, options).oversized, huge);
-    assert_eq!(boards(&huge, options).oversized, huge);
 }
 
 #[test]
@@ -120,13 +111,13 @@ fn sheet_layouts_conserve_quantities_keep_pieces_in_bounds_and_reserve_kerf() {
 }
 
 #[test]
-fn board_layouts_keep_codes_quantities_and_kerf_for_mixed_lengths() {
+fn narrow_stock_layouts_keep_codes_quantities_and_kerf_for_mixed_lengths() {
     let cuts = [
         piece(5, 6000, 890, 7),
         piece(2, 21000, 890, 2),
         piece(8, 30000, 890, 3),
     ];
-    let layout = boards(&cuts, Settings::default());
+    let layout = sheets(&cuts, settings(2440., 89., 3.));
     assert_eq!(layout.oversized, [cuts[2]]);
     let mut counts = BTreeMap::new();
     for stock in &layout.stock {

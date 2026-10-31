@@ -36,6 +36,7 @@ pub(super) struct Preferences {
     active: u64,
     next_id: u64,
     cameras: BTreeMap<u64, sidebar::CameraPreferences>,
+    names: BTreeMap<u64, String>,
 }
 
 impl Default for Preferences {
@@ -45,6 +46,7 @@ impl Default for Preferences {
             active: 0,
             next_id: 1,
             cameras: BTreeMap::new(),
+            names: BTreeMap::new(),
         }
     }
 }
@@ -54,7 +56,10 @@ pub(super) struct Workspace {
     active: u64,
     next_id: u64,
     cameras: BTreeMap<u64, Camera>,
+    scene_caches: BTreeMap<u64, renderer::SceneCache>,
+    names: BTreeMap<u64, String>,
     dragging: Option<u64>,
+    pub(super) renaming: Option<(u64, String)>,
 }
 
 impl Default for Workspace {
@@ -64,7 +69,10 @@ impl Default for Workspace {
             active: 0,
             next_id: 1,
             cameras: BTreeMap::new(),
+            scene_caches: BTreeMap::new(),
+            names: BTreeMap::new(),
             dragging: None,
+            renaming: None,
         }
     }
 }
@@ -76,12 +84,6 @@ enum DropSide {
     Right,
     Top,
     Bottom,
-}
-
-#[derive(Clone, Copy)]
-enum CameraAction {
-    Fit,
-    CenterOrigin,
 }
 
 struct PaneRect {
@@ -258,6 +260,16 @@ impl Layout {
 }
 
 impl Workspace {
+    fn name(&self, id: u64) -> String {
+        self.names.get(&id).cloned().unwrap_or_else(|| {
+            if id == 0 {
+                "Current".to_owned()
+            } else {
+                format!("View {id}")
+            }
+        })
+    }
+
     pub(super) fn capture(&self, camera: &Camera) -> Preferences {
         let mut cameras: BTreeMap<_, _> = self
             .cameras
@@ -270,6 +282,7 @@ impl Workspace {
             active: self.active,
             next_id: self.next_id,
             cameras,
+            names: self.names.clone(),
         }
     }
 
@@ -297,6 +310,12 @@ impl Workspace {
                     .unwrap_or(0)
                     .saturating_add(1),
             ),
+            names: preferences
+                .names
+                .iter()
+                .filter(|(id, name)| ids.contains(*id) && !name.trim().is_empty())
+                .map(|(id, name)| (*id, name.clone()))
+                .collect(),
             cameras: ids
                 .into_iter()
                 .map(|id| {
@@ -311,7 +330,9 @@ impl Workspace {
                     (id, view)
                 })
                 .collect(),
+            scene_caches: BTreeMap::new(),
             dragging: None,
+            renaming: None,
         };
         workspace.layout.select(workspace.active);
         *camera = workspace.cameras[&workspace.active].clone();
@@ -461,6 +482,7 @@ impl KetchupApp {
             self.activate_viewport(remaining[0]);
         }
         self.viewports.cameras.remove(&tab);
+        self.viewports.names.remove(&tab);
         ctx.request_repaint();
     }
 
@@ -480,7 +502,7 @@ impl KetchupApp {
             ui.horizontal_centered(|ui| {
                 for tab in &tabs {
                     ui.push_id(("viewport-tab", *tab), |ui| {
-                        let label = if *tab == 0 { "Current".to_owned() } else { format!("View {tab}") };
+                        let label = self.viewports.name(*tab);
                         let response = ui.add(egui::Button::new(label)
                             .selected(*tab == self.viewports.active)
                             .sense(Sense::click_and_drag()));
@@ -488,12 +510,17 @@ impl KetchupApp {
                         if response.drag_started() { self.viewports.dragging = Some(*tab); }
                         response.context_menu(|ui| {
                             Self::menu_style(ui.style_mut());
+                            if ui.add_enabled(self.gesture.is_none(), egui::Button::new("Rename…")).clicked() {
+                                self.viewports.renaming = Some((*tab, self.viewports.name(*tab)));
+                                Self::request_name_input_focus(ui.ctx(), egui::Id::unique("rename_viewport_name"));
+                                ui.close();
+                            }
                             if ui.add_enabled(tabs.len() > 1 && self.gesture.is_none(), egui::Button::new("Close")).clicked() {
                                 close = Some(*tab);
                                 ui.close();
                             }
                         });
-                        response.on_hover_text("Drag to a viewport edge to split, or its center to join tabs. Right-click to close.");
+                        response.on_hover_text("Drag to a viewport edge to split, or its center to join tabs. Right-click to rename or close.");
                     });
                 }
                 add = ui.button("+").on_hover_text("Create viewport").clicked();
@@ -518,6 +545,41 @@ impl KetchupApp {
         }
     }
 
+    pub(super) fn rename_viewport_window(&mut self, ctx: &egui::Context) {
+        let Some((id, mut name)) = self.viewports.renaming.take() else {
+            return;
+        };
+        if self.viewports.layout.pane_for_tab(id).is_none() {
+            return;
+        }
+        let mut save = false;
+        let mut cancel = false;
+        let response = Modal::new("rename_viewport", 360.).show(ctx, |modal| {
+            modal.header(|ui| {
+                ui.heading("Rename view");
+            });
+            modal.body(|ui| {
+                ui.label("Name");
+                let input =
+                    Self::name_input(ui, &mut name, egui::Id::unique("rename_viewport_name"));
+                if name.len() > 1024 {
+                    name.truncate(name.floor_char_boundary(1024));
+                }
+                save = input.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            });
+            modal.footer(|ui| {
+                cancel = ui.button("Cancel").clicked();
+                let valid = !name.trim().is_empty();
+                save = (primary_button(ui, "Save", valid).clicked() || save) && valid;
+            });
+        });
+        if save {
+            self.viewports.names.insert(id, name.trim().to_owned());
+        } else if !cancel && !response.should_close() {
+            self.viewports.renaming = Some((id, name));
+        }
+    }
+
     pub(super) fn viewport_workspace(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if !ui.is_enabled() {
@@ -532,7 +594,6 @@ impl KetchupApp {
             .rectangles(ui, ui.available_rect_before_wrap(), &mut panes);
         let mut activate = None;
         let mut views = Vec::new();
-        let mut camera_action = None;
         // Build every pane first, route input exactly once, then paint every
         // camera from the updated shared model in this same frame.
         for pane in &panes {
@@ -540,58 +601,18 @@ impl KetchupApp {
                 continue;
             }
             let rect = pane.rect;
-            egui::Area::new(ui.scope_id().with(("viewport-camera-controls", pane.selected)))
-                .pivot(Align2::RIGHT_TOP)
-                .default_size(egui::vec2(72. + ui.spacing().item_spacing.x, 40.))
-                .fixed_pos(rect.right_top() + egui::vec2(-8., 8.))
-                .constrain_to(rect)
-                .enabled(
-                    ui.is_enabled() && self.gesture.is_none() && self.viewports.dragging.is_none(),
-                )
-                .show(&ctx, |ui| {
-                    ui.set_clip_rect(rect.intersect(ui.clip_rect()));
-                    let colors = Palette::for_ui(ui);
-                    egui::Frame::new()
-                        .inner_margin(4)
-                        .show(ui, |ui| {
-                            ui.set_width(64. + ui.spacing().item_spacing.x);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if Self::icon_button(
-                                        ui,
-                                        "fit",
-                                        "Fit model to view",
-                                        true,
-                                        colors.muted,
-                                    ) {
-                                        camera_action = Some((pane.selected, CameraAction::Fit));
-                                    }
-                                    if Self::icon_button(
-                                        ui,
-                                        "origin",
-                                        "Center view on axis origin (0, 0, 0)",
-                                        true,
-                                        colors.muted,
-                                    ) {
-                                        camera_action =
-                                            Some((pane.selected, CameraAction::CenterOrigin));
-                                    }
-                                },
-                            );
-                        });
-                });
             let response = ui.interact(
                 rect,
                 ui.scope_id().with(("viewport-canvas", pane.id)),
                 Sense::click_and_drag(),
             );
-            // Hover activates a camera for wheel and modifier-orbit as well as
-            // clicks. A captured drag stays with its original camera.
+            // Activate on press so the first click/drag uses this camera.
+            // Hover and wheel input leave the active camera unchanged.
             if self.gesture.is_none()
                 && self.viewports.dragging.is_none()
                 && response.enabled()
                 && response.contains_pointer()
+                && ctx.input(|input| input.pointer.any_pressed())
                 && ctx
                     .input(|input| input.pointer.hover_pos())
                     .is_some_and(|pos| rect.contains(pos))
@@ -601,9 +622,6 @@ impl KetchupApp {
             views.push((pane.selected, rect, response));
         }
         if self.gesture.is_none() {
-            if let Some((id, _)) = camera_action {
-                activate = Some(id);
-            }
             if let Some(id) = activate {
                 if self.viewports.active != id {
                     ctx.request_repaint();
@@ -616,16 +634,6 @@ impl KetchupApp {
                 views.iter().find(|(id, _, _)| *id == self.viewports.active)
             {
                 self.viewport = *rect;
-                // Framing uses the owning camera and its canvas dimensions,
-                // even when a different viewport was previously active.
-                if let Some((id, action)) = camera_action
-                    && id == self.viewports.active
-                {
-                    match action {
-                        CameraAction::Fit => self.fit(&ctx),
-                        CameraAction::CenterOrigin => self.fit_origin(&ctx),
-                    }
-                }
                 self.viewport_input(&ctx, response);
                 if !ctx
                     .input(|i| i.pointer.hover_pos())
@@ -638,8 +646,16 @@ impl KetchupApp {
                     .insert(self.viewports.active, self.doc.camera.clone());
             }
         }
+        let mut tabs = Vec::new();
+        self.viewports.layout.tabs(&mut tabs);
+        let show_names = tabs.len() > 1;
         let active_camera = self.doc.camera.clone();
         let active_rect = self.viewport;
+        // Occlusion and GPU meshes depend on the camera. Sharing them across
+        // panes would invalidate them on every pane, even in a static frame.
+        self.viewports
+            .scene_caches
+            .retain(|id, _| views.iter().any(|(visible, _, _)| visible == id));
         for (id, rect, response) in &views {
             if rect.width() <= 1. || rect.height() <= 1. {
                 continue;
@@ -658,7 +674,11 @@ impl KetchupApp {
                 None
             };
             if self.gpu_ready {
+                let mut cache = self.viewports.scene_caches.remove(id).unwrap_or_default();
+                std::mem::swap(&mut cache, &mut self.scene_cache);
                 self.paint_scene(ui, *rect);
+                std::mem::swap(&mut cache, &mut self.scene_cache);
+                self.viewports.scene_caches.insert(*id, cache);
             } else {
                 ui.painter().with_clip_rect(*rect).text(
                     rect.center(),
@@ -669,6 +689,25 @@ impl KetchupApp {
                 );
             }
             self.paint_compass(ui, response);
+            if show_names {
+                // Paint a passive label so clicks still reach the viewport.
+                let colors = Palette::for_ui(ui);
+                let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+                let mut job = egui::text::LayoutJob::simple(
+                    self.viewports.name(*id),
+                    FontId::proportional(13.),
+                    colors.ink,
+                    (rect.width() - 28.).max(1.),
+                );
+                job.wrap.max_rows = 1;
+                let galley = painter.layout_job(job);
+                let badge = Rect::from_min_size(
+                    rect.left_top() + egui::vec2(8., 8.),
+                    galley.size() + egui::vec2(12., 8.),
+                );
+                painter.rect_filled(badge, 4, colors.paper.gamma_multiply(0.94));
+                painter.galley(badge.min + egui::vec2(6., 4.), galley, colors.ink);
+            }
             if *id == self.viewports.active {
                 self.paint_tool_cursor(&ctx, response);
                 ui.painter().rect_stroke(

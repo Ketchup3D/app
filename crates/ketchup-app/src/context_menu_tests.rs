@@ -276,3 +276,58 @@ fn outliner_context_menu_lock_disables_rename_and_delete_until_unlocked() {
     h.click(text_position(&menu, "Unlock"));
     assert!(!h.app.doc.model.is_locked(id));
 }
+
+#[test]
+fn creation_and_rename_fields_focus_and_select_the_name_on_every_open() {
+    for component in [false, true] {
+        let mut h = Harness::new();
+        h.app
+            .doc
+            .model
+            .add_edge(DVec3::ZERO, DVec3::X * 2.)
+            .unwrap();
+        let point = h.at(DVec3::X);
+        for _ in 0..2 {
+            let menu = open_context_menu(&mut h, point);
+            let action = if component {
+                "Create Component…"
+            } else {
+                "Make Group…"
+            };
+            h.click(text_position(&menu, action));
+            h.frame(vec![], egui::Modifiers::NONE);
+            let input_id = egui::Id::unique("create_object_name");
+            assert_eq!(h.ctx.memory(|memory| memory.focused()), Some(input_id));
+            h.frame(
+                vec![egui::Event::Text("Assembly".into())],
+                egui::Modifiers::NONE,
+            );
+            assert_eq!(h.app.object_creation.as_ref().unwrap().name, "Assembly");
+            let dialog = h.frame(vec![], egui::Modifiers::NONE);
+            h.click(text_position(&dialog, "Cancel"));
+            assert!(h.app.object_creation.is_none());
+        }
+
+        let id = object(&mut h, "Beam", component, DVec3::Y * 2.);
+        for _ in 0..2 {
+            let row = outliner_row(&mut h, "Beam");
+            let menu = open_context_menu(&mut h, row);
+            h.click(text_position(&menu, "Rename…"));
+            h.frame(vec![], egui::Modifiers::NONE);
+            let input_id = egui::Id::unique("rename_object_name");
+            assert_eq!(h.ctx.memory(|memory| memory.focused()), Some(input_id));
+            h.frame(
+                vec![egui::Event::Text("Joist".into())],
+                egui::Modifiers::NONE,
+            );
+            assert_eq!(h.app.object_rename, Some((id, "Joist".into())));
+            // Autofocus is a one-time request, so Tab can still leave the field.
+            h.key(Key::Tab);
+            h.frame(vec![], egui::Modifiers::NONE);
+            assert_ne!(h.ctx.memory(|memory| memory.focused()), Some(input_id));
+            let dialog = h.frame(vec![], egui::Modifiers::NONE);
+            h.click(text_position(&dialog, "Cancel"));
+            assert!(h.app.object_rename.is_none());
+        }
+    }
+}

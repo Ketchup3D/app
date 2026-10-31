@@ -538,29 +538,131 @@ pub fn face_icon(p: &egui::Painter, c: Pos2, fill: Color32, outline: Color32) {
     ));
 }
 
+// Disclosure persistence keys vary by location; the shared editor keeps the
+// same icon and palette in Settings and Materials.
+pub(super) fn section_icon(id: &str) -> &str {
+    match id {
+        "settings/treatment/sanding" | "entity/treatment/sanding" => "time_estimates_sanding",
+        "settings/treatment/finishing" | "entity/treatment/finishing" => "time_estimates_finishing",
+        "settings/treatment/pre_stain" | "entity/treatment/pre_stain" => "time_estimates_pre_stain",
+        "settings/treatment/stain" | "entity/treatment/stain" => "time_estimates_stain",
+        "settings/treatment/varnish" | "entity/treatment/varnish" => "time_estimates_varnish",
+        _ => id,
+    }
+}
+
 pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
+    let kind = section_icon(kind);
     let s = Stroke::new(1.5, color);
     match kind {
+        "settings" => {
+            let points = (0..32)
+                .map(|index| {
+                    let angle = index as f32 * std::f32::consts::TAU / 32.;
+                    let radius = if matches!(index % 4, 1 | 2) { 9. } else { 6.5 };
+                    c + egui::vec2(angle.cos(), angle.sin()) * radius
+                })
+                .collect();
+            p.add(egui::Shape::closed_line(points, s));
+            p.circle_stroke(c, 3., s);
+        }
+        "settings_stock"
+        | "settings/stock/wood"
+        | "materials"
+        | "material_none"
+        | "material_partial"
+        | "material_full" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            for y in [-4., 3.] {
+                let rect = Rect::from_center_size(at(0., y), egui::vec2(18., 5.));
+                let filled = kind == "material_full" || kind == "material_partial" && y < 0.;
+                if filled {
+                    p.rect_filled(rect, 1, color);
+                }
+                p.rect_stroke(rect, 1, s, egui::StrokeKind::Inside);
+                let grain = if filled {
+                    Stroke::new(1., crate::theme::Palette::for_painter(p).paper)
+                } else {
+                    s
+                };
+                p.line_segment([at(-5., y), at(4., y)], grain);
+            }
+        }
+        "settings_colors" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.line_segment([at(-6., 6.), at(7., 6.)], s);
+            p.line_segment([at(-6., 6.), at(-6., -7.)], s);
+            p.line_segment([at(-6., 6.), at(4., -4.)], s);
+            for point in [at(7., 6.), at(-6., -7.), at(4., -4.)] {
+                p.circle_filled(point, 2.2, color);
+            }
+        }
+        "settings_navigation" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.circle_stroke(c, 3., s);
+            for (x, y) in [(0., -1.), (1., 0.), (0., 1.), (-1., 0.)] {
+                let tip = at(x * 8., y * 8.);
+                p.line_segment([at(x * 4., y * 4.), tip], s);
+                p.add(egui::Shape::line(
+                    vec![
+                        tip + egui::vec2(-x * 3. - y * 2.5, -y * 3. + x * 2.5),
+                        tip,
+                        tip + egui::vec2(-x * 3. + y * 2.5, -y * 3. - x * 2.5),
+                    ],
+                    s,
+                ));
+            }
+        }
+        "settings_shortcuts" => {
+            p.rect_stroke(
+                Rect::from_center_size(c, egui::vec2(19., 14.)),
+                2,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            for y in [-3., 1.] {
+                for x in [-5., 0., 5.] {
+                    p.line_segment([c + egui::vec2(x - 1., y), c + egui::vec2(x + 1., y)], s);
+                }
+            }
+            p.line_segment([c + egui::vec2(-4., 4.), c + egui::vec2(4., 4.)], s);
+        }
+        "settings_grid" => {
+            for offset in [-7., 0., 7.] {
+                p.line_segment([c + egui::vec2(offset, -7.), c + egui::vec2(offset, 7.)], s);
+                p.line_segment([c + egui::vec2(-7., offset), c + egui::vec2(7., offset)], s);
+            }
+        }
         "search" => {
             p.circle_stroke(c + egui::vec2(-2., -2.), 5., s);
             p.line_segment([c + egui::vec2(2., 2.), c + egui::vec2(7., 7.)], s);
         }
         "magnet" => {
             let at = |x: f32, y: f32| c + egui::vec2(x, y);
-            let mut points = vec![at(-7., -7.)];
+            let mut points = vec![at(-7., -3.)];
             points.extend((0..=16).map(|i| {
                 let angle = std::f32::consts::PI * (1. - i as f32 / 16.);
                 at(7. * angle.cos(), 7. * angle.sin())
             }));
-            points.extend([at(7., -7.), at(3., -7.)]);
+            points.extend([at(7., -3.), at(3., -3.)]);
             points.extend((0..=16).map(|i| {
                 let angle = std::f32::consts::PI * i as f32 / 16.;
                 at(3. * angle.cos(), 3. * angle.sin())
             }));
-            points.push(at(-3., -7.));
+            points.push(at(-3., -3.));
             p.add(egui::Shape::closed_line(points, s));
+            let tip_stroke = Stroke::new(1.5, Color32::from_rgb(217, 72, 54));
             for sign in [-1., 1.] {
-                p.line_segment([at(sign * 3., -3.), at(sign * 7., -3.)], s);
+                p.add(egui::Shape::convex_polygon(
+                    vec![
+                        at(sign * 3., -3.),
+                        at(sign * 3., -7.),
+                        at(sign * 7., -7.),
+                        at(sign * 7., -3.),
+                    ],
+                    tip_stroke.color,
+                    tip_stroke,
+                ));
             }
         }
         "eye_closed" => {
@@ -617,6 +719,95 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
                     egui::StrokeKind::Inside,
                 );
             }
+        }
+        "time_estimates_sanding" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.add(egui::Shape::closed_line(
+                vec![at(-7., -2.), at(3., -6.), at(8., -2.), at(-2., 3.)],
+                s,
+            ));
+            p.add(egui::Shape::line(
+                vec![
+                    at(-7., -2.),
+                    at(-7., 3.),
+                    at(-2., 7.),
+                    at(8., 2.),
+                    at(8., -2.),
+                ],
+                s,
+            ));
+            p.line_segment([at(-2., 3.), at(-2., 7.)], s);
+            for x in [-3., 0., 3.] {
+                p.circle_filled(at(x, -1.), 0.65, color);
+            }
+        }
+        "time_estimates_finishing" | "settings/stock/finishes" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.rect_stroke(
+                Rect::from_min_max(at(-2., -8.), at(2., 0.)),
+                1,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            p.rect_stroke(
+                Rect::from_min_max(at(-6., -1.), at(6., 8.)),
+                1,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            p.line_segment([at(-6., 2.), at(6., 2.)], s);
+            for x in [-3., 0., 3.] {
+                p.line_segment([at(x, 5.), at(x, 7.)], s);
+            }
+        }
+        "time_estimates_pre_stain" | "time_estimates_stain" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.add(egui::Shape::closed_line(
+                vec![
+                    at(0., -8.),
+                    at(4.5, -1.),
+                    at(5., 2.),
+                    at(3., 5.),
+                    at(0., 6.),
+                    at(-3., 5.),
+                    at(-5., 2.),
+                    at(-4.5, -1.),
+                ],
+                s,
+            ));
+            if kind == "time_estimates_stain" {
+                p.circle_filled(at(0., 2.), 1.7, color);
+            } else {
+                p.line_segment([at(-2., 2.), at(2., 2.)], s);
+            }
+            p.line_segment([at(-7., 8.), at(7., 8.)], s);
+        }
+        "time_estimates_varnish" => {
+            let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            p.add(egui::Shape::closed_line(
+                vec![
+                    at(0., -8.),
+                    at(7., -5.),
+                    at(6., 2.),
+                    at(3., 6.),
+                    at(0., 8.),
+                    at(-3., 6.),
+                    at(-6., 2.),
+                    at(-7., -5.),
+                ],
+                s,
+            ));
+            p.add(egui::Shape::line(
+                vec![at(-3., 0.), at(-0.5, 2.5), at(3.5, -2.5)],
+                s,
+            ));
+        }
+        "time_cost_estimates" => {
+            p.circle_stroke(c, 7., s);
+            p.add(egui::Shape::line(
+                vec![c + egui::vec2(0., -4.), c, c + egui::vec2(3.5, 2.)],
+                s,
+            ));
         }
         "entity_info" => {
             p.circle_stroke(c, 7., s);

@@ -32,7 +32,6 @@ pub(super) struct Project {
     pub error: Option<String>,
     pub cutting_plan_selection: Option<bool>,
     pub cutting_plan_selection_preference: Option<bool>,
-    pub cutting_plan_group_stock: bool,
     pub cutting_plan_layout: crate::cutting_layout::Settings,
 }
 impl Default for Project {
@@ -48,7 +47,6 @@ impl Default for Project {
             error: None,
             cutting_plan_selection: None,
             cutting_plan_selection_preference: None,
-            cutting_plan_group_stock: true,
             cutting_plan_layout: crate::cutting_layout::Settings::default(),
         }
     }
@@ -70,6 +68,7 @@ impl KetchupApp {
         path: Option<PathBuf>,
         ctx: &egui::Context,
     ) {
+        self.sync_stock_materials(ctx);
         if let Some(path) = &path {
             project_files::set_document_name(&mut doc, path);
         }
@@ -80,7 +79,7 @@ impl KetchupApp {
         self.viewports
             .reframe_project(&self.doc.camera, &self.doc.viewport_cameras);
         self.history = History::default();
-        self.selected.clear();
+        self.selected = Self::restore_document_selection(&mut self.doc);
         self.outliner_anchor = None;
         self.hover = None;
         self.context_position = None;
@@ -96,6 +95,7 @@ impl KetchupApp {
         self.paste_face_cache = renderer::FaceCache::default();
         self.changed(ctx);
         self.project.path = path;
+        self.sync_stock_materials(ctx);
         self.project.modified = false;
         self.project.confirm = None;
         self.project.after_save = None;
@@ -187,7 +187,6 @@ impl KetchupApp {
             self.doc.name.clone(),
             self.doc.model.clone(),
             selected,
-            self.project.cutting_plan_group_stock,
             self.project.cutting_plan_layout,
         ));
     }
@@ -196,7 +195,9 @@ impl KetchupApp {
         if self.project.blocked() {
             return;
         }
+        self.sync_stock_materials(ctx);
         self.sync_viewport_cameras();
+        self.sync_selection();
         let contents = match serde_json::to_string(&self.doc) {
             Ok(contents) => contents,
             Err(error) => {
@@ -302,33 +303,15 @@ impl KetchupApp {
                     });
                     ui.radio_value(&mut selection, false, "Whole project (visible only)");
                     ui.add_space(10.);
-                    ui.checkbox(&mut self.project.cutting_plan_group_stock, "Auto-detect and group by buyable stock");
-                    if self.project.cutting_plan_group_stock {
-                        let settings = &mut self.project.cutting_plan_layout;
-                        egui::Grid::new("woodworking_stock_dimensions").num_columns(2).show(ui, |ui| {
-                            for (label, value) in [
-                                ("Sheet width", &mut settings.sheet_width_mm),
-                                ("Sheet length", &mut settings.sheet_length_mm),
-                                ("Board length", &mut settings.board_length_mm),
-                            ] {
-                                ui.label(label);
-                                ui.add(egui::DragValue::new(value).speed(1.).range(1. ..=1_000_000.).suffix(" mm"));
-                                ui.end_row();
-                            }
-                            ui.label("Saw kerf (cut width)");
-                            ui.add(egui::DragValue::new(&mut settings.kerf_mm).speed(0.1).range(0. ..=100.).suffix(" mm"));
-                            ui.end_row();
-                        });
-                        ui.checkbox(&mut settings.allow_rotation, "Allow rotating plywood pieces 90 degrees")
-                            .on_hover_text("Leave off when the length must follow the sheet grain.");
-                        ui.weak("Layouts use these stock sizes and saw kerf. Colors and mark codes identify each cut. Confirm material and grain; this is a practical layout, not a guaranteed minimum.");
-                    }
-                    ui.add_space(10.);
-                    ui.label("Each separate group/component or connected body is a part. Selecting an edge or face includes its connected body.");
-                    ui.label("Sizes are in mm, with nominal lumber hints where recognized. Check grain, joinery and irregular shapes against the model.");
-                    if !self.project.cutting_plan_group_stock {
-                        ui.weak("Enable stock grouping to include kerf-aware cutting layouts.");
-                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Saw kerf (cut width)");
+                        ui.add(egui::DragValue::new(&mut self.project.cutting_plan_layout.kerf_mm)
+                            .speed(0.1).range(0. ..=100.).suffix(" mm"));
+                    });
+                    ui.checkbox(&mut self.project.cutting_plan_layout.allow_rotation, "Allow rotating pieces 90 degrees")
+                        .on_hover_text("Leave off when the length must follow the stock grain.");
+                    ui.weak("Only visible parts with assigned stock materials are included. Assign materials in Entity Info using the stock pricing table. Nested parts inherit their assembly’s material unless assigned separately.");
+                    ui.weak("Layouts use assigned stock dimensions and saw kerf. Confirm grain, joinery and irregular shapes against the model; this is a practical layout, not a guaranteed minimum.");
                 });
                 modal.footer(|ui| {
                     if ui.button("Cancel").clicked() { Some(false) }
