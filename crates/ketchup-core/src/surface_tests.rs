@@ -515,3 +515,99 @@ fn adjacent_coplanar_faces_and_box_faces_remain_distinct() {
     assert_eq!(cube.faces.len(), 6);
     cube.validate().unwrap();
 }
+
+#[test]
+fn edge_and_face_targets_toggle_independently_and_preserve_point_targets() {
+    use crate::inference::{SnapTargets, infer_with_targets};
+    let camera = Camera::default();
+    let size = DVec2::new(1000., 700.);
+    let mut edge_model = Model::default();
+    edge_model
+        .add_edge(DVec3::new(0., 0., 2.), DVec3::new(6., 0., 2.))
+        .unwrap();
+    let mut face_model = Model::default();
+    outline(
+        &mut face_model,
+        &[
+            DVec3::new(-3., -3., 3.),
+            DVec3::new(3., -3., 3.),
+            DVec3::new(3., 3., 3.),
+            DVec3::new(-3., 3., 3.),
+        ],
+    );
+    for edges in [false, true] {
+        for faces in [false, true] {
+            let targets = SnapTargets { edges, faces };
+            let infer = |model: &Model, point, start, lock, geometry| {
+                infer_with_targets(
+                    model,
+                    &camera,
+                    size,
+                    camera.project(point, size).unwrap(),
+                    start,
+                    lock,
+                    geometry,
+                    false,
+                    None,
+                    targets,
+                )
+                .unwrap()
+            };
+            let edge = infer(&edge_model, DVec3::new(1.5, 0., 2.), None, None, true);
+            assert_eq!(
+                edge.kind,
+                if edges {
+                    Inference::OnEdge
+                } else {
+                    Inference::Plane
+                }
+            );
+            for (point, kind) in [
+                (DVec3::new(0., 0., 2.), Inference::Endpoint),
+                (DVec3::new(3., 0., 2.), Inference::Midpoint),
+            ] {
+                assert_eq!(infer(&edge_model, point, None, None, true).kind, kind);
+            }
+            let target = DVec3::new(0.5, 0.5, 3.);
+            for lock in [None, Some(Axis::Z)] {
+                let start = lock.map(|_| DVec3::new(0.5, 0.5, 0.));
+                let face = infer(&face_model, target, start, lock, true);
+                assert_eq!(
+                    face.kind,
+                    if faces {
+                        Inference::OnFace
+                    } else if lock.is_some() {
+                        Inference::Axis(Axis::Z)
+                    } else {
+                        Inference::Plane
+                    }
+                );
+            }
+            assert_eq!(
+                infer(&face_model, target, None, None, false).kind,
+                Inference::Plane
+            );
+            let mut cache = crate::inference::MoveSnapCache::new(&face_model);
+            let moved = cache
+                .infer_with_targets(
+                    &camera,
+                    size,
+                    camera.project(target, size).unwrap(),
+                    DVec3::new(0.5, 0.5, 0.),
+                    Some(Axis::Z),
+                    true,
+                    false,
+                    targets,
+                )
+                .unwrap();
+            assert_eq!(
+                moved.snap.kind,
+                if faces {
+                    Inference::OnFace
+                } else {
+                    Inference::Axis(Axis::Z)
+                }
+            );
+        }
+    }
+}

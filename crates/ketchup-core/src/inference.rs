@@ -58,6 +58,22 @@ pub struct Snap {
     pub kind: Inference,
 }
 
+/// Optional surface targets; endpoints and midpoints remain object targets.
+#[derive(Clone, Copy, Debug)]
+pub struct SnapTargets {
+    pub edges: bool,
+    pub faces: bool,
+}
+
+impl Default for SnapTargets {
+    fn default() -> Self {
+        Self {
+            edges: true,
+            faces: true,
+        }
+    }
+}
+
 /// Cached face queries for snapping. Scoped queries include descendants of the
 /// current editing level; unscoped queries include every visible surface.
 pub trait FaceQuery {
@@ -104,6 +120,7 @@ pub fn infer_move_with_snapping(
         snap_to_axes,
         None,
         None,
+        SnapTargets::default(),
     )
 }
 
@@ -177,6 +194,29 @@ impl MoveSnapCache {
         snap_to_geometry: bool,
         snap_to_axes: bool,
     ) -> Option<MoveInference> {
+        self.infer_with_targets(
+            camera,
+            size,
+            cursor,
+            start,
+            lock,
+            snap_to_geometry,
+            snap_to_axes,
+            SnapTargets::default(),
+        )
+    }
+
+    pub fn infer_with_targets(
+        &mut self,
+        camera: &Camera,
+        size: DVec2,
+        cursor: DVec2,
+        start: DVec3,
+        lock: Option<Axis>,
+        snap_to_geometry: bool,
+        snap_to_axes: bool,
+        targets: SnapTargets,
+    ) -> Option<MoveInference> {
         if self
             .guides
             .as_ref()
@@ -207,6 +247,7 @@ impl MoveSnapCache {
             snap_to_axes,
             Some(&self.guides.as_ref().unwrap().references),
             Some(&self.faces),
+            targets,
         )
     }
 }
@@ -269,8 +310,9 @@ fn infer_move(
     snap_to_axes: bool,
     prepared: Option<&[MoveReference]>,
     faces: Option<&dyn FaceQuery>,
+    targets: SnapTargets,
 ) -> Option<MoveInference> {
-    let base = infer_with_face_query(
+    let base = infer_with_targets(
         model,
         camera,
         size,
@@ -280,6 +322,7 @@ fn infer_move(
         snap_to_geometry,
         snap_to_axes,
         faces,
+        targets,
     )?;
     if !snap_to_axes {
         return Some(MoveInference {
@@ -534,6 +577,33 @@ pub fn infer_with_face_query(
     snap_to_axes: bool,
     faces: Option<&dyn FaceQuery>,
 ) -> Option<Snap> {
+    infer_with_targets(
+        model,
+        camera,
+        size,
+        cursor,
+        start,
+        lock,
+        snap_to_geometry,
+        snap_to_axes,
+        faces,
+        SnapTargets::default(),
+    )
+}
+
+/// Infer a target while independently enabling edge and face surfaces.
+pub fn infer_with_targets(
+    model: &Model,
+    camera: &Camera,
+    size: DVec2,
+    cursor: DVec2,
+    start: Option<DVec3>,
+    lock: Option<Axis>,
+    snap_to_geometry: bool,
+    snap_to_axes: bool,
+    faces: Option<&dyn FaceQuery>,
+    targets: SnapTargets,
+) -> Option<Snap> {
     let is_hidden = |id| match faces {
         Some(query) => query.is_hidden(model, id),
         None => model.is_hidden(id),
@@ -616,7 +686,7 @@ pub fn infer_with_face_query(
         let on_edge = model
             .edges
             .values()
-            .filter(|edge| !is_hidden(edge.id))
+            .filter(|edge| targets.edges && !is_hidden(edge.id))
             .filter_map(|edge| {
                 let (a, b) = model.points(edge);
                 let joint = constraint.and_then(|(start, axis)| {
@@ -675,7 +745,7 @@ pub fn infer_with_face_query(
             let on_face = model
                 .faces
                 .values()
-                .filter(|face| !is_hidden(face.id))
+                .filter(|face| targets.faces && !is_hidden(face.id))
                 .filter_map(|face| {
                     let plane = crate::faces::plane(model, &face.vertices)?;
                     let denominator = plane.normal.dot(axis.vector());
@@ -711,7 +781,7 @@ pub fn infer_with_face_query(
                 return Some(snap);
             }
         }
-        if locked.is_none() {
+        if targets.faces && locked.is_none() {
             let nearest = match faces {
                 Some(faces) => faces.nearest(ray, false),
                 None => model.nearest_face(ray),
