@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use super::shortcut_input::{shortcut_input, valid_tool_key};
 use super::*;
 use crate::inspector_table::{Column, InspectorTable};
@@ -215,8 +216,8 @@ impl KetchupApp {
             .dismissible(self.material_removal.is_none())
             .show(ctx, |modal| {
                 modal.header(|ui| {
-                    ui.heading("Settings");
-                    ui.weak("Changes are saved automatically on this device.");
+                    ui.text_heading("Settings");
+                    ui.text_weak("Changes are saved automatically on this device.");
                 });
                 modal.body_unpadded(650., |ui| {
                     let size = ui.available_size();
@@ -241,7 +242,7 @@ impl KetchupApp {
                                             if index > 0 {
                                                 ui.add_space(12.);
                                             }
-                                            ui.label(
+                                            ui.text_label(
                                                 RichText::new(*title)
                                                     .small()
                                                     .strong()
@@ -297,7 +298,7 @@ impl KetchupApp {
                                                 self.general_settings.section.icon(),
                                                 Palette::for_ui(ui).ink,
                                             );
-                                            ui.heading(self.general_settings.section.label());
+                                            ui.text_heading(self.general_settings.section.label());
                                         });
                                         ui.add_space(8.);
                                         self.settings_contents(ui);
@@ -326,7 +327,7 @@ impl KetchupApp {
     fn settings_contents(&mut self, ui: &mut egui::Ui) {
         match self.general_settings.section {
             Section::SurfaceTreatment => {
-                ui.weak("Defaults for objects in all projects. Objects use these values until customized in Entity Info.");
+                ui.text_weak("Defaults for objects in all projects. Objects use these values until customized in Entity Info.");
                 time_estimates::treatment_controls(
                     ui,
                     &mut self.time_estimates,
@@ -351,7 +352,7 @@ impl KetchupApp {
                 color_row(ui, "Z axis", &mut d.axis_colors[2]);
                 color_row(ui, "Inference points", &mut d.inference_color);
                 color_row(ui, "Midpoints", &mut d.midpoint_color);
-                ui.weak("Axis inferences use the corresponding axis color.");
+                ui.text_weak("Axis inferences use the corresponding axis color.");
                 if ui.button("Restore default colors").clicked() {
                     let defaults = ketchup_core::DisplaySettings::default();
                     d.axis_colors = defaults.axis_colors;
@@ -360,7 +361,7 @@ impl KetchupApp {
                 }
             }
             Section::Navigation => {
-                ui.weak("Adjust mouse and trackpad navigation sensitivity.");
+                ui.text_weak("Adjust mouse and trackpad navigation sensitivity.");
                 for (label, value) in [
                     ("Orbit speed", &mut self.general_settings.orbit_speed),
                     ("Pan speed", &mut self.general_settings.pan_speed),
@@ -374,7 +375,7 @@ impl KetchupApp {
                 );
             }
             Section::Shortcuts => {
-                ui.weak("Click a shortcut, then press a letter or Space. Escape cancels. Reusing a key swaps the assignments. Project commands and navigation gestures keep their standard shortcuts.");
+                ui.text_weak("Click a shortcut, then press a letter or Space. Escape cancels. Reusing a key swaps the assignments. Project commands and navigation gestures keep their standard shortcuts.");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.shortcut_filter)
                         .desired_width(ui.available_width())
@@ -396,7 +397,7 @@ impl KetchupApp {
                     matches += 1;
                     table.row(ui, ("settings_tool", index), |column, ui| {
                         if column == 0 {
-                            ui.label(tool.label());
+                            ui.text_label(tool.label());
                         } else if let Some(key) = shortcut_input(
                             ui,
                             ("settings_tool_key", index),
@@ -408,14 +409,14 @@ impl KetchupApp {
                     });
                 }
                 if matches == 0 {
-                    ui.weak("No tools match your search.");
+                    ui.text_weak("No tools match your search.");
                 }
                 if ui.button("Restore default shortcuts").clicked() {
                     self.general_settings.tool_keys = GeneralSettings::default().tool_keys;
                 }
             }
             Section::Units => {
-                ui.weak("Used for new projects. Change the current project's units in the Units inspector.");
+                ui.text_weak("Used for new projects. Change the current project's units in the Units inspector.");
                 Self::unit_settings_contents(ui, &mut self.general_settings.default_units);
             }
             Section::Grid => {
@@ -429,7 +430,7 @@ impl KetchupApp {
                 ui.add_enabled_ui(!self.doc.display.grid_auto_size, |ui| {
                     let mut spacing = self.doc.display.grid_spacing / unit.factor();
                     ui.horizontal(|ui| {
-                        ui.label("Grid spacing");
+                        ui.text_label("Grid spacing");
                         if ui
                             .add(
                                 egui::DragValue::new(&mut spacing)
@@ -443,7 +444,7 @@ impl KetchupApp {
                         }
                     });
                 });
-                ui.weak("Spacing controls both grid lines and grid snapping. Every fifth line is emphasized.");
+                ui.text_weak("Spacing controls both grid lines and grid snapping. Every fifth line is emphasized.");
             }
         }
     }
@@ -452,7 +453,7 @@ impl KetchupApp {
 fn color_row(ui: &mut egui::Ui, label: &str, color: &mut [u8; 3]) {
     ui.horizontal(|ui| {
         ui.color_edit_button_srgb(color);
-        ui.label(label);
+        ui.text_label(label);
     });
 }
 

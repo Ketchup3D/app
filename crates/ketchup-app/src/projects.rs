@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use super::*;
 use crate::project_files::{self, Outcome};
 use std::{path::PathBuf, sync::mpsc::TryRecvError};
@@ -317,8 +318,8 @@ impl KetchupApp {
             let selection_before = selection;
             let response = Modal::new("woodworking_cutting_plan", 480.).show(ctx, |modal| {
                 modal.header(|ui| {
-                    ui.heading("Woodworking cutting plan");
-                    ui.weak("Create a PDF with quantities and finished cut sizes.");
+                    ui.text_heading("Woodworking cutting plan");
+                    ui.text_weak("Create a PDF with quantities and finished cut sizes.");
                 });
                 modal.body(|ui| {
                     ui.add_enabled_ui(!self.selected.is_empty(), |ui| {
@@ -327,14 +328,14 @@ impl KetchupApp {
                     ui.radio_value(&mut selection, false, "Whole project (visible only)");
                     ui.add_space(10.);
                     ui.horizontal(|ui| {
-                        ui.label("Saw kerf (cut width)");
+                        ui.text_label("Saw kerf (cut width)");
                         ui.add(egui::DragValue::new(&mut self.project.cutting_plan_layout.kerf_mm)
                             .speed(0.1).range(0. ..=100.).suffix(" mm"));
                     });
                     ui.checkbox(&mut self.project.cutting_plan_layout.allow_rotation, "Allow rotating pieces 90 degrees")
                         .on_hover_text("Leave off when the length must follow the stock grain.");
-                    ui.weak("Only visible parts with assigned stock materials are included. Assign materials in Entity Info using the stock pricing table. Nested parts inherit their assembly’s material unless assigned separately.");
-                    ui.weak("Layouts use assigned stock dimensions and saw kerf. Confirm grain, joinery and irregular shapes against the model; this is a practical layout, not a guaranteed minimum.");
+                    ui.text_weak("Only visible parts with assigned stock materials are included. Assign materials in Entity Info using the stock pricing table. Nested parts inherit their assembly’s material unless assigned separately.");
+                    ui.text_weak("Layouts use assigned stock dimensions and saw kerf. Confirm grain, joinery and irregular shapes against the model; this is a practical layout, not a guaranteed minimum.");
                 });
                 modal.footer(|ui| {
                     if ui.button("Cancel").clicked() { Some(false) }
@@ -360,12 +361,12 @@ impl KetchupApp {
                 .dismissible(false)
                 .show(ctx, |modal| {
                     modal.header(|ui| {
-                        ui.heading("Project file");
+                        ui.text_heading("Project file");
                     });
                     modal.body(|ui| {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label(match self.project.operation {
+                            ui.text_label(match self.project.operation {
                                 Operation::Open => "Opening project…",
                                 Operation::Save => "Saving project…",
                                 Operation::Import => "Importing geometry…",
@@ -376,17 +377,17 @@ impl KetchupApp {
                         });
                     });
                     modal.footer(|ui| {
-                        ui.weak("Please wait…");
+                        ui.text_weak("Please wait…");
                     });
                 });
         }
         if let Some(action) = self.project.confirm {
             let response = Modal::new("project_unsaved", 480.).show(ctx, |modal| {
                 modal.header(|ui| {
-                    ui.heading("Save project changes?");
+                    ui.text_heading("Save project changes?");
                 });
                 modal.body(|ui| {
-                    ui.label(format!(
+                    ui.text_label(format!(
                         "Save changes to “{}” as a .ketchup file before continuing?",
                         self.doc.name
                     ));
@@ -427,10 +428,10 @@ impl KetchupApp {
         if let Some(error) = &self.project.error {
             let response = Modal::new("project_file_error", 480.).show(ctx, |modal| {
                 modal.header(|ui| {
-                    ui.heading("Project file");
+                    ui.text_heading("Project file");
                 });
                 modal.body(|ui| {
-                    ui.label(error);
+                    ui.text_label(error);
                 });
                 modal.footer(|ui| primary_button(ui, "OK", true).clicked())
             });

@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use super::*;
 
 impl KetchupApp {
@@ -8,11 +9,11 @@ impl KetchupApp {
         let mut restart = false;
         let response = Modal::new("software_updates", 480.).show(ctx, |modal| {
             modal.header(|ui| {
-                ui.heading("Software updates");
-                ui.weak(format!("KetchUp {}", env!("CARGO_PKG_VERSION")));
+                ui.text_heading("Software updates");
+                ui.text_weak(format!("KetchUp {}", env!("CARGO_PKG_VERSION")));
             });
             modal.body(|ui| {
-                ui.label(self.updates.status());
+                ui.text_label(self.updates.status());
                 if self.updates.busy() {
                     ui.spinner();
                 }
@@ -23,14 +24,14 @@ impl KetchupApp {
                         self.updates.set_automatic_updates(enabled, ctx);
                     }
                 });
-                ui.label(RichText::new("Automatic checks run at most once a day. Downloaded updates install on the next launch. Turning this off stops future automatic checks and downloads.").small());
+                ui.text_label(RichText::new("Automatic checks run at most once a day. Downloaded updates install on the next launch. Turning this off stops future automatic checks and downloads.").small());
                 if let Some(error) = &self.updates.error {
                     ui.add_space(8.);
-                    ui.colored_label(ACCENT, error);
+                    ui.text_colored_label(ACCENT, error);
                 }
                 if self.updates.ready() {
                     ui.add_space(8.);
-                    ui.label("Restarting saves your model locally and restores it after updating. Finish any drawing or modeling preview first.");
+                    ui.text_label("Restarting saves your model locally and restores it after updating. Finish any drawing or modeling preview first.");
                 }
             });
             modal.footer(|ui| {

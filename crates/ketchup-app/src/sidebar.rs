@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use super::*;
 use ketchup_core::{
     AngleUnit, AreaUnit, DisplaySettings, FaceStyle, LengthUnit, Projection, VolumeUnit,
@@ -637,7 +638,7 @@ mod preference_tests {
                         None,
                         Some(viewport),
                         |ui| {
-                            ui.label("Estimate contents");
+                            ui.text_label("Estimate contents");
                         },
                     );
                     let header = panel.inner;
@@ -1183,7 +1184,7 @@ mod preference_tests {
                         Some(Rect::from_min_size(Pos2::ZERO, size + Vec2::splat(48.))),
                         |ui| {
                             body_visible = true;
-                            ui.label("Contents");
+                            ui.text_label("Contents");
                         },
                     );
                     panel = response.response.rect;
@@ -2259,7 +2260,7 @@ mod preference_tests {
                         .open(open)
                         .show(ui, |ui| {
                             visible.1 = true;
-                            ui.label("Edge");
+                            ui.text_label("Edge");
                         });
                     remember_section(ctx, header.header_response.id, key);
                 });
@@ -2775,7 +2776,7 @@ mod preference_tests {
                         rect =
                             inspector_section(ui, "Future option", "future_option", false, |ui| {
                                 body_visible = true;
-                                ui.label("Future controls");
+                                ui.text_label("Future controls");
                             })
                             .inner
                             .rect;
@@ -3436,8 +3437,8 @@ impl KetchupApp {
             }
         }
         if definitions.is_empty() {
-            ui.label(RichText::new("No components yet").color(Palette::for_ui(ui).muted));
-            ui.label("Select geometry and choose Make Component from the context menu.");
+            ui.text_label(RichText::new("No components yet").color(Palette::for_ui(ui).muted));
+            ui.text_label("Select geometry and choose Make Component from the context menu.");
         } else {
             ui.add(
                 egui::TextEdit::singleline(&mut self.component_filter)
@@ -3455,7 +3456,7 @@ impl KetchupApp {
                     .then(a.0.cmp(&b.0))
             });
             if rows.is_empty() {
-                ui.label(RichText::new("No matching components").color(Palette::for_ui(ui).muted));
+                ui.text_label(RichText::new("No matching components").color(Palette::for_ui(ui).muted));
             }
             for (id, name, count) in rows {
                 ui.push_id(id, |ui| {
@@ -3465,9 +3466,9 @@ impl KetchupApp {
                         .corner_radius(4)
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
-                            ui.label(RichText::new(name).strong());
+                            ui.text_label(RichText::new(name).strong());
                             ui.horizontal(|ui| {
-                                ui.label(
+                                ui.text_label(
                                     RichText::new(format!(
                                         "{count} instance{}",
                                         if count == 1 { "" } else { "s" }
@@ -3520,12 +3521,12 @@ impl KetchupApp {
                 }
             }
         });
-        ui.label(
+        ui.text_label(
             RichText::new("Visibility · Color · Name")
                 .small()
                 .color(Palette::for_ui(ui).muted),
         );
-        ui.label("Untagged");
+        ui.text_label("Untagged");
         let tags: Vec<_> = self.doc.model.tags.values().cloned().collect();
         for mut tag in tags {
             ui.push_id(tag.id, |ui| {
@@ -3545,7 +3546,7 @@ impl KetchupApp {
                     let name = ui
                         .add_sized(
                             egui::vec2((ui.available_width() - 80.).max(30.), 24.),
-                            egui::Label::new(&tag.name).truncate(),
+                            crate::natural_text::Label::new(&tag.name).truncate(),
                         )
                         .on_hover_text("Double-click to rename");
                     if name.double_clicked() {
@@ -3610,7 +3611,7 @@ impl KetchupApp {
         }
         ui.separator();
         if self.selected.is_empty() {
-            ui.label(
+            ui.text_label(
                 RichText::new("Select entities to assign a tag.")
                     .small()
                     .color(Palette::for_ui(ui).muted),
@@ -3729,7 +3730,7 @@ impl KetchupApp {
             choices: &[T],
             name: impl Fn(T) -> &'static str,
         ) {
-            let label = ui.label(label);
+            let label = ui.text_label(label);
             egui::ComboBox::from_id_salt(id)
                 .selected_text(name(*selected))
                 .width(ui.available_width())
@@ -3804,7 +3805,7 @@ impl KetchupApp {
             units.angle.default_precision(),
         );
         ui.add_space(4.);
-        ui.label(
+        ui.text_label(
             RichText::new("Precision controls displayed decimal places. Lengths entered without a unit use the selected length unit.")
                 .small()
                 .color(Palette::for_ui(ui).muted),
@@ -3814,7 +3815,7 @@ impl KetchupApp {
     fn display_contents(&mut self, ui: &mut egui::Ui) {
         let before = self.doc.display.clone();
         let d = &mut self.doc.display;
-        ui.label(RichText::new("Visibility").strong());
+        ui.text_label(RichText::new("Visibility").strong());
         for (value, label) in [
             (&mut d.axes, "Axes"),
             (&mut d.guides, "Guides"),
@@ -3826,7 +3827,7 @@ impl KetchupApp {
             ui.checkbox(value, label);
         }
         ui.separator();
-        ui.label(RichText::new("Face style").strong());
+        ui.text_label(RichText::new("Face style").strong());
         face_style_picker(ui, &mut d.face_style);
         ui.checkbox(&mut d.x_ray, "X-Ray");
         ui.checkbox(&mut d.color_by_tag, "Color by tag");
@@ -3844,7 +3845,7 @@ impl KetchupApp {
             ui.add_enabled_ui(d.profiles, |ui| {
                 // Keep the label above the slider so this nested section fits
                 // even at the inspector's minimum width.
-                let label = ui.label("Profile width");
+                let label = ui.text_label("Profile width");
                 ui.add(egui::Slider::new(&mut d.profile_width, 1. ..=8.))
                     .labelled_by(label.id);
             });
@@ -3861,7 +3862,7 @@ impl KetchupApp {
                         .suffix(" m"),
                 )
             });
-            ui.label(
+            ui.text_label(
                 RichText::new("Horizontal section: keeps geometry below the plane.")
                     .small()
                     .color(Palette::for_ui(ui).muted),

@@ -320,6 +320,7 @@ pub(crate) fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> e
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::natural_text::TextUi as _;
 
     #[test]
     fn resizing_is_opt_in() {
@@ -351,7 +352,7 @@ mod tests {
                             .resizable(true)
                             .show(&ctx, |modal| {
                                 modal.header(|ui| {
-                                    ui.heading("Resize test");
+                                    ui.text_heading("Resize test");
                                 });
                                 modal.body_unpadded(650., |ui| {
                                     body_size = ui.available_size();

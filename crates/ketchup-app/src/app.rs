@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use crate::{
     icons,
     modal::{Modal, primary_button},
@@ -10,8 +11,8 @@ use ketchup_core::History;
 #[cfg(test)]
 use ketchup_core::infer_move_with_snapping;
 use ketchup_core::{
-    Axis, AxisGuide, Camera, DVec2, DVec3, Document, Inference, Model, ObjectKind, Snap,
-    Tool, selection,
+    Axis, AxisGuide, Camera, DVec2, DVec3, Document, Inference, Model, ObjectKind, Snap, Tool,
+    selection,
 };
 use std::{collections::BTreeSet, time::Duration};
 
@@ -41,8 +42,6 @@ mod app_updates;
 mod context_menu;
 #[path = "currency.rs"]
 mod currency;
-#[path = "searchable_selector.rs"]
-mod searchable_selector;
 #[path = "display_scene.rs"]
 mod display_scene;
 #[path = "drawing_inference.rs"]
@@ -63,6 +62,8 @@ mod precision;
 mod projects;
 #[path = "screenshot_dialog.rs"]
 mod screenshot_dialog;
+#[path = "searchable_selector.rs"]
+mod searchable_selector;
 #[path = "settings.rs"]
 mod settings;
 #[path = "shortcut_input.rs"]
@@ -738,15 +739,15 @@ impl KetchupApp {
         let mut cancel = false;
         let response = Modal::new("create_object", 360.).show(ctx, |modal| {
             modal.header(|ui| {
-                ui.heading(if component {
+                ui.text_heading(if component {
                     "Create Component"
                 } else {
                     "Make Group"
                 });
-                ui.weak("Give your selection a name.");
+                ui.text_weak("Give your selection a name.");
             });
             modal.body(|ui| {
-                ui.label("Name");
+                ui.text_label("Name");
                 let input = Self::name_input(ui, &mut name, egui::Id::unique("create_object_name"));
                 create = input.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 if name.len() > 256 {
@@ -1913,7 +1914,7 @@ impl KetchupApp {
                         colors.muted
                     };
                     if !compact {
-                        let saved = ui.label(RichText::new(text).size(12.).color(color));
+                        let saved = ui.text_label(RichText::new(text).size(12.).color(color));
                         if let Some(error) = &self.save_error {
                             saved.on_hover_text(error);
                         } else {
@@ -1942,7 +1943,7 @@ impl KetchupApp {
                         icons::logo(ui.painter(), logo);
                         ui.add_space(4.);
                         if !compact {
-                            ui.label(RichText::new("KetchUp").size(23.).strong().color(foreground));
+                            ui.text_label(RichText::new("KetchUp").size(23.).strong().color(foreground));
                         }
                         ui.add_space(18.);
                         Self::app_bar_menu(ui, "File", |ui| {
@@ -2116,7 +2117,7 @@ impl KetchupApp {
                             separator.y_range(),
                             Stroke::new(1., if dark { colors.border } else { colors.muted.gamma_multiply(0.8) }),
                         );
-                        ui.add(egui::Label::new(RichText::new(&self.doc.name).color(foreground)).truncate())
+                        ui.add(crate::natural_text::Label::new(RichText::new(&self.doc.name).color(foreground)).truncate())
                             .on_hover_text(&self.doc.name);
                     });
                 });
@@ -2183,14 +2184,14 @@ impl KetchupApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.tool == Tool::Text { return; }
                         if self.tool.is_measuring() {
-                            ui.label(
+                            ui.text_label(
                                 RichText::new(
                                     self.measurement_value().unwrap_or_else(|| "—".into()),
                                 )
                                 .monospace()
                                 .strong(),
                             );
-                            ui.label(
+                            ui.text_label(
                                 RichText::new(if self.tool == Tool::Protractor {
                                     "Angle"
                                 } else {
@@ -2202,7 +2203,7 @@ impl KetchupApp {
                             return;
                         }
                         if self.tool == Tool::Scale {
-                            ui.label(RichText::new("×").color(colors.muted));
+                            ui.text_label(RichText::new("×").color(colors.muted));
                         }
                         let available = self.precision_available();
                         let hint = if let Some(edit) = &self.modeling {
@@ -2241,7 +2242,7 @@ impl KetchupApp {
                             }
                             field.surrender_focus();
                         }
-                        ui.label(
+                        ui.text_label(
                             RichText::new(match self.tool {
                                 Tool::Scale => "Factor",
                                 Tool::PushPull => "Distance",
@@ -2262,7 +2263,7 @@ impl KetchupApp {
                         |ui| {
                             dot(ui, ACCENT);
                             ui.add(
-                                egui::Label::new(
+                                crate::natural_text::Label::new(
                                     RichText::new(message).size(12.).color(colors.muted),
                                 )
                                 .truncate(),
@@ -2283,8 +2284,8 @@ impl KetchupApp {
                     self.general_settings.tool_shortcut(tool)
                 )
             };
-            ui.strong(title);
-            ui.label(tool.instructions());
+            ui.text_strong(title);
+            ui.text_label(tool.instructions());
         })
     }
     fn tool_menu_item(&mut self, ui: &mut egui::Ui, tool: Tool, active: bool) -> egui::Response {
@@ -2511,7 +2512,7 @@ impl KetchupApp {
             .filter(|id| self.doc.model.objects.contains_key(id))
             .collect();
         if objects.is_empty() {
-            ui.label(
+            ui.text_label(
                 RichText::new(
                     "Select a group or component to edit its material, sanding, and finishing.",
                 )
@@ -2527,7 +2528,7 @@ impl KetchupApp {
         let mut chosen = first;
         let mut assign = false;
         ui.add_enabled_ui(!self.doc.model.selection_locked(&self.selected), |ui| {
-            ui.label("Stock material");
+            ui.text_label("Stock material");
             let label = if mixed {
                 "Mixed"
             } else if let Some(id) = first {
@@ -2598,9 +2599,9 @@ impl KetchupApp {
         self.measurement_inspector(ui);
         self.text_entity_info(ui);
         if self.tool == Tool::Paint {
-            ui.heading("Paint");
+            ui.text_heading("Paint");
             ui.horizontal(|ui| {
-                ui.label("Paint by");
+                ui.text_label("Paint by");
                 ui.selectable_value(&mut self.paint_target, PaintTarget::Face, "Face");
                 ui.selectable_value(&mut self.paint_target, PaintTarget::Group, "Group");
             });
@@ -2632,16 +2633,16 @@ impl KetchupApp {
                     }
                 }
             });
-            ui.label(self.paint_instructions());
+            ui.text_label(self.paint_instructions());
             ui.add_space(12.);
         }
         if self.selected.is_empty() {
-            ui.label(
+            ui.text_label(
                 RichText::new("Nothing selected")
                     .strong()
                     .color(colors.muted),
             );
-            ui.label(
+            ui.text_label(
                 RichText::new("Select an entity to see its details.")
                     .small()
                     .color(colors.muted),
@@ -2709,7 +2710,7 @@ impl KetchupApp {
                 && objects.len() == 1
                 && objects[0].kind == ObjectKind::Group;
             if !single_group {
-                ui.label(
+                ui.text_label(
                     RichText::new(format!("{selection} selected"))
                         .size(17.)
                         .strong(),
@@ -2717,7 +2718,7 @@ impl KetchupApp {
                 ui.add_space(12.);
             }
             if self.doc.model.selection_locked(&self.selected) {
-                ui.label(RichText::new("Locked").color(self.axis_color(Axis::Z)));
+                ui.text_label(RichText::new("Locked").color(self.axis_color(Axis::Z)));
             }
             if faces > 0 {
                 let area: f64 = entities
@@ -2753,7 +2754,7 @@ impl KetchupApp {
             RichText::new(label).size(12.).color(colors.muted),
             |ui| {
                 ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                    ui.add(egui::Label::new(RichText::new(value).monospace().size(12.)).wrap())
+                    ui.add(crate::natural_text::Label::new(RichText::new(value).monospace().size(12.)).wrap())
                 })
                 .inner
             },
@@ -4437,15 +4438,15 @@ impl KetchupApp {
         let mut destination = None;
         ui.horizontal_centered(|ui| {
             if path.is_empty() {
-                ui.label(RichText::new("Model").size(13.).strong());
-                ui.label(RichText::new("/").color(colors.border));
-                ui.label(RichText::new("No group open").size(12.).color(colors.muted));
+                ui.text_label(RichText::new("Model").size(13.).strong());
+                ui.text_label(RichText::new("/").color(colors.border));
+                ui.text_label(RichText::new("No group open").size(12.).color(colors.muted));
             } else {
                 if ui.small_button("Model").clicked() {
                     destination = Some(None);
                 }
                 for id in &path {
-                    ui.label(RichText::new("›").color(colors.muted));
+                    ui.text_label(RichText::new("›").color(colors.muted));
                     if ui.small_button(&self.doc.model.objects[id].name).clicked() {
                         destination = Some(Some(*id));
                     }
@@ -4789,8 +4790,8 @@ impl KetchupApp {
                     icons::logo(ui.painter(), logo);
                     ui.add_space(8.);
                     ui.vertical(|ui| {
-                        ui.heading("About KetchUp");
-                        ui.label(
+                        ui.text_heading("About KetchUp");
+                        ui.text_label(
                             RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
                                 .color(colors.muted),
                         );
@@ -4799,9 +4800,9 @@ impl KetchupApp {
             });
             modal.body(|ui| {
                 let colors = Palette::for_ui(ui);
-                ui.label("KetchUp is a 3D modeling app for turning ideas into shapes. Draw precise geometry, shape surfaces, and organize your model with groups and components.");
+                ui.text_label("KetchUp is a 3D modeling app for turning ideas into shapes. Draw precise geometry, shape surfaces, and organize your model with groups and components.");
                 ui.add_space(8.);
-                ui.label(
+                ui.text_label(
                     RichText::new("Your work is saved automatically on this device. Save a .ketchup project to keep a portable copy.")
                         .small()
                         .color(colors.muted),

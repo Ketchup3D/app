@@ -1,4 +1,5 @@
 //! Reusable purchasing catalog. Geometry and project assignments remain in documents.
+use crate::natural_text::TextUi as _;
 use super::*;
 use crate::inspector_table::{Column, InspectorTable};
 use ketchup_core::LengthUnit;
@@ -141,12 +142,12 @@ impl Settings {
         type_filters: &mut std::collections::BTreeMap<String, String>,
     ) -> Option<ketchup_core::MaterialId> {
         let mut requested_removal = None;
-        ui.weak("Save the wood stock and finishing products you can buy, with your supplier’s prices. Use actual dimensions for boards or sheets.");
+        ui.text_weak("Save the wood stock and finishing products you can buy, with your supplier’s prices. Use actual dimensions for boards or sheets.");
         ui.horizontal_wrapped(|ui| {
-            ui.label("Currency");
+            ui.text_label("Currency");
             currency::selector(ui, &mut self.currency, &mut self.currency_filter)
                 .on_hover_text("Used for all prices and cost estimates in the app. Changing currency does not convert entered prices.");
-            ui.label("Sizing units");
+            ui.text_label("Sizing units");
             egui::ComboBox::from_id_salt("stock_sizing_units")
                 .selected_text(self.units.label())
                 .show_ui(ui, |ui| {
@@ -157,7 +158,7 @@ impl Settings {
         });
         sidebar::inspector_section(ui, "Wood", "settings/stock/wood", true, |ui| {
             if self.wood.is_empty() {
-                ui.weak("No wood stock yet. Add a board or sheet, then enter its size and price.");
+                ui.text_weak("No wood stock yet. Add a board or sheet, then enter its size and price.");
             } else {
                 let key = "settings/stock/wood/table";
                 let scroll = sidebar::restored_scroll_area(
@@ -263,7 +264,7 @@ impl Settings {
                     }
                 });
                 sidebar::remember_scroll(ui.ctx(), key, output.state.clamped_offset());
-                ui.weak(format!(
+                ui.text_weak(format!(
                     "Sizes in {} · Prices in {} per piece",
                     self.units.symbol(),
                     self.currency
@@ -371,26 +372,26 @@ impl KetchupApp {
         let mut remove = false;
         let mut cancel = false;
         let response = Modal::new("remove_stock_material", 520.).show(ctx, |modal| {
-            modal.header(|ui| { ui.heading("Remove material?"); });
+            modal.header(|ui| { ui.text_heading("Remove material?"); });
             modal.body(|ui| {
-                ui.label(format!("Remove “{name}” from Settings → Material?"));
-                ui.label("This material may be associated with objects in other projects.");
+                ui.text_label(format!("Remove “{name}” from Settings → Material?"));
+                ui.text_label("This material may be associated with objects in other projects.");
                 ui.add_space(8.);
-                ui.strong("Known project associations on this device");
+                ui.text_strong("Known project associations on this device");
                 let mut found = false;
                 for (project_key, usage) in &self.general_settings.stock.projects {
                     if let Some(count) = usage.materials.get(&id).filter(|count| **count > 0) {
                         found = true;
                         let current = if Some(project_key) == current_key.as_ref() { " (current project)" } else { "" };
                         let label = format!("{}{} · {} assigned object{}", usage.name, current, count, if *count == 1 { "" } else { "s" });
-                        let response = ui.label(label);
+                        let response = ui.text_label(label);
                         if let Some(path) = &usage.path { response.on_hover_text(path); }
                     }
                 }
-                if !found { ui.weak("No known project associations."); }
-                ui.weak("Usage is based on projects opened on this device and may be out of date. Unopened projects may also reference this material.");
+                if !found { ui.text_weak("No known project associations."); }
+                ui.text_weak("Usage is based on projects opened on this device and may be out of date. Unopened projects may also reference this material.");
                 ui.add_space(8.);
-                ui.label("Existing projects keep their material definitions and assignments. They will no longer receive catalog updates for this material.");
+                ui.text_label("Existing projects keep their material definitions and assignments. They will no longer receive catalog updates for this material.");
             });
             modal.footer(|ui| {
                 if ui.button("Cancel").clicked() { cancel = true; }

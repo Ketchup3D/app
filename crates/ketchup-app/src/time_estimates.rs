@@ -1,4 +1,5 @@
 //! Finishing estimates use actual model surfaces and reusable, user-adjustable rates.
+use crate::natural_text::TextUi as _;
 use super::*;
 use crate::inspector_table::{Column, InspectorTable, product_cell_text};
 use ketchup_core::Model;
@@ -365,7 +366,7 @@ fn finishing_costs(
 fn cost_group(ui: &mut egui::Ui, label: &str) {
     let colors = Palette::for_ui(ui);
     ui.separator();
-    ui.add(egui::Label::new(RichText::new(label).small().strong().color(colors.muted)).truncate());
+    ui.add(crate::natural_text::Label::new(RichText::new(label).small().strong().color(colors.muted)).truncate());
 }
 
 fn finishing_cost_rows(
@@ -476,7 +477,7 @@ fn finish_controls(
         {
             table.row(ui, (key, row), |column, ui| {
                 if column == 0 {
-                    ui.label(label);
+                    ui.text_label(label);
                 } else {
                     match row {
                         0 => {
@@ -498,12 +499,12 @@ fn finish_controls(
             });
         }
         if products.is_empty() {
-            ui.weak("Add finishing products in Settings → Material.");
+            ui.text_weak("Add finishing products in Settings → Material.");
         } else if step
             .product_id
             .is_some_and(|id| !products.iter().any(|product| product.id == id))
         {
-            ui.weak("The selected product is no longer in Settings → Material. Choose a replacement or clear it.");
+            ui.text_weak("The selected product is no longer in Settings → Material. Choose a replacement or clear it.");
         }
         let mut separate = step.final_drying_hours.is_some();
         if ui
@@ -515,7 +516,7 @@ fn finish_controls(
         if let Some(hours) = &mut step.final_drying_hours {
             table.row(ui, (key, "final_wait"), |column, ui| {
                 if column == 0 {
-                    ui.label("Final wait");
+                    ui.text_label("Final wait");
                 } else {
                     wait_input(ui, hours);
                 }
@@ -619,7 +620,7 @@ pub(super) fn treatment_controls(
             });
             settings.sanding_after_varnish.push(false);
         }
-        ui.label(
+        ui.text_label(
             RichText::new(
                 "Between coats applies to varnish only. Enable varnish with at least 2 coats.",
             )
@@ -988,7 +989,7 @@ impl KetchupApp {
             .inner_margin(10)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(RichText::new("Cost estimate").small().color(colors.muted));
+                ui.text_label(RichText::new("Cost estimate").small().color(colors.muted));
                 ui.separator();
                 let mut table = InspectorTable::new(
                     ui.available_width(),
@@ -1060,11 +1061,11 @@ impl KetchupApp {
                 }
                 finishing_cost_rows(ui, &mut table, &finish_costs, currency);
                 if let Some(message) = stock_issue {
-                    ui.label(RichText::new("No stock estimate yet").small().color(colors.muted))
+                    ui.text_label(RichText::new("No stock estimate yet").small().color(colors.muted))
                         .on_hover_text(message);
                 }
                 if !finish_costs.is_empty() {
-                    ui.label(RichText::new("Finishes: whole containers · Needs combined across objects and coats before rounding")
+                    ui.text_label(RichText::new("Finishes: whole containers · Needs combined across objects and coats before rounding")
                         .small().color(colors.muted));
                 }
             });
@@ -1076,20 +1077,20 @@ impl KetchupApp {
                 .inner_margin(10)
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    ui.label(RichText::new("Estimate incomplete").strong().color(colors.accent));
+                    ui.text_label(RichText::new("Estimate incomplete").strong().color(colors.accent));
                     if unpriced > 0 {
-                        ui.label(format!("{unpriced} stock pieces have no price. Add prices in Settings → Material."));
+                        ui.text_label(format!("{unpriced} stock pieces have no price. Add prices in Settings → Material."));
                     }
                     if excluded > 0 {
-                        ui.label("Some cuts need larger stock. Their cost is excluded.");
+                        ui.text_label("Some cuts need larger stock. Their cost is excluded.");
                     }
                     if plan.skipped > 0 {
-                        ui.label(format!("{} assigned items omitted: no usable thickness.", plan.skipped));
+                        ui.text_label(format!("{} assigned items omitted: no usable thickness.", plan.skipped));
                     }
                 });
             ui.add_space(6.);
         }
-        ui.label(RichText::new(format!("Kerf {} · Rotation {}",
+        ui.text_label(RichText::new(format!("Kerf {} · Rotation {}",
             self.doc.display.units.format_length(self.project.cutting_plan_layout.kerf_mm / 1000.),
             if self.project.cutting_plan_layout.allow_rotation { "on" } else { "off" }
         )).small().color(colors.muted))
@@ -1137,7 +1138,7 @@ impl KetchupApp {
                 .is_none()
         });
         if mixed {
-            ui.weak("Mixed sanding and finishing settings. Changes apply to selected wood objects, including nested wood objects.");
+            ui.text_weak("Mixed sanding and finishing settings. Changes apply to selected wood objects, including nested wood objects.");
         }
         let mut reset = false;
         let mut apply_children = false;
@@ -1290,14 +1291,14 @@ impl KetchupApp {
             summary.row(ui, ("estimate_summary", key), |column, cell| {
                 cell.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     if column == 0 {
-                        ui.label(label);
+                        ui.text_label(label);
                     } else {
-                        ui.label(RichText::new(&value).strong().color(value_color));
+                        ui.text_label(RichText::new(&value).strong().color(value_color));
                     }
                 });
             });
         }
-        ui.label(
+        ui.text_label(
             RichText::new(if self.selected.is_empty() {
                 "Materials · All visible parts"
             } else {
@@ -1307,7 +1308,7 @@ impl KetchupApp {
             .color(colors.muted),
         );
         ui.add_space(8.);
-        ui.label(
+        ui.text_label(
             RichText::new("Time covers sanding and finishing, including final drying.")
                 .small()
                 .color(colors.muted),
@@ -1316,8 +1317,8 @@ impl KetchupApp {
         ui.separator();
         ui.add_space(4.);
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(self.doc.display.units.format_area(area)).strong());
-            ui.label(
+            ui.text_label(RichText::new(self.doc.display.units.format_area(area)).strong());
+            ui.text_label(
                 RichText::new(if self.selected.is_empty() {
                     "Visible wood surfaces"
                 } else {
@@ -1327,7 +1328,7 @@ impl KetchupApp {
                 .color(colors.muted),
             );
         });
-        ui.label(RichText::new("Finishing applies only to objects assigned a material from Settings → Material → Wood.").small().color(colors.muted));
+        ui.text_label(RichText::new("Finishing applies only to objects assigned a material from Settings → Material → Wood.").small().color(colors.muted));
         ui.add_space(6.);
         egui::Frame::new()
             .fill(colors.canvas)
@@ -1337,20 +1338,20 @@ impl KetchupApp {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 if area <= 0. {
-                    ui.label(if self.selected.is_empty() {
+                    ui.text_label(if self.selected.is_empty() {
                         "No visible surfaces with assigned wood materials."
                     } else {
                         "Select faces or groups with assigned wood materials."
                     });
                 } else if tasks.is_empty() {
-                    ui.label("Choose sanding grits or finishes for objects in Materials.");
+                    ui.text_label("Choose sanding grits or finishes for objects in Materials.");
                 } else {
-                    ui.label(
+                    ui.text_label(
                         RichText::new("Sequential total")
                             .small()
                             .color(colors.muted),
                     );
-                    ui.label(
+                    ui.text_label(
                         RichText::new(format_minutes(duration.work + duration.wait))
                             .size(19.)
                             .strong()
@@ -1366,7 +1367,7 @@ impl KetchupApp {
                     for (index, (title, task, _)) in tasks.iter().enumerate() {
                         table.row(ui, ("task", index), |column, ui| {
                             if column == 0 {
-                                ui.label(
+                                ui.text_label(
                                     RichText::new(
                                         title.strip_prefix("Sanding · ").unwrap_or(title),
                                     )
@@ -1375,7 +1376,7 @@ impl KetchupApp {
                                 .on_hover_text(title.as_str());
                             } else {
                                 let minutes = if column == 1 { task.work } else { task.wait };
-                                ui.label(
+                                ui.text_label(
                                     RichText::new(if minutes == 0. {
                                         "-".to_owned()
                                     } else {
@@ -1403,9 +1404,9 @@ impl KetchupApp {
                                 }
                             }
                         };
-                        ui.label(RichText::new(text).small().strong());
+                        ui.text_label(RichText::new(text).small().strong());
                     });
-                    ui.label(
+                    ui.text_label(
                         RichText::new("Includes final drying · Objects dry together between steps")
                             .small()
                             .color(colors.muted),

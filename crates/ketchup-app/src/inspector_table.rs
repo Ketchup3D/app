@@ -20,7 +20,7 @@ pub(crate) fn inspector_field(
         if column == 0 {
             label_id = Some(
                 cell.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.add(egui::Label::new(label.take().unwrap()).wrap())
+                    ui.add(crate::natural_text::Label::new(label.take().unwrap()).wrap())
                 })
                 .inner
                 .id,
@@ -61,7 +61,7 @@ pub(crate) fn product_cell_text(ui: &mut egui::Ui, lines: Vec<egui::RichText>) {
     }
     job.wrap.max_rows = 3;
     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-        ui.add(egui::Label::new(job).wrap());
+        ui.add(crate::natural_text::Label::new(job).wrap());
     });
 }
 
@@ -147,7 +147,7 @@ impl<const N: usize> InspectorTable<N> {
         self.row(ui, "header", |column, cell| {
             cell.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 // Truncated labels already show their full text on hover in egui.
-                ui.add(egui::Label::new(egui::RichText::new(labels[column]).strong()).truncate());
+                ui.add(crate::natural_text::Label::new(egui::RichText::new(labels[column]).strong()).truncate());
             });
         });
     }
@@ -236,6 +236,7 @@ impl<const N: usize> InspectorTable<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::natural_text::TextUi as _;
 
     #[test]
     fn centered_fields_align_wrapped_labels_and_controls_after_resizing() {
@@ -249,7 +250,7 @@ mod tests {
                 table.row(ui, "centered_test", |column, cell| {
                     bounds[column] = if column == 0 {
                         cell.add(
-                            egui::Label::new("A long property label that wraps onto several lines")
+                            crate::natural_text::Label::new("A long property label that wraps onto several lines")
                                 .wrap(),
                         )
                         .rect
@@ -395,7 +396,7 @@ mod tests {
                         let bounds = cell.max_rect();
                         let response = match row_index {
                             0 => cell.add(
-                                egui::Label::new("Wrapped column heading with details").wrap(),
+                                crate::natural_text::Label::new("Wrapped column heading with details").wrap(),
                             ),
                             1 => cell.add(egui::TextEdit::singleline(&mut "Board".to_owned())),
                             2 => cell.add(egui::DragValue::new(&mut 12.5)),
@@ -403,7 +404,7 @@ mod tests {
                                 egui::ComboBox::from_id_salt("choice")
                                     .selected_text("Choice")
                                     .show_ui(cell, |ui| {
-                                        ui.label("Choice");
+                                        ui.text_label("Choice");
                                     })
                                     .response
                             }

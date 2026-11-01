@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use super::*;
 use ketchup_core::StandardView;
 
@@ -5,7 +6,7 @@ impl KetchupApp {
     pub(super) fn view_contents(&mut self, ui: &mut egui::Ui) {
         let before = self.doc.camera.clone();
         inspector_section(ui, "Camera", "view_camera", false, |ui| {
-            ui.label("Projection");
+            ui.text_label("Projection");
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(
                     &mut self.doc.camera.projection,
@@ -22,7 +23,7 @@ impl KetchupApp {
             ui.add_enabled_ui(
                 self.doc.camera.projection == Projection::Perspective,
                 |ui| {
-                    ui.label("Field of view");
+                    ui.text_label("Field of view");
                     let mut degrees = self.doc.camera.fov.to_degrees();
                     if ui
                         .add(egui::Slider::new(&mut degrees, 15. ..=100.).suffix("°"))

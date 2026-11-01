@@ -1,4 +1,5 @@
 //! Reusable finishing-product prices, stored with the device's material catalog.
+use crate::natural_text::TextUi as _;
 use super::*;
 use crate::inspector_table::{Column, InspectorTable};
 
@@ -177,9 +178,9 @@ pub(super) fn show(ui: &mut egui::Ui, finishes: &mut Vec<Finish>, currency: &str
         "settings/stock/finishes",
         true,
         |ui| {
-            ui.weak("Pre-stain conditioner, stain, paint, varnish, and other finishes. Enter the quantity and price for one container.");
+            ui.text_weak("Pre-stain conditioner, stain, paint, varnish, and other finishes. Enter the quantity and price for one container.");
             if finishes.is_empty() {
-                ui.weak("No finishing products yet. Add a product to save its type, container size, and price.");
+                ui.text_weak("No finishing products yet. Add a product to save its type, container size, and price.");
             } else {
                 let key = "settings/stock/finishes/table";
                 let scroll = sidebar::restored_scroll_area(
@@ -295,7 +296,7 @@ pub(super) fn show(ui: &mut egui::Ui, finishes: &mut Vec<Finish>, currency: &str
                 if let Some(id) = remove {
                     finishes.retain(|finish| finish.id != id);
                 }
-                ui.weak(format!("Prices in {currency} per container · Coverage in m² per container for one coat · 0 means unknown"));
+                ui.text_weak(format!("Prices in {currency} per container · Coverage in m² per container for one coat · 0 means unknown"));
             }
             if ui.button("+ Add finishing product").clicked() {
                 finishes.push(Finish::default());

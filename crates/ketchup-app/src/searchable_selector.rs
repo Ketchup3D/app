@@ -1,4 +1,5 @@
 //! Shared searchable dropdown with a fixed search row and persisted results scroll.
+use crate::natural_text::TextUi as _;
 use super::sidebar;
 use eframe::egui;
 
@@ -143,7 +144,7 @@ impl SearchableSelector<'_> {
                         });
                     }
                     if matches.is_empty() {
-                        ui.weak(self.empty_text);
+                        ui.text_weak(self.empty_text);
                     }
                 });
                 sidebar::remember_scroll(ui.ctx(), self.scroll_key, output.state.clamped_offset());

@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use super::*;
 use ketchup_core::SolidOperation;
 
@@ -224,15 +225,15 @@ impl KetchupApp {
         if !self.tool.is_solid() {
             return;
         }
-        ui.heading(self.tool.label());
-        ui.label(
+        ui.text_heading(self.tool.label());
+        ui.text_label(
             RichText::new(self.solid_status())
                 .small()
                 .color(Palette::for_ui(ui).muted),
         );
         if self.tool == Tool::Flip {
             ui.add_space(8.);
-            ui.label("Mirror around the selection center:");
+            ui.text_label("Mirror around the selection center:");
             ui.horizontal(|ui| {
                 for (axis, label) in [
                     (Axis::X, "X / red"),
@@ -259,7 +260,7 @@ impl KetchupApp {
                 .get(&first)
                 .map(|o| o.name.as_str())
                 .unwrap_or("Connected body");
-            ui.label(RichText::new(name).strong());
+            ui.text_label(RichText::new(name).strong());
             if let Ok(volume) = self.solid_volume_cache.volume(&self.doc.model, first) {
                 Self::property(ui, "Volume", &self.doc.display.units.format_volume(volume));
             }
@@ -269,16 +270,16 @@ impl KetchupApp {
             }
         } else {
             ui.add_space(8.);
-            ui.label(
+            ui.text_label(
                 "Choose groups, components, or connected bodies. Results are editable groups.",
             );
             if self.tool == Tool::Intersect {
-                ui.label("Intersect also keeps the portion of a face inside a closed body.");
+                ui.text_label("Intersect also keeps the portion of a face inside a closed body.");
             } else {
-                ui.label("Use closed bodies with no stray edges or missing faces.");
+                ui.text_label("Use closed bodies with no stray edges or missing faces.");
             }
             if self.tool == Tool::Trim {
-                ui.label("The first click chooses the cutter. It stays in the model.");
+                ui.text_label("The first click chooses the cutter. It stays in the model.");
             }
         }
         ui.add_space(14.);

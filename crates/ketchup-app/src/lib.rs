@@ -9,6 +9,7 @@ mod inspector_table;
 mod interchange;
 mod mesh_exchange;
 mod modal;
+mod natural_text;
 mod picking;
 mod project_files;
 mod release_notes;

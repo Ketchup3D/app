@@ -1,5 +1,6 @@
 //! A shared document with independently framed cameras. Tools use the active
 //! document camera while every view shares the model, selection and history.
+use crate::natural_text::TextUi as _;
 use super::*;
 use std::collections::BTreeMap;
 
@@ -556,10 +557,10 @@ impl KetchupApp {
         let mut cancel = false;
         let response = Modal::new("rename_viewport", 360.).show(ctx, |modal| {
             modal.header(|ui| {
-                ui.heading("Rename view");
+                ui.text_heading("Rename view");
             });
             modal.body(|ui| {
-                ui.label("Name");
+                ui.text_label("Name");
                 let input =
                     Self::name_input(ui, &mut name, egui::Id::unique("rename_viewport_name"));
                 if name.len() > 1024 {

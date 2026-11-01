@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use super::*;
 
 const AXES: [Axis; 3] = [Axis::X, Axis::Y, Axis::Z];
@@ -71,7 +72,7 @@ fn layout(camera: &Camera, rect: Rect, label_sizes: [Vec2; 3]) -> (Pos2, [GizmoA
 impl KetchupApp {
     pub(super) fn entity_axis_gizmo(&self, ui: &mut egui::Ui, size: DVec3) {
         let colors = Palette::for_ui(ui);
-        ui.label(RichText::new("Object lenghts").size(12.));
+        ui.text_label(RichText::new("Object lenghts").size(12.));
         ui.add_space(4.);
         let lengths =
             [size.x, size.y, size.z].map(|value| self.doc.display.units.format_length(value));
@@ -158,9 +159,9 @@ impl KetchupApp {
             egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), &summary)
         });
         response.on_hover_ui(|ui| {
-            ui.label("Solid lengths along world axes. Orientation follows the active view.");
+            ui.text_label("Solid lengths along world axes. Orientation follows the active view.");
             for label in &labels {
-                ui.monospace(label);
+                ui.text_monospace(label);
             }
         });
     }

@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use super::*;
 use ketchup_core::{Dimension, DimensionAnchor, angle_arc, angle_degrees};
 
@@ -246,16 +247,16 @@ impl KetchupApp {
         if !self.tool.is_measuring() {
             return;
         }
-        ui.heading(self.tool.label());
+        ui.text_heading(self.tool.label());
         if let Some(value) = self.measurement_value() {
-            ui.label(
+            ui.text_label(
                 RichText::new(value)
                     .monospace()
                     .size(22.)
                     .color(Palette::for_ui(ui).green),
             );
         }
-        ui.label(
+        ui.text_label(
             RichText::new(self.measurement_status())
                 .small()
                 .color(Palette::for_ui(ui).muted),

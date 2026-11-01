@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use super::*;
 use crate::screenshots::{self, Format, Paper, Settings, VIEW_LABELS};
 use eframe::{egui_wgpu, wgpu};
@@ -80,8 +81,8 @@ impl KetchupApp {
         let mut cancel = false;
         let response = Modal::new("generate_screenshot", 1100.).show(ctx, |modal| {
             modal.header(|ui| {
-                ui.heading("Generate screenshot");
-                ui.weak("Choose your views, page layout and export format.");
+                ui.text_heading("Generate screenshot");
+                ui.text_weak("Choose your views, page layout and export format.");
             });
             modal.body_unpadded(600., |ui| {
                 let size = ui.available_size();
@@ -205,10 +206,10 @@ fn screenshot_controls(
 ) {
     ui.add_enabled_ui(!exporting, |ui| {
         ui.horizontal(|ui| {
-            ui.strong("Views");
-            ui.weak(format!("{} selected", settings.selected().len()));
+            ui.text_strong("Views");
+            ui.text_weak(format!("{} selected", settings.selected().len()));
         });
-        ui.small("Choose one or more views.");
+        ui.text_small("Choose one or more views.");
         egui::Grid::new("screenshot_views")
             .num_columns(2)
             .spacing(egui::vec2(16., 6.))
@@ -230,11 +231,11 @@ fn screenshot_controls(
                 }
             });
         screenshot_group_divider(ui);
-        ui.strong("Page");
+        ui.text_strong("Page");
         ui.radio_value(&mut settings.combined, false, "One image per view");
         ui.radio_value(&mut settings.combined, true, "All views in one image");
         ui.add_space(6.);
-        ui.label("Paper size");
+        ui.text_label("Paper size");
         egui::ComboBox::from_id_salt("screenshot_paper")
             .width(ui.available_width())
             .selected_text(settings.paper.label())
@@ -248,9 +249,9 @@ fn screenshot_controls(
             ui.selectable_value(&mut settings.landscape, true, "Landscape");
         });
         screenshot_group_divider(ui);
-        ui.strong("Export");
+        ui.text_strong("Export");
         ui.columns(2, |columns| {
-            columns[0].label("Format");
+            columns[0].text_label("Format");
             egui::ComboBox::from_id_salt("screenshot_format")
                 .width(columns[0].available_width())
                 .selected_text(settings.format.label())
@@ -259,7 +260,7 @@ fn screenshot_controls(
                         ui.selectable_value(&mut settings.format, format, format.label());
                     }
                 });
-            columns[1].label("Resolution");
+            columns[1].text_label("Resolution");
             egui::ComboBox::from_id_salt("screenshot_dpi")
                 .width(columns[1].available_width())
                 .selected_text(format!("{} DPI", settings.dpi))
@@ -270,10 +271,10 @@ fn screenshot_controls(
                 });
         });
         let [w, h] = settings.pixels();
-        ui.small(format!("{w} × {h} pixels per sheet"));
-        ui.small("Light mode · Transparent background");
+        ui.text_small(format!("{w} × {h} pixels per sheet"));
+        ui.text_small("Light mode · Transparent background");
         if !settings.combined && settings.selected().len() > 1 {
-            ui.small(if settings.format == Format::Pdf {
+            ui.text_small(if settings.format == Format::Pdf {
                 "One PDF page per view."
             } else {
                 "Separate images packaged in a ZIP file."
@@ -281,10 +282,10 @@ fn screenshot_controls(
         }
     });
     if let Err(error) = settings.validate() {
-        ui.colored_label(ACCENT, error);
+        ui.text_colored_label(ACCENT, error);
     }
     if let Some(error) = error {
-        ui.colored_label(ACCENT, error);
+        ui.text_colored_label(ACCENT, error);
     }
 }
 
@@ -312,8 +313,8 @@ fn screenshot_preview(
             ui.set_min_width(ui.available_width());
             ui.spacing_mut().item_spacing = egui::vec2(6., 6.);
             ui.horizontal(|ui| {
-                ui.strong("Preview viewport");
-                ui.weak(if settings.combined {
+                ui.text_strong("Preview viewport");
+                ui.text_weak(if settings.combined {
                     "Combined sheet"
                 } else {
                     "Individual views"

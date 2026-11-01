@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -249,7 +250,7 @@ fn empty_outliner_label(ui: &mut egui::Ui, icon: &str, label: &str) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(18., 18.), Sense::hover());
         icons::line_icon(ui.painter(), rect.center(), icon, Palette::for_ui(ui).muted);
-        ui.weak(label);
+        ui.text_weak(label);
     });
 }
 

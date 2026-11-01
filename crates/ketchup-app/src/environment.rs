@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use crate::inspector_table::{Column, InspectorTable};
 use eframe::egui::{self, Color32, Rect};
 use ketchup_core::{Camera, DisplaySettings, Projection};
@@ -134,7 +135,7 @@ fn backdrop(rect: Rect, camera: &Camera, display: &DisplaySettings, dark: bool) 
 pub fn controls(ui: &mut egui::Ui, display: &mut DisplaySettings) -> bool {
     let before = display.clone();
     let mut themed = for_theme(display, ui.visuals().dark_mode);
-    ui.label("Environment");
+    ui.text_label("Environment");
     ui.separator();
     let mut table =
         InspectorTable::new(ui.available_width(), [Column::flex(1.), Column::flex(1.)]).centered();
@@ -152,7 +153,7 @@ pub fn controls(ui: &mut egui::Ui, display: &mut DisplaySettings) -> bool {
                         ui.checkbox(&mut display.ground, label);
                     }
                     _ => {
-                        ui.label(label);
+                        ui.text_label(label);
                     }
                 }
             } else {

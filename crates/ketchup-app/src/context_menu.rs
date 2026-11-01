@@ -1,4 +1,5 @@
 //! Shared entity menu and commands for the app bar, viewport, and Outliner.
+use crate::natural_text::TextUi as _;
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -337,11 +338,11 @@ impl KetchupApp {
         let mut cancel = false;
         let response = Modal::new("rename_object", 360.).show(ctx, |modal| {
             modal.header(|ui| {
-                ui.heading("Rename");
-                ui.weak("Choose a name for this object.");
+                ui.text_heading("Rename");
+                ui.text_weak("Choose a name for this object.");
             });
             modal.body(|ui| {
-                ui.label("Name");
+                ui.text_label("Name");
                 let input = Self::name_input(ui, &mut name, egui::Id::unique("rename_object_name"));
                 if name.len() > 1024 {
                     name.truncate(name.floor_char_boundary(1024));

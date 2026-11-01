@@ -67,14 +67,14 @@ fn cost_table_keeps_long_cells_inside_columns_and_wrapped_rows_apart() {
                     let bounds = cell.max_rect();
                     if column == 0 {
                         cell.add(
-                            egui::Label::new("Long material name with details and dimensions")
+                            crate::natural_text::Label::new("Long material name with details and dimensions")
                                 .wrap(),
                         );
                         cell.add(
-                            egui::Label::new("12 cuts do not fit · Excluded from cost").wrap(),
+                            crate::natural_text::Label::new("12 cuts do not fit · Excluded from cost").wrap(),
                         );
                     } else {
-                        cell.add(egui::Label::new("CAD 1234567890.00").truncate());
+                        cell.add(crate::natural_text::Label::new("CAD 1234567890.00").truncate());
                     }
                     // Painted text cannot spill into an adjacent column, even
                     // when its intrinsic width is larger than the entire table.

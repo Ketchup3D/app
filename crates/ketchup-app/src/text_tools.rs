@@ -1,4 +1,5 @@
 //! Attached leader text: pick geometry, place the label, then enter its contents.
+use crate::natural_text::TextUi as _;
 use super::*;
 use ketchup_core::{DimensionAnchor, TextAnnotation};
 
@@ -189,12 +190,12 @@ impl KetchupApp {
         let mut cancel = false;
         let response = Modal::new("attached_text_editor", 400.).show(ctx, |modal| {
             modal.header(|ui| {
-                ui.heading(if editor.id.is_some() {
+                ui.text_heading(if editor.id.is_some() {
                     "Edit Text"
                 } else {
                     "Attach Text"
                 });
-                ui.weak("Add a label to your model.");
+                ui.text_weak("Add a label to your model.");
             });
             modal.body(|ui| {
                 let input_id = egui::Id::unique("attached_text_input");
@@ -213,7 +214,7 @@ impl KetchupApp {
                 if editor.text.len() > 4096 {
                     editor.text.truncate(editor.text.floor_char_boundary(4096));
                 }
-                ui.weak("Enter to save · Shift+Enter for a new line · Esc to cancel");
+                ui.text_weak("Enter to save · Shift+Enter for a new line · Esc to cancel");
             });
             modal.footer(|ui| {
                 cancel = ui.button("Cancel").clicked();
@@ -235,7 +236,7 @@ impl KetchupApp {
         }
         let id = *self.selected.first().unwrap();
         if let Some(text) = self.doc.model.texts.get(&id) {
-            ui.label(&text.text);
+            ui.text_label(&text.text);
             if ui
                 .add_enabled(
                     !self.doc.model.is_locked(id),

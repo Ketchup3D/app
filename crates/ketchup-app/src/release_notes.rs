@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use crate::{
     modal::{Modal, primary_button},
     theme::Palette,
@@ -70,8 +71,8 @@ impl ReleaseNotes {
             let previous = self.selected;
             modal.header(|ui| {
                 let colors = Palette::for_ui(ui);
-                ui.heading("Release notes");
-                ui.label(
+                ui.text_heading("Release notes");
+                ui.text_label(
                     RichText::new(format!(
                         "You're using KetchUp {}",
                         env!("CARGO_PKG_VERSION")
@@ -121,19 +122,19 @@ impl ReleaseNotes {
             let release = &self.releases[self.selected];
             modal.body_with_scroll(scroll, |ui| {
                 let colors = Palette::for_ui(ui);
-                ui.heading(&release.title);
+                ui.text_heading(&release.title);
                 let latest = if self.selected == 0 { " · Latest" } else { "" };
-                ui.label(
+                ui.text_label(
                     RichText::new(format!("v{} · {}{latest}", release.version, release.date))
                         .color(colors.muted),
                 );
                 for section in &release.sections {
                     ui.add_space(14.);
-                    ui.label(RichText::new(&section.title).strong());
+                    ui.text_label(RichText::new(&section.title).strong());
                     for change in &section.changes {
                         ui.horizontal_top(|ui| {
-                            ui.label("•");
-                            ui.add(egui::Label::new(change).wrap());
+                            ui.text_label("•");
+                            ui.add(crate::natural_text::Label::new(change).wrap());
                         });
                     }
                 }

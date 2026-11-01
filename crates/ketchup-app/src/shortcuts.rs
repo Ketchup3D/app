@@ -1,3 +1,4 @@
+use crate::natural_text::TextUi as _;
 use super::*;
 
 struct Section<'a> {
@@ -28,7 +29,7 @@ impl Section<'_> {
             .inner_margin(14)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(
+                ui.text_label(
                     RichText::new(self.title)
                         .size(15.)
                         .strong()
@@ -43,7 +44,7 @@ impl Section<'_> {
                     .max_col_width(column_width)
                     .show(ui, |ui| {
                         for (action, keys) in rows {
-                            ui.add(egui::Label::new(*action).wrap());
+                            ui.add(crate::natural_text::Label::new(*action).wrap());
                             // Keep badges compact and align them to the section's right edge.
                             ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
                                 egui::Frame::new()
@@ -53,7 +54,7 @@ impl Section<'_> {
                                     .inner_margin(egui::Margin::symmetric(7, 3))
                                     .show(ui, |ui| {
                                         ui.add(
-                                            egui::Label::new(
+                                            crate::natural_text::Label::new(
                                                 RichText::new(keys)
                                                     .monospace()
                                                     .size(11.)
@@ -196,8 +197,8 @@ impl KetchupApp {
         let response = Modal::new("keyboard_shortcuts", 940.).show(ctx, |modal| {
             let mut filter_changed = false;
             modal.header(|ui| {
-                ui.heading("Keyboard shortcuts");
-                ui.weak("Find a tool, command, or gesture.");
+                ui.text_heading("Keyboard shortcuts");
+                ui.text_weak("Find a tool, command, or gesture.");
                 ui.add_space(8.);
                 ui.horizontal(|ui| {
                     let clear_width = if self.shortcut_filter.is_empty() {
@@ -236,8 +237,8 @@ impl KetchupApp {
                 let colors = Palette::for_ui(ui);
                 if !any_matches {
                     ui.add_space(24.);
-                    ui.label(RichText::new("No shortcuts found").strong());
-                    ui.label(
+                    ui.text_label(RichText::new("No shortcuts found").strong());
+                    ui.text_label(
                         RichText::new(format!(
                             "Try a tool name like “orbit” or a key like “{command}”."
                         ))
@@ -259,7 +260,7 @@ impl KetchupApp {
                 if primary_button(ui, "Close", true).clicked() {
                     ui.close();
                 }
-                ui.weak("Lengths accept units and formulas: (1m + 20cm) / 2");
+                ui.text_weak("Lengths accept units and formulas: (1m + 20cm) / 2");
             });
         });
         if response.should_close() {
