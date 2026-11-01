@@ -211,6 +211,7 @@ impl KetchupApp {
 
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
         let response = Modal::new("general_settings", 950.)
+            .resizable(true)
             .dismissible(self.material_removal.is_none())
             .show(ctx, |modal| {
                 modal.header(|ui| {

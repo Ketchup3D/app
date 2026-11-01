@@ -49,6 +49,7 @@ pub(super) struct InspectorPreferences {
     export_stl: bool,
     sections: std::collections::BTreeMap<String, bool>,
     scroll_positions: std::collections::BTreeMap<String, [f32; 2]>,
+    modal_sizes: std::collections::BTreeMap<String, [f32; 2]>,
 }
 
 impl Default for InspectorPreferences {
@@ -79,6 +80,7 @@ impl Default for InspectorPreferences {
             export_stl: false,
             sections: Default::default(),
             scroll_positions: Default::default(),
+            modal_sizes: Default::default(),
         }
     }
 }
@@ -239,6 +241,34 @@ struct SectionMemory(
 struct ScrollMemory {
     positions: std::collections::BTreeMap<String, [f32; 2]>,
     scopes: std::collections::BTreeMap<String, egui::Id>,
+}
+
+#[derive(Clone, Default)]
+struct ModalSizes(std::collections::BTreeMap<String, [f32; 2]>);
+
+fn modal_sizes_id() -> egui::Id {
+    egui::Id::unique((PREFERENCE_KEY, "modal_sizes"))
+}
+
+pub(crate) fn modal_size(ctx: &egui::Context, key: &str) -> Option<Vec2> {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<ModalSizes>(modal_sizes_id())
+            .0
+            .get(key)
+            .copied()
+    })
+    .filter(|size| size.iter().all(|value| value.is_finite() && *value > 0.))
+    .map(|[x, y]| egui::vec2(x, y))
+}
+
+pub(crate) fn remember_modal_size(ctx: &egui::Context, key: &str, size: Vec2) {
+    if size.is_finite() && size.x > 0. && size.y > 0. {
+        ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<ModalSizes>(modal_sizes_id())
+                .0
+                .insert(key.to_owned(), [size.x, size.y]);
+        });
+    }
 }
 
 fn scroll_memory_id() -> egui::Id {
@@ -412,6 +442,10 @@ impl KetchupApp {
         );
         ctx.data_mut(|data| {
             data.insert_temp(
+                modal_sizes_id(),
+                ModalSizes(preferences.modal_sizes.clone()),
+            );
+            data.insert_temp(
                 scroll_memory_id(),
                 ScrollMemory {
                     positions: preferences.scroll_positions.clone(),
@@ -468,6 +502,11 @@ impl KetchupApp {
             export_stl: self.project.export_stl,
             sections: ctx.data_mut(|data| {
                 data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
+                    .0
+                    .clone()
+            }),
+            modal_sizes: ctx.data_mut(|data| {
+                data.get_temp_mut_or_default::<ModalSizes>(modal_sizes_id())
                     .0
                     .clone()
             }),
@@ -690,6 +729,35 @@ mod preference_tests {
     struct SavedPreferences {
         values: std::collections::BTreeMap<String, String>,
         flushed: bool,
+    }
+
+    #[test]
+    fn modal_sizes_survive_reload_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        remember_modal_size(&ctx, "general_settings", egui::vec2(820., 560.));
+        remember_modal_size(&ctx, "another_dialog", egui::vec2(480., 320.));
+        storage.flushed = false;
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        assert!(app.dirty_since.is_none());
+        let restored_ctx = egui::Context::default();
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+        assert_eq!(
+            modal_size(&restored_ctx, "general_settings"),
+            Some(egui::vec2(820., 560.))
+        );
+        assert_eq!(
+            modal_size(&restored_ctx, "another_dialog"),
+            Some(egui::vec2(480., 320.))
+        );
+        assert_eq!(modal_size(&restored_ctx, "unknown"), None);
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert!(old.modal_sizes.is_empty());
     }
 
     #[test]

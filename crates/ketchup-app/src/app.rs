@@ -71,6 +71,7 @@ mod shortcut_input;
 mod shortcuts;
 #[path = "sidebar.rs"]
 mod sidebar;
+pub(crate) use sidebar::{modal_size, remember_modal_size};
 #[path = "solid_tools.rs"]
 mod solid_tools;
 #[path = "stock_settings.rs"]

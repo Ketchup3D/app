@@ -6,6 +6,8 @@ use eframe::egui::{self, Color32, Margin, Stroke};
 pub(crate) struct Modal {
     id: egui::Id,
     width: f32,
+    key: &'static str,
+    resizable: bool,
     dismissible: bool,
 }
 
@@ -14,8 +16,16 @@ impl Modal {
         Self {
             id: egui::Id::unique(id),
             width,
+            key: id,
+            resizable: false,
             dismissible: true,
         }
+    }
+
+    /// Opt in to resizing; ordinary dialogs retain their content-sized layout.
+    pub(crate) fn resizable(mut self, resizable: bool) -> Self {
+        self.resizable = resizable;
+        self
     }
 
     pub(crate) fn dismissible(mut self, dismissible: bool) -> Self {
@@ -63,13 +73,41 @@ impl Modal {
                     }),
             )
             .show(ctx, |ui| {
-                ui.set_width(self.width.min((ctx.content_rect().width() - 32.).max(80.)));
                 ui.spacing_mut().item_spacing.y = 0.;
-                content(&mut ModalSlots {
-                    ui,
-                    id: self.id,
-                    dismissible: self.dismissible,
-                })
+                if self.resizable {
+                    let max_size = (ctx.content_rect().size() - egui::vec2(32., 32.))
+                        .max(egui::vec2(80., 80.));
+                    let size = crate::app::modal_size(ctx, self.key)
+                        .unwrap_or(egui::vec2(self.width, 790.))
+                        .min(max_size);
+                    egui::Resize::default()
+                        .id(self.id.with("resize"))
+                        .default_size(size)
+                        .min_size(egui::vec2(400., 280.).min(max_size))
+                        .max_size(max_size)
+                        .with_stroke(false)
+                        .show(ui, |ui| {
+                            let size = ui.available_size();
+                            if !ui.is_sizing_pass() {
+                                crate::app::remember_modal_size(ctx, self.key, size);
+                            }
+                            ui.set_min_size(size);
+                            content(&mut ModalSlots {
+                                ui,
+                                id: self.id,
+                                dismissible: self.dismissible,
+                                resizable: true,
+                            })
+                        })
+                } else {
+                    ui.set_width(self.width.min((ctx.content_rect().width() - 32.).max(80.)));
+                    content(&mut ModalSlots {
+                        ui,
+                        id: self.id,
+                        dismissible: self.dismissible,
+                        resizable: false,
+                    })
+                }
             });
         if response.is_top_modal && !response.any_popup_open && response.backdrop_response.clicked()
         {
@@ -107,6 +145,7 @@ impl<R> ModalResponse<R> {
 }
 
 pub(crate) struct ModalSlots<'a> {
+    resizable: bool,
     ui: &'a mut egui::Ui,
     id: egui::Id,
     dismissible: bool,
@@ -167,9 +206,14 @@ impl ModalSlots<'_> {
     ) -> R {
         let max_height =
             (self.ui.ctx().content_rect().height() - self.ui.min_rect().height() - 136.).max(24.);
+        let height = if self.resizable {
+            (self.ui.available_height() - 64.).max(24.)
+        } else {
+            height.min(max_height)
+        };
         self.ui
             .allocate_ui_with_layout(
-                egui::vec2(self.ui.available_width(), height.min(max_height)),
+                egui::vec2(self.ui.available_width(), height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
@@ -188,11 +232,27 @@ impl ModalSlots<'_> {
         // Reserve room for body padding, wrapped footer actions and screen edges.
         let max_height =
             (self.ui.ctx().content_rect().height() - self.ui.min_rect().height() - 176.).max(24.);
+        let max_height = if self.resizable {
+            (self.ui.available_height() - 104.).max(24.)
+        } else {
+            max_height
+        };
+        let scroll = if self.resizable {
+            scroll.auto_shrink([false, false])
+        } else {
+            scroll
+        };
         egui::Frame::new()
             .inner_margin(20)
             .show(self.ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.spacing_mut().item_spacing = egui::vec2(8., 8.);
+                // Areas reuse their last size. Let content-sized dialogs grow
+                // again after showing a shorter body, while still shrinking
+                // naturally and keeping the footer within the screen.
+                if !self.resizable {
+                    ui.set_max_height(max_height);
+                }
                 scroll
                     .min_scrolled_height(24.)
                     .max_height(max_height)
@@ -221,7 +281,9 @@ impl ModalSlots<'_> {
             .show(self.ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.spacing_mut().item_spacing = egui::vec2(8., 8.);
-                ui.with_layout(
+                // Fit the footer to its actions so shorter bodies can shrink.
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                     egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true),
                     content,
                 )
@@ -253,4 +315,59 @@ pub(crate) fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> e
             .stroke(Stroke::NONE)
             .corner_radius(7),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resizing_is_opt_in() {
+        assert!(!Modal::new("ordinary_dialog", 400.).resizable);
+        assert!(
+            Modal::new("settings_dialog", 950.)
+                .resizable(true)
+                .resizable
+        );
+    }
+
+    #[test]
+    fn restored_size_controls_resizable_body_dimensions() {
+        fn body_size(size: egui::Vec2) -> egui::Vec2 {
+            let ctx = egui::Context::default();
+            crate::app::remember_modal_size(&ctx, "resizable_test", size);
+            let mut body_size = egui::Vec2::ZERO;
+            for _ in 0..3 {
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1200., 1000.),
+                        )),
+                        ..Default::default()
+                    },
+                    |_| {
+                        Modal::new("resizable_test", 950.)
+                            .resizable(true)
+                            .show(&ctx, |modal| {
+                                modal.header(|ui| {
+                                    ui.heading("Resize test");
+                                });
+                                modal.body_unpadded(650., |ui| {
+                                    body_size = ui.available_size();
+                                });
+                                modal.footer(|ui| {
+                                    let _ = ui.button("Close");
+                                });
+                            });
+                    },
+                );
+            }
+            body_size
+        }
+        let small = body_size(egui::vec2(600., 400.));
+        let large = body_size(egui::vec2(900., 700.));
+        assert!((large.x - small.x - 300.).abs() < 2.);
+        assert!((large.y - small.y - 300.).abs() < 2.);
+    }
 }

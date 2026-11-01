@@ -115,6 +115,8 @@ impl ReleaseNotes {
             if self.reset_scroll || previous != self.selected {
                 scroll = scroll.vertical_scroll_offset(0.);
                 self.reset_scroll = false;
+                // Center the area again once it has measured the new body.
+                ctx.request_repaint();
             }
             let release = &self.releases[self.selected];
             modal.body_with_scroll(scroll, |ui| {
@@ -155,6 +157,58 @@ impl ReleaseNotes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modal_grows_and_shrinks_when_navigating_releases() {
+        for screen in [egui::vec2(1000., 900.), egui::vec2(600., 500.)] {
+            let ctx = egui::Context::default();
+            let mut notes = ReleaseNotes {
+                releases: [1, 40]
+                    .into_iter()
+                    .map(|count| Release {
+                        version: format!("0.0.{count}"),
+                        date: "2026-11-01".into(),
+                        title: "Test release".into(),
+                        sections: vec![Section {
+                            title: "Changes".into(),
+                            changes: vec!["A release note.".into(); count],
+                        }],
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            notes.open();
+            let show = |notes: &mut ReleaseNotes| {
+                for _ in 0..4 {
+                    let _ = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+                            ..Default::default()
+                        },
+                        |_| notes.show(&ctx),
+                    );
+                }
+                egui::AreaState::load(&ctx, egui::Id::unique("release_notes"))
+                    .unwrap()
+                    .rect()
+            };
+            let short = show(&mut notes);
+            // Repeated navigation must recover the same full height each time.
+            for _ in 0..2 {
+                notes.selected = 1;
+                notes.reset_scroll = true;
+                let long = show(&mut notes);
+                assert!(long.height() > short.height() + 40.);
+                assert!(long.bottom() <= screen.y - 16.);
+                assert!(long.top() >= 16.);
+                assert!(long.center().distance((screen * 0.5).to_pos2()) < 2.);
+                notes.selected = 0;
+                notes.reset_scroll = true;
+                let restored = show(&mut notes);
+                assert!((restored.height() - short.height()).abs() < 1.);
+            }
+        }
+    }
 
     #[test]
     fn unread_state_tracks_the_latest_displayed_version() {
