@@ -375,7 +375,8 @@ selects a different Trunk output directory. The script serves the app locally,
 launches an isolated headless browser at 1920 × 1080, waits for the loading
 screen to disappear and the rendered frame to stabilize, then saves a JPEG to
 `assets/screenshots/ketchup.jpg` and adds or updates its README image link.
-The temporary profile starts with an empty model and does not use personal
+The temporary profile loads [`assets/examples/Example.ketchup`](assets/examples/Example.ketchup),
+including its saved camera and display settings, and does not use personal
 preferences. The image reflects the supplied Web build; rebuild it separately
 when needed to capture newer application changes.
 
@@ -439,3 +440,42 @@ Verified during implementation: native Linux and browser WASM Cargo checks; core
 - `index.html` and `Trunk.toml`: static browser host and WASM development configuration.
 
 The viewport uses depth-tested filled triangles and antialiased triangle strips for consistent edge widths, CPU projection/clipping, and the same shader and editor behavior on every target. Rendering is event-driven rather than a continuous idle loop.
+
+### Account server
+
+Google login and account sessions are provided by the separate Ketchup Server
+repository at `/home/dcoulombe/dev/ketchup-server`. See its `README.md` for OAuth
+configuration and startup instructions.
+
+The account server is deployment configuration, with no address field in the app.
+Launch the desktop app with `ketchup-app --server-url https://accounts.example.com`
+or `cargo run -p ketchup-app -- --server-url http://localhost:8081`.
+Both `--server-url URL` and `--server-url=URL` are supported.
+
+Alternatively, copy `.env.example` to `.env` in the workspace root and set
+`KETCHUP_SERVER_URL`. The example uses port 8080 for the local Web client through
+Trunk; for native-only development, use port 8081. Builds embed this value for desktop and Web; changing `.env`
+causes Cargo to refresh it on the next build. You can also supply it directly:
+
+```sh
+KETCHUP_SERVER_URL=https://accounts.example.com cargo build -p ketchup-app
+KETCHUP_SERVER_URL=https://accounts.example.com trunk build --release
+```
+
+Desktop precedence is launch argument, runtime `KETCHUP_SERVER_URL`, `.env` in the
+current working directory, then the compiled value. Web uses the compiled value.
+There is no implicit server address; without configuration the modeling app runs
+with the account avatar, its separator, and the login dialog hidden. Saved user preferences
+cannot override the server address.
+
+For local desktop development, use `http://localhost:8081`. For the local Web
+client, compile with `KETCHUP_SERVER_URL=http://localhost:8080` to use the
+`Trunk.toml` account proxies to the server on port 8081. These proxies use
+`no_redirect = true` so Google login redirects reach the browser. Restart
+`trunk serve` after changing proxy configuration. Other browser deployments
+need a same-origin reverse proxy or the server's explicitly configured CORS and
+compatible cookie policies. Use HTTPS outside localhost.
+
+`.env` supports `KETCHUP_SERVER_URL=value`, single/double quoted values, optional
+`export`, and trailing comments. It is ignored by Git; do not put secrets in the
+URL because Web builds expose it to the browser.

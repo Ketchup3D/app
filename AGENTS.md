@@ -39,4 +39,8 @@ All current and future right-sidebar tables use `crate::inspector_table::Inspect
 # Project names
 
 - “KetchUp” / “Ketchup app” refers to the existing Rust desktop/WebAssembly client at this repository root.
-- “Ketchup Server” refers to the separate PHP project in `server/`. When the user names Ketchup Server, scope the work to that directory and read `server/AGENTS.md`.
+- “Ketchup Server” refers to the separate PHP repository at `/home/dcoulombe/dev/ketchup-server`. When the user names Ketchup Server, scope the work to that directory and read `/home/dcoulombe/dev/ketchup-server/AGENTS.md`.
+
+# Application language
+
+All user-facing application text must be in English, even when the user requests features or changes in French. This includes section titles, menus, controls, tooltips, notifications, and errors. Use “Automatic Fasteners” for the automatic fastener section. Preserve stable internal preference keys and saved-project compatibility when translating visible text.
