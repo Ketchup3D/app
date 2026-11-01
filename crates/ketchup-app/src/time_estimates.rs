@@ -432,43 +432,6 @@ fn format_minutes(minutes: f64) -> String {
     format!("{} h {} min", rounded / 60, rounded % 60)
 }
 
-fn estimate_kpi(
-    ui: &mut egui::Ui,
-    value: &str,
-    label: &str,
-    size: f32,
-    accent: egui::Color32,
-    corners: egui::CornerRadius,
-) {
-    let colors = Palette::for_ui(ui);
-    let tint = |amount: f32| {
-        let blend = |base: u8, color: u8| {
-            (base as f32 + (color as f32 - base as f32) * amount).round() as u8
-        };
-        egui::Color32::from_rgb(
-            blend(colors.surface.r(), accent.r()),
-            blend(colors.surface.g(), accent.g()),
-            blend(colors.surface.b(), accent.b()),
-        )
-    };
-    egui::Frame::new()
-        .fill(tint(if ui.visuals().dark_mode { 0.10 } else { 0.06 }))
-        .stroke(Stroke::new(1., tint(0.25)))
-        .corner_radius(corners)
-        .inner_margin(14)
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            // Table cells justify their children; KPI text needs natural word spacing.
-            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.add(
-                    egui::Label::new(RichText::new(value).size(size).strong().color(accent)).wrap(),
-                );
-                ui.add_space(3.);
-                ui.label(RichText::new(label).small().color(colors.ink));
-            });
-        });
-}
-
 fn rate_input(ui: &mut egui::Ui, rate: &mut f64) {
     ui.add(egui::DragValue::new(rate).speed(0.5).range(0.0..=f64::MAX));
 }
@@ -1290,50 +1253,59 @@ impl KetchupApp {
             ),
             Err(_) => "Unavailable".to_owned(),
         };
-        estimate_kpi(
-            ui,
-            &material_summary,
-            if self.selected.is_empty() {
+        let mut summary = InspectorTable::new(
+            ui.available_width(),
+            [Column::flex(1.), Column::flex(1.)],
+        )
+        .striped();
+        summary.header(ui, ["Estimate", "Value"]);
+        for (key, label, value, accent) in [
+            ("price", "Price", material_summary, colors.green),
+            (
+                "work",
+                "Hands-on work",
+                format_minutes(duration.work),
+                colors.accent,
+            ),
+            (
+                "wait",
+                "Drying / Waiting",
+                format_minutes(duration.wait),
+                colors.muted,
+            ),
+        ] {
+            // Darken accents in the light theme to keep normal-sized values readable.
+            let value_color = if ui.visuals().dark_mode {
+                accent
+            } else {
+                let darken = |channel: u8, ink: u8| {
+                    (channel as f32 * 0.65 + ink as f32 * 0.35).round() as u8
+                };
+                egui::Color32::from_rgb(
+                    darken(accent.r(), colors.ink.r()),
+                    darken(accent.g(), colors.ink.g()),
+                    darken(accent.b(), colors.ink.b()),
+                )
+            };
+            summary.row(ui, ("estimate_summary", key), |column, cell| {
+                cell.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    if column == 0 {
+                        ui.label(label);
+                    } else {
+                        ui.label(RichText::new(&value).strong().color(value_color));
+                    }
+                });
+            });
+        }
+        ui.label(
+            RichText::new(if self.selected.is_empty() {
                 "Materials · All visible parts"
             } else {
                 "Materials · Selected parts"
-            },
-            30.,
-            colors.green,
-            egui::CornerRadius {
-                nw: 8,
-                ne: 8,
-                sw: 0,
-                se: 0,
-            },
+            })
+            .small()
+            .color(colors.muted),
         );
-        // The material tile and the two time tiles form one joined dashboard.
-        ui.add_space(-ui.spacing().item_spacing.y);
-        let mut summary = InspectorTable::with_column_spacing(
-            ui.available_width(),
-            [Column::flex(1.), Column::flex(1.)],
-            0.,
-        );
-        summary.row(ui, "estimate_summary_times", |column, cell| {
-            let (minutes, label, background) = if column == 0 {
-                (duration.work, "Hands-on work", colors.accent)
-            } else {
-                (duration.wait, "Drying / Waiting", colors.muted)
-            };
-            estimate_kpi(
-                cell,
-                &format_minutes(minutes),
-                label,
-                20.,
-                background,
-                egui::CornerRadius {
-                    nw: 0,
-                    ne: 0,
-                    sw: if column == 0 { 8 } else { 0 },
-                    se: if column == 1 { 8 } else { 0 },
-                },
-            );
-        });
         ui.add_space(8.);
         ui.label(
             RichText::new("Time covers sanding and finishing, including final drying.")
