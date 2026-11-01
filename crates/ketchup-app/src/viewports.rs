@@ -690,6 +690,7 @@ impl KetchupApp {
                 );
             }
             self.paint_compass(ui, response);
+            crate::environment::paint_sun_hint(ui.painter(), *rect, &self.doc.camera, &self.doc.display);
             if self.general_settings.show_fps {
                 crate::frame_rate::paint(ui, *rect);
             } else {

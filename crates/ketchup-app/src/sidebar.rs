@@ -1906,6 +1906,8 @@ mod preference_tests {
         set_section_open(&ctx, "settings/stock/wood", false);
         app.doc.display.grid_auto_size = false;
         app.doc.display.grid_spacing = 0.0254;
+        app.doc.display.grid_infinite = false;
+        app.doc.display.grid_max_length = 30.48;
         app.doc.display.axis_colors = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
         app.doc.display.inference_color = [10, 11, 12];
         app.doc.display.midpoint_color = [13, 14, 15];

@@ -3707,7 +3707,7 @@ impl KetchupApp {
         }
         let display = &themed_display;
         if background {
-            crate::environment::paint(&p, rect, camera, display, ui.visuals().dark_mode);
+            crate::environment::paint(&p, rect, camera, display, ui.visuals().dark_mode, self.doc.display.shadows);
         }
         // Transient previews and annotation layout use the normal render path.
         // Plain model redraws retain the complete CPU/GPU mesh until an input
@@ -3779,9 +3779,9 @@ impl KetchupApp {
             mesh.set_display(display);
             if self.doc.display.grid {
                 let colors = GridPalette::for_ui(ui);
-                for (a, b, major) in grid::configured_lines(camera, &self.doc.display) {
-                    let color = if major { colors.major } else { colors.minor };
-                    mesh.background_line(camera, a, b, if major { 0.8 } else { 0.55 }, color);
+                for line in grid::visible_lines(camera, &self.doc.display, size) {
+                    let color = if line.major { colors.major } else { colors.minor };
+                    mesh.background_grid_line(line.points, line.opacity, line.major, color);
                 }
             }
             for axis in [Axis::X, Axis::Y, Axis::Z]

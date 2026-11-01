@@ -38,8 +38,21 @@ pub fn paint(
     camera: &Camera,
     display: &DisplaySettings,
     dark: bool,
+    sun_visible: bool,
 ) {
     painter.add(backdrop(rect, camera, display, dark));
+    // Editing emphasis can suppress face shadows without hiding the user's sun.
+    if sun_visible
+        && let Some(center) = sun_center(rect, camera, display)
+    {
+        let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+        // A fixed angular marker belongs to the distant sky, behind the model.
+        for (radius, alpha) in [(24., 8), (19., 14), (14., 26)] {
+            painter.circle_filled(center, radius, Color32::from_rgba_unmultiplied(255, 207, 90, alpha));
+        }
+        painter.circle_filled(center, 9., Color32::from_rgb(255, 222, 115));
+        painter.circle_filled(center, 6., Color32::from_rgb(255, 245, 194));
+    }
     let horizon = horizon_fraction(camera);
     if (display.sky || display.ground) && (0. ..=1.).contains(&horizon) {
         let [r, g, b] = display.horizon_color;
@@ -49,6 +62,31 @@ pub fn paint(
             egui::Stroke::new(1., Color32::from_rgb(r, g, b)),
         );
     }
+}
+
+// The sun is at infinity: panning and camera distance cannot move it. Use the
+// same world-space light direction as shadow casting, projected into the sky.
+fn sun_center(rect: Rect, camera: &Camera, display: &DisplaySettings) -> Option<egui::Pos2> {
+    let angle = display.sun_angle.to_radians();
+    let elevation = display.sun_elevation.to_radians();
+    let light = ketchup_core::DVec3::new(
+        angle.cos() * elevation.cos(),
+        angle.sin() * elevation.cos(),
+        elevation.sin(),
+    );
+    let forward = ketchup_core::DVec3::new(
+        -camera.pitch.cos() * camera.yaw.cos(),
+        -camera.pitch.cos() * camera.yaw.sin(),
+        -camera.pitch.sin(),
+    );
+    let depth = light.dot(forward);
+    if depth <= 1e-6 { return None; }
+    let scale = rect.height() as f64 / (2. * (camera.fov * 0.5).tan());
+    let center = rect.center() + egui::vec2(
+        (light.dot(camera.right()) * scale / depth) as f32,
+        (-light.dot(camera.up()) * scale / depth) as f32,
+    );
+    (center.is_finite() && rect.expand(24.).contains(center)).then_some(center)
 }
 
 fn horizon_fraction(camera: &Camera) -> f64 {
@@ -219,6 +257,24 @@ mod tests {
     use ketchup_core::{DVec2, DVec3, Document};
 
     #[test]
+    fn sun_tracks_light_direction_and_camera_rotation_but_not_pan_or_distance() {
+        let rect = Rect::from_min_size(egui::pos2(20., 50.), egui::vec2(900., 600.));
+        let display = DisplaySettings { shadows: true, sun_angle: 0., sun_elevation: 45., ..Default::default() };
+        let camera = Camera { yaw: std::f64::consts::PI, pitch: -45_f64.to_radians(), ..Default::default() };
+        let center = sun_center(rect, &camera, &display).unwrap();
+        assert!(center.distance(rect.center()) < 0.01);
+        let mut moved = camera.clone();
+        moved.target = DVec3::new(100., 200., 300.);
+        moved.distance *= 10.;
+        assert_eq!(sun_center(rect, &moved, &display), Some(center));
+        moved.yaw += 0.1;
+        assert!(sun_center(rect, &moved, &display).unwrap().distance(center) > 10.);
+        moved.yaw = 0.;
+        moved.pitch = 45_f64.to_radians();
+        assert!(sun_center(rect, &moved, &display).is_none());
+    }
+
+    #[test]
     fn horizon_matches_camera_rays_and_stays_fixed_when_panning_or_zooming() {
         let rect = Rect::from_min_size(egui::pos2(20., 50.), egui::vec2(900., 600.));
         for pitch in [-1.5, -0.2, 0., 0.2, 0.62, 1.5] {
@@ -343,5 +399,52 @@ mod tests {
             restored.display.ground_color,
             DisplaySettings::default().ground_color
         );
+    }
+}
+
+/// Keep the sun's direction discoverable when the sky itself is outside the view.
+pub(crate) fn paint_sun_hint(painter: &egui::Painter, rect: Rect, camera: &Camera, display: &DisplaySettings) {
+    let Some((center, direction)) = sun_hint_position(rect, camera, display) else { return; };
+    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+    painter.circle_filled(center, 14., Color32::from_black_alpha(120));
+    crate::icons::line_icon(&painter, center, "sun", Color32::from_rgb(255, 222, 115));
+    painter.arrow(center + direction * 15., direction * 7., egui::Stroke::new(1.5, Color32::from_rgb(255, 222, 115)));
+}
+
+fn sun_hint_position(rect: Rect, camera: &Camera, display: &DisplaySettings) -> Option<(egui::Pos2, egui::Vec2)> {
+    if !display.shadows || sun_center(rect, camera, display).is_some_and(|center| rect.contains(center)) {
+        return None;
+    }
+    let angle = display.sun_angle.to_radians();
+    let elevation = display.sun_elevation.to_radians();
+    let light = ketchup_core::DVec3::new(angle.cos() * elevation.cos(), angle.sin() * elevation.cos(), elevation.sin());
+    let mut direction = egui::vec2(light.dot(camera.right()) as f32, -light.dot(camera.up()) as f32);
+    if direction.length_sq() < 1e-8 { direction = egui::vec2(0., -1.); }
+    direction = direction.normalized();
+    let half = (rect.size() * 0.5 - egui::Vec2::splat(26.)).max(egui::Vec2::splat(1.));
+    let distance = (half.x / direction.x.abs()).min(half.y / direction.y.abs());
+    Some((rect.center() + direction * distance, direction))
+}
+
+#[cfg(test)]
+mod sun_hint_tests {
+    use super::*;
+    #[test]
+    fn sun_stays_discoverable_during_normal_orbits_and_hides_when_disabled() {
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900., 600.));
+        let mut display = DisplaySettings { shadows: true, ..Default::default() };
+        for yaw in [-3., -1.5, 0., 1.5, 3.] {
+            let camera = Camera { yaw, ..Default::default() };
+            let (center, direction) = sun_hint_position(rect, &camera, &display).unwrap();
+            assert!(rect.shrink(24.).contains(center));
+            assert!((direction.length() - 1.).abs() < 0.001);
+        }
+        let camera = Camera {
+            yaw: display.sun_angle.to_radians() + std::f64::consts::PI,
+            pitch: -display.sun_elevation.to_radians(), ..Default::default()
+        };
+        assert!(sun_hint_position(rect, &camera, &display).is_none());
+        display.shadows = false;
+        assert!(sun_hint_position(rect, &Camera::default(), &display).is_none());
     }
 }

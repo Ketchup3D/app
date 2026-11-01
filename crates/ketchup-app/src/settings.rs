@@ -1,4 +1,3 @@
-use crate::natural_text::TextUi as _;
 use super::shortcut_input::{shortcut_input, valid_tool_key};
 use super::*;
 use crate::inspector_table::{Column, InspectorTable, inspector_field};
@@ -438,34 +437,68 @@ impl KetchupApp {
                 Self::unit_settings_contents(ui, &mut self.general_settings.default_units);
             }
             Section::Grid => {
-                ui.checkbox(&mut self.doc.display.grid, "Show grid");
-                ui.checkbox(&mut self.snap_to_grid, "Snap to grid");
-                ui.checkbox(
-                    &mut self.doc.display.grid_auto_size,
-                    "Automatically size grid when zooming",
-                );
+                inspector_field(ui, "settings/grid/show", "Show grid", |ui| {
+                    ui.checkbox(&mut self.doc.display.grid, "")
+                });
+                inspector_field(ui, "settings/grid/snap", "Snap to grid", |ui| {
+                    ui.checkbox(&mut self.snap_to_grid, "")
+                });
+                inspector_field(ui, "settings/grid/infinite", "Infinite grid", |ui| {
+                    ui.checkbox(&mut self.doc.display.grid_infinite, "")
+                });
                 let unit = self.doc.display.units.length;
+                if !self.doc.display.grid_infinite {
+                    grid_length_control(
+                        ui,
+                        "settings/grid/max_length",
+                        "Maximum length",
+                        &mut self.doc.display.grid_max_length,
+                        unit,
+                    );
+                    ui.text_weak("Length of each side of the square, centered on the model origin. The boundary stays fixed when zooming or rotating.");
+                }
+                inspector_field(
+                    ui,
+                    "settings/grid/auto_size",
+                    "Automatically size grid when zooming",
+                    |ui| ui.checkbox(&mut self.doc.display.grid_auto_size, ""),
+                );
                 ui.add_enabled_ui(!self.doc.display.grid_auto_size, |ui| {
-                    let mut spacing = self.doc.display.grid_spacing / unit.factor();
-                    ui.horizontal(|ui| {
-                        ui.text_label("Grid spacing");
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut spacing)
-                                    .range((0.000001 / unit.factor())..=(1e6 / unit.factor()))
-                                    .speed(0.1)
-                                    .suffix(format!(" {}", unit.symbol())),
-                            )
-                            .changed()
-                        {
-                            self.doc.display.grid_spacing = spacing * unit.factor();
-                        }
-                    });
+                    grid_length_control(
+                        ui,
+                        "settings/grid/spacing",
+                        "Grid spacing",
+                        &mut self.doc.display.grid_spacing,
+                        unit,
+                    );
                 });
                 ui.text_weak("Spacing controls both grid lines and grid snapping. Every fifth line is emphasized.");
             }
         }
     }
+}
+
+fn grid_length_control(
+    ui: &mut egui::Ui,
+    key: &'static str,
+    label: &str,
+    meters: &mut f64,
+    unit: LengthUnit,
+) -> egui::Response {
+    let mut value = *meters / unit.factor();
+    let response = inspector_field(ui, key, label, |ui| {
+        ui.add_sized(
+            [ui.available_width(), 0.],
+            egui::DragValue::new(&mut value)
+                .range((0.000001 / unit.factor())..=(1e6 / unit.factor()))
+                .speed(0.1)
+                .suffix(format!(" {}", unit.symbol())),
+        )
+    });
+    if response.changed() && value.is_finite() {
+        *meters = (value * unit.factor()).clamp(0.000001, 1e6);
+    }
+    response
 }
 
 fn color_row(ui: &mut egui::Ui, label: &str, color: &mut [u8; 3]) {
@@ -477,6 +510,157 @@ fn color_row(ui: &mut egui::Ui, label: &str, color: &mut [u8; 3]) {
 
 #[cfg(test)]
 mod tests {
+    fn rendered_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        fn collect(shape: &egui::Shape, text: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(value) => text.push(value.galley.job.text.clone()),
+                egui::Shape::Vec(values) => {
+                    for value in values {
+                        collect(value, text);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut text = Vec::new();
+        for shape in shapes {
+            collect(&shape.shape, &mut text);
+        }
+        text
+    }
+
+    #[test]
+    fn grid_length_field_converts_project_units_on_display_and_input() {
+        fn frame(
+            ctx: &egui::Context,
+            time: &mut f64,
+            length: &mut f64,
+            unit: LengthUnit,
+            events: Vec<egui::Event>,
+        ) -> (Rect, Vec<String>) {
+            *time += 0.02;
+            let mut rect = Rect::NOTHING;
+            let mut output = ctx.run_test_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800., 300.))),
+                    time: Some(*time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    rect =
+                        grid_length_control(ui, "test_grid_length", "Maximum length", length, unit)
+                            .rect;
+                },
+            );
+            let text = rendered_text(&output.shapes);
+            output.textures_delta.clear();
+            (rect, text)
+        }
+        for unit in [
+            LengthUnit::Meters,
+            LengthUnit::Feet,
+            LengthUnit::Inches,
+            LengthUnit::Millimeters,
+        ] {
+            let ctx = egui::Context::default();
+            let mut time = 0.;
+            let mut length = 3.048;
+            let (rect, text) = frame(&ctx, &mut time, &mut length, unit, vec![]);
+            assert!(
+                text.iter()
+                    .any(|s| s.ends_with(&format!(" {}", unit.symbol())))
+            );
+            assert_eq!(
+                length, 3.048,
+                "Changing display units changed the physical length"
+            );
+            let pos = rect.center();
+            for pressed in [true, false] {
+                frame(
+                    &ctx,
+                    &mut time,
+                    &mut length,
+                    unit,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            let command = egui::Modifiers {
+                ctrl: true,
+                command: true,
+                ..Default::default()
+            };
+            frame(
+                &ctx,
+                &mut time,
+                &mut length,
+                unit,
+                vec![
+                    egui::Event::ModifiersChanged(command),
+                    egui::Event::Key {
+                        key: Key::A,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: command,
+                    },
+                    egui::Event::Text("12".into()),
+                ],
+            );
+            frame(
+                &ctx,
+                &mut time,
+                &mut length,
+                unit,
+                vec![egui::Event::Key {
+                    key: Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            assert!(
+                (length - 12. * unit.factor()).abs() < 1e-9,
+                "Input did not convert {:?}: {length}",
+                unit
+            );
+            let physical_length = length;
+            for changed_unit in [
+                LengthUnit::Meters,
+                LengthUnit::Feet,
+                LengthUnit::Millimeters,
+            ] {
+                frame(&ctx, &mut time, &mut length, changed_unit, vec![]);
+                assert_eq!(length, physical_length);
+            }
+        }
+    }
+
+    #[test]
+    fn finite_grid_length_control_only_appears_when_infinite_is_disabled() {
+        for infinite in [true, false] {
+            let ctx = egui::Context::default();
+            let mut app = KetchupApp::with_document(Document::default(), None, true);
+            app.general_settings.section = Section::Grid;
+            app.doc.display.grid_infinite = infinite;
+            let mut output =
+                ctx.run_test_ui(egui::RawInput::default(), |ui| app.settings_contents(ui));
+            let text = rendered_text(&output.shapes);
+            output.textures_delta.clear();
+            assert!(text.iter().any(|s| s == "Infinite grid"));
+            assert_eq!(text.iter().any(|s| s == "Maximum length"), !infinite);
+        }
+    }
+
     #[test]
     fn settings_groups_include_every_section_once() {
         let grouped: Vec<_> = super::Section::GROUPS

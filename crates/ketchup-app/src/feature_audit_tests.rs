@@ -25,6 +25,8 @@ pub(super) fn render_cases() -> Vec<RenderCase> {
             let key = match key.as_str() {
                 "axes" => "axes",
                 "grid" => "grid",
+                "grid_auto_size" => "grid_auto_size",
+                "grid_infinite" => "grid_infinite",
                 "guides" => "guides",
                 "dimensions" => "dimensions",
                 "hidden_geometry" => "hidden_geometry",
@@ -65,6 +67,8 @@ pub(super) fn render_cases() -> Vec<RenderCase> {
     }
     for (key, a, b) in [
         ("profile_width", 1., 8.),
+        ("grid_spacing", 0.25, 2.),
+        ("grid_max_length", 4., 30.),
         ("section_height", 0.5, 1.5),
         ("shadow_darkness", 0., 1.),
         ("sun_angle", 0., 180.),
@@ -74,7 +78,14 @@ pub(super) fn render_cases() -> Vec<RenderCase> {
     ] {
         pair(key, key, a.into(), b.into());
     }
-    for key in ["background", "sky_color", "ground_color", "horizon_color"] {
+    for key in [
+        "background",
+        "sky_color",
+        "ground_color",
+        "horizon_color",
+        "inference_color",
+        "midpoint_color",
+    ] {
         pair(
             key,
             key,
@@ -139,6 +150,19 @@ pub(super) fn render_workspace(name: &str) -> KetchupApp {
     app.doc.camera.target = DVec3::new(1., 0., 1.);
     app.doc.camera.distance = 22.;
     match case.key {
+        "grid_auto_size" | "grid_spacing" | "grid_infinite" | "grid_max_length" => {
+            app.doc.display.grid = true;
+            app.doc.display.grid_spacing = 0.25;
+            if case.key == "grid_spacing" {
+                app.doc.display.grid_auto_size = false;
+            }
+            if case.key == "grid_max_length" {
+                app.doc.display.grid_infinite = false;
+            }
+            if case.key == "grid_infinite" {
+                app.doc.display.grid_max_length = 8.;
+            }
+        }
         "group_emphasis" => assert!(app.doc.model.enter_object(first)),
         "guides" => {
             app.set_tool(Tool::Line);

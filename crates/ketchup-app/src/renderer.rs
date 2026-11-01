@@ -604,17 +604,33 @@ impl Mesh {
         clipped_annotation_shapes(painter, viewport, shape, &visible)
     }
 
-    pub fn background_line(
+    pub fn background_grid_line(
         &mut self,
-        _camera: &Camera,
-        a: DVec3,
-        b: DVec3,
-        width: f64,
+        points: [DVec2; 2],
+        opacity: [f32; 2],
+        major: bool,
         color: Color32,
     ) {
-        if let Some((a, b)) = self.view.segment(a, b) {
-            self.line(a.extend(1.), b.extend(1.), width, color);
+        let [a, b] = points;
+        let normal = DVec2::new(-(b - a).y, (b - a).x).normalize();
+        let width = if major { 0.8 } else { 0.55 };
+        let fringe = (normal.x.abs() + normal.y.abs()) / self.pixels_per_point;
+        let offset = normal * (width + fringe) * 0.5;
+        let base = self.vertices.len() as u32;
+        for (endpoint, lateral) in [(0, 1.), (0, -1.), (1, 1.), (1, -1.)] {
+            let p = [a, b][endpoint] + offset * lateral;
+            self.vertices.push(Vertex {
+                position: [
+                    (p.x / self.size.x * 2. - 1.) as f32,
+                    (1. - p.y / self.size.y * 2.) as f32,
+                    1.,
+                ],
+                color: color.gamma_multiply(opacity[endpoint]).to_array(),
+                lateral: lateral as f32,
+            });
         }
+        self.indices
+            .extend([base, base + 1, base + 2, base + 2, base + 1, base + 3]);
     }
     pub fn world_triangle(&mut self, _camera: &Camera, triangle: [DVec3; 3], color: Color32) {
         self.face_triangle(triangle, color, true, true);
