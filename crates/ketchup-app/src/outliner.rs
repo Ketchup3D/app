@@ -1113,7 +1113,7 @@ mod tests {
         assert!(app.selected.is_empty());
         app.doc.model.edit_context = None;
         assert_eq!(app.doc.model, original);
-        assert!(app.history.undo_label().is_none());
+        assert!(app.doc.history.undo_label().is_none());
     }
 
     #[test]
@@ -1317,7 +1317,7 @@ mod tests {
             assert_eq!(app.selected, BTreeSet::from([group]));
             assert_eq!(app.doc.model.edit_context, None);
         }
-        assert_eq!(app.history.undo_label(), Some("Unhide"));
+        assert_eq!(app.doc.history.undo_label(), Some("Unhide"));
         app.undo(&ctx, false);
         assert!(app.doc.model.hidden.contains(&component));
         let restored = Document::from_json(&serde_json::to_string(&app.doc).unwrap()).unwrap();

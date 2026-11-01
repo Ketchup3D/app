@@ -5,6 +5,7 @@ pub mod display;
 pub mod document;
 pub mod edit_context;
 pub mod faces;
+mod history;
 pub mod inference;
 pub mod measurements;
 pub mod modeling;

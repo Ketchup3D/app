@@ -1420,7 +1420,7 @@ fn closing_a_shape_against_existing_geometry_stops_drawing_like_escape() {
     assert!(h.app.drawing.is_none());
     assert!(h.app.length_input.is_empty());
     assert_eq!(h.app.tool, Tool::Line);
-    assert_eq!(h.app.history.undo_label(), Some("Draw line"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Draw line"));
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model.edges.len(), 3);
     assert!(h.app.doc.model.faces.is_empty());
@@ -1493,7 +1493,7 @@ fn eraser_hovers_and_erases_face_interiors_without_removing_boundary_edges() {
     assert!(!h.app.doc.model.faces.contains_key(&face));
     assert_eq!(h.app.doc.model.edges, before.edges);
     assert_eq!(h.app.doc.model.vertices, before.vertices);
-    assert_eq!(h.app.history.undo_label(), Some("Erase geometry"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Erase geometry"));
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model, before);
     h.app.undo(&h.ctx, true);
@@ -1521,7 +1521,7 @@ fn eraser_stroke_within_a_face_previews_and_commits_one_undo_step() {
     assert_eq!(h.app.doc.model.edges, before.edges);
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model, before);
-    assert!(h.app.history.undo_label().is_none());
+    assert!(h.app.doc.history.undo_label().is_none());
 }
 
 #[test]
@@ -1554,7 +1554,7 @@ fn eraser_face_targets_respect_hidden_and_locked_objects() {
             assert_eq!(h.app.hover, None);
             h.click(cursor);
             assert_eq!(h.app.doc.model, before);
-            assert!(h.app.history.undo_label().is_none());
+            assert!(h.app.doc.history.undo_label().is_none());
         }
     }
 }
@@ -2529,7 +2529,7 @@ fn context_menu_preserves_multiselection_groups_and_ungroups_through_pointer_inp
     h.click(text_position(&menu, "Ungroup"));
     assert!(h.app.doc.model.objects.is_empty());
     assert_eq!(h.app.selected.len(), 2);
-    assert_eq!(h.app.history.undo_label(), Some("Ungroup"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Ungroup"));
 }
 
 #[test]
@@ -2687,7 +2687,7 @@ fn push_pull_pointer_preview_numeric_commit_cancel_and_undo() {
     modeling_number(&mut h, "2");
     assert!(h.app.modeling.is_none());
     assert_eq!(h.app.doc.model.faces.len(), 6);
-    assert_eq!(h.app.history.undo_label(), Some("Push/Pull"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Push/Pull"));
     assert_ne!(h.app.selected, BTreeSet::from([face]));
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model, original);
@@ -2696,7 +2696,7 @@ fn push_pull_pointer_preview_numeric_commit_cancel_and_undo() {
     h.key(Key::Escape);
     assert!(h.app.modeling.is_none());
     assert_eq!(h.app.doc.model, original);
-    assert!(h.app.history.undo_label().is_none());
+    assert!(h.app.doc.history.undo_label().is_none());
 }
 
 #[test]
@@ -2736,7 +2736,7 @@ fn offset_then_push_down_previews_and_commits_an_open_recess() {
     let (floor, _, point) = h.app.doc.model.nearest_face(ray).unwrap();
     assert!(point.distance(DVec3::new(2., 2., -1.)) < 1e-6);
     assert_eq!(h.app.selected, BTreeSet::from([floor]));
-    assert_eq!(h.app.history.undo_label(), Some("Push/Pull"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Push/Pull"));
     h.app.doc.model.validate().unwrap();
     let after = h.app.doc.model.clone();
     h.app.undo(&h.ctx, false);
@@ -2765,13 +2765,13 @@ fn move_and_scale_real_pointer_clicks_and_axis_locked_numeric_distance() {
             .values()
             .all(|v| (v.position.z - 3.).abs() < 1e-6)
     );
-    assert_eq!(h.app.history.undo_label(), Some("Move"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Move"));
     h.key(Key::S);
     let reference = h.at(DVec3::new(3., 3., 3.));
     h.click(reference);
     modeling_number(&mut h, "0.5");
     assert!((h.app.doc.model.face_area(&h.app.doc.model.faces[&face]) - 4.).abs() < 1e-7);
-    assert_eq!(h.app.history.undo_label(), Some("Scale"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Scale"));
     h.key(Key::M);
     let start = h.at(DVec3::new(2., 2., 3.));
     h.click(start);
@@ -2792,7 +2792,7 @@ fn offset_and_paint_through_viewport_preserve_history_and_saved_color() {
     modeling_number(&mut h, "0.5");
     assert!(h.app.modeling.is_none());
     assert_eq!(h.app.doc.model.edges.len(), 8);
-    assert_eq!(h.app.history.undo_label(), Some("Offset"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Offset"));
     h.key(Key::B);
     assert!(h.app.inspector);
     h.app.paint_color = [45, 103, 188];
@@ -2801,7 +2801,7 @@ fn offset_and_paint_through_viewport_preserve_history_and_saved_color() {
     let colors = h.app.doc.model.face_colors.clone();
     assert_eq!(colors.len(), 1);
     assert_eq!(colors.values().next(), Some(&[45, 103, 188]));
-    assert_eq!(h.app.history.undo_label(), Some("Paint face"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Paint face"));
     h.app.undo(&h.ctx, false);
     assert!(h.app.doc.model.face_colors.is_empty());
     h.app.undo(&h.ctx, true);
@@ -2890,7 +2890,7 @@ fn move_preview_and_commit_combine_two_reference_axes_and_undo_exactly() {
     h.click(cursor);
     assert!(h.app.modeling.is_none());
     assert!((h.app.doc.model.vertices[&vertex].position - target).length() < 1e-7);
-    assert_eq!(h.app.history.undo_label(), Some("Move"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Move"));
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model, before);
 }
@@ -3225,7 +3225,7 @@ fn tape_measure_snaps_reads_distance_and_restarts_without_editing_geometry() {
     );
     assert_eq!(h.app.measurement_value().as_deref(), Some("5.000 m"));
     assert_eq!(h.app.doc.model, before);
-    assert!(h.app.history.undo_label().is_none());
+    assert!(h.app.doc.history.undo_label().is_none());
     h.click(h.at(a));
     assert_eq!(h.app.measurement.as_ref().unwrap().points.len(), 1);
     h.key(Key::Escape);
@@ -3254,7 +3254,7 @@ fn protractor_uses_three_snapped_points_and_measures_in_three_dimensions() {
     assert!(h.app.measurement.as_ref().unwrap().complete);
     assert_eq!(h.app.measurement_value().as_deref(), Some("45.00°"));
     assert_eq!(h.app.doc.model, before);
-    assert!(h.app.history.undo_label().is_none());
+    assert!(h.app.doc.history.undo_label().is_none());
     h.key(Key::M);
     assert!(h.app.measurement.is_none());
 }
@@ -3278,7 +3278,7 @@ fn dimensions_commit_only_after_placement_and_support_selection_delete_and_undo(
     assert!(h.app.measurement.is_none());
     assert_eq!(h.app.doc.model.dimensions.len(), 1);
     assert_eq!(h.app.doc.model.edges.len(), 1);
-    assert_eq!(h.app.history.undo_label(), Some("Add dimension"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Add dimension"));
     let id = *h.app.doc.model.dimensions.keys().next().unwrap();
     let dimension = &h.app.doc.model.dimensions[&id];
     assert!((dimension.length(&h.app.doc.model) - 4.).abs() < 1e-7);
@@ -3704,7 +3704,7 @@ fn move_copy_modifier_toggles_live_preview_on_windows_and_mac() {
         );
         assert_eq!(h.app.selected.len(), 1);
         assert!(h.app.selected.iter().all(|id| !before.contains_entity(id)));
-        assert_eq!(h.app.history.undo_label(), Some("Move copy"));
+        assert_eq!(h.app.doc.history.undo_label(), Some("Move copy"));
         h.app.undo(&h.ctx, false);
         assert_eq!(h.app.doc.model, before);
         h.app.undo(&h.ctx, true);
@@ -3735,7 +3735,7 @@ fn move_copy_arrays_divide_repeat_revise_and_undo_as_one_operation() {
     }
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model, before);
-    assert_eq!(h.app.history.undo_label(), None);
+    assert_eq!(h.app.doc.history.undo_label(), None);
     h.app.undo(&h.ctx, true);
     assert_copy_positions(&h, &[0., 6.]);
     assert!(h.app.last_move_copy.is_none());
@@ -3770,7 +3770,7 @@ fn move_copy_cancel_tool_switch_and_other_edits_clear_array_state() {
     assert_eq!(h.app.doc.model, before);
     assert!(h.app.modeling.is_none());
     assert!(!h.app.move_copy);
-    assert_eq!(h.app.history.undo_label(), None);
+    assert_eq!(h.app.doc.history.undo_label(), None);
 
     let start = h.at(DVec3::ZERO);
     h.click(start);
@@ -4134,7 +4134,7 @@ fn solid_flyout_contains_all_six_tools_and_union_applies_to_selection_with_undo(
     );
     assert_eq!(h.app.solid_tool, Tool::Union);
     assert_eq!(h.app.doc.model.objects.len(), 1);
-    assert_eq!(h.app.history.undo_label(), Some("Union"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Union"));
     let result = *h.app.selected.first().unwrap();
     assert!((h.app.doc.model.solid_volume(result).unwrap() - 12.).abs() < 1e-6);
     h.app.undo(&h.ctx, false);
@@ -4163,7 +4163,7 @@ fn trim_picks_cutter_then_target_and_cancel_never_edits_geometry() {
     h.click(target);
     assert!(h.app.doc.model.objects.contains_key(&a));
     assert!(!h.app.doc.model.objects.contains_key(&b));
-    assert_eq!(h.app.history.undo_label(), Some("Trim"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Trim"));
     let result = *h.app.selected.first().unwrap();
     assert!((h.app.doc.model.solid_volume(result).unwrap() - 4.).abs() < 1e-6);
 }
@@ -4220,7 +4220,7 @@ fn intersect_accepts_a_preselected_face_and_group_or_a_face_as_the_first_click()
             h.click(h.at(DVec3::new(1., 1., 2.)));
         }
         assert!(h.app.solid_first.is_none());
-        assert_eq!(h.app.history.undo_label(), Some("Intersect"));
+        assert_eq!(h.app.doc.history.undo_label(), Some("Intersect"));
         let result = h.app.doc.model.copy_entities(&h.app.selected);
         assert_eq!(result.faces.len(), 1);
         assert!(
@@ -4256,15 +4256,15 @@ fn flip_uses_keyboard_inspector_and_clickable_planes_without_detaching_objects()
         assert!((q - DVec3::new(2. * center.x - p.x, p.y, p.z)).length() < 1e-7);
     }
     assert!(h.app.doc.model.objects.contains_key(&a));
-    assert_eq!(h.app.history.undo_label(), Some("Flip X"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Flip X"));
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&output, "Y / green"));
-    assert_eq!(h.app.history.undo_label(), Some("Flip Y"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Flip Y"));
     let point = h.at(center + DVec3::new(0., 0.6, 0.4));
     let axis = h.app.flip_plane_at(point).unwrap();
     h.click(point);
     assert_eq!(
-        h.app.history.undo_label(),
+        h.app.doc.history.undo_label(),
         Some(match axis {
             Axis::X => "Flip X",
             Axis::Y => "Flip Y",
@@ -4906,7 +4906,7 @@ fn generate_menu_is_next_to_edit_and_woodworking_opens_cancellable_scope_dialog(
     assert!(h.app.project.cutting_plan_selection.is_none());
     assert!(h.app.project.pending.is_none());
     assert!(!h.app.project.modified);
-    assert!(h.app.history.undo_label().is_none());
+    assert!(h.app.doc.history.undo_label().is_none());
     drop(output);
 }
 
@@ -4936,7 +4936,7 @@ fn generate_screenshot_dialog_supports_multiple_views_and_cancels_without_editin
     assert!(h.app.screenshot.settings.views[3]);
     assert_eq!(h.app.doc, before);
     assert!(h.app.project.pending.is_none());
-    assert!(h.app.history.undo_label().is_none());
+    assert!(h.app.doc.history.undo_label().is_none());
 }
 
 #[test]
@@ -5300,7 +5300,7 @@ fn push_pull_snaps_to_another_groups_edge_and_honors_preferences() {
             .values()
             .any(|v| (v.position.z - 2.5).abs() < 1e-7 && v.position.x <= 4.)
     );
-    assert_eq!(h.app.history.undo_label(), Some("Push/Pull"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Push/Pull"));
 }
 
 #[test]

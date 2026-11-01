@@ -191,7 +191,7 @@ fn outliner_context_menu_expands_and_collapses_selected_subtrees() {
         );
     }
     assert_eq!(h.app.doc.model, model);
-    assert_eq!(h.app.history.undo_label(), None);
+    assert_eq!(h.app.doc.history.undo_label(), None);
     assert!(!h.app.project.modified);
     assert!(h.app.dirty_since.is_none());
 }
@@ -208,14 +208,14 @@ fn outliner_context_menu_preserves_multiselection_and_runs_shared_commands() {
     h.click(text_position(&menu, "Hide"));
     assert_eq!(h.app.doc.model.hidden, BTreeSet::from([a, b]));
     assert!(h.app.selected.is_empty());
-    assert_eq!(h.app.history.undo_label(), Some("Hide"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Hide"));
 
     let row = outliner_row(&mut h, "First");
     let menu = open_context_menu(&mut h, row);
     assert_eq!(h.app.selected, BTreeSet::from([a]));
     h.click(text_position(&menu, "Unhide"));
     assert_eq!(h.app.doc.model.hidden, BTreeSet::from([b]));
-    assert_eq!(h.app.history.undo_label(), Some("Unhide"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Unhide"));
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model.hidden, BTreeSet::from([a, b]));
     h.app.undo(&h.ctx, true);
@@ -240,7 +240,7 @@ fn renaming_from_either_menu_is_undoable_and_can_be_cancelled() {
         h.click(text_position(&dialog, "Save"));
         assert!(h.app.object_rename.is_none());
         assert_eq!(h.app.doc.model.objects[&id].name, "Joist");
-        assert_eq!(h.app.history.undo_label(), Some("Rename"));
+        assert_eq!(h.app.doc.history.undo_label(), Some("Rename"));
         h.app.doc.model.validate().unwrap();
         h.app.undo(&h.ctx, false);
         assert_eq!(h.app.doc.model.objects[&id].name, "Beam");

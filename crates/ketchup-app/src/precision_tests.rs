@@ -61,7 +61,7 @@ fn space_stops_every_drawing_tool_with_or_without_a_typed_dimension() {
             assert!(h.app.length_input.is_empty());
             h.pointer(end, egui::PointerButton::Primary, false, false);
             assert_eq!(h.app.doc.model, before);
-            assert!(h.app.history.undo_label().is_none());
+            assert!(h.app.doc.history.undo_label().is_none());
         }
     }
 }
@@ -348,7 +348,7 @@ fn invalid_drawing_dimensions_preserve_the_model_and_can_be_corrected() {
             h.key(Key::Enter);
             assert!(h.app.doc.model.edges.is_empty(), "{tool:?}: {input}");
             assert!(h.app.drawing.is_some());
-            assert!(h.app.history.undo_label().is_none());
+            assert!(h.app.doc.history.undo_label().is_none());
             assert_eq!(h.app.length_input, input);
         }
         h.app.length_input = if tool == Tool::Rectangle {

@@ -78,7 +78,6 @@ impl KetchupApp {
         self.doc = doc;
         self.viewports
             .reframe_project(&self.doc.camera, &self.doc.viewport_cameras);
-        self.history = History::default();
         self.selected = Self::restore_document_selection(&mut self.doc);
         self.outliner_anchor = None;
         self.hover = None;

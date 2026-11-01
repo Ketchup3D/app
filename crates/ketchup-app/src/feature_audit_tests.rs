@@ -476,12 +476,12 @@ fn invalid_precision_inputs_preserve_model_history_and_active_preview() {
         let end = h.at(DVec3::new(1., 0.5, 1.));
         h.frame(vec![egui::Event::PointerMoved(end)], egui::Modifiers::NONE);
         let before = h.app.doc.model.clone();
-        let undo = h.app.history.undo_label().map(str::to_owned);
+        let undo = h.app.doc.history.undo_label().map(str::to_owned);
         for input in ["bad", "NaN", "inf", "1e999", "-", "1.2.3"] {
             h.app.length_input = input.into();
             h.key(Key::Enter);
             assert_eq!(h.app.doc.model, before, "{tool:?}: {input}");
-            assert_eq!(h.app.history.undo_label(), undo.as_deref());
+            assert_eq!(h.app.doc.history.undo_label(), undo.as_deref());
             h.app.doc.model.validate().unwrap();
         }
         h.key(Key::Escape);
@@ -649,7 +649,7 @@ fn malformed_clipboard_payloads_do_not_change_the_model_or_history() {
     let mut h = Harness::new();
     modeling_rectangle(&mut h);
     let before = h.app.doc.model.clone();
-    let undo = h.app.history.undo_label().map(str::to_owned);
+    let undo = h.app.doc.history.undo_label().map(str::to_owned);
     for payload in [
         "ketchup-geometry-v1\n{",
         "ketchup-geometry-v1\nnull",
@@ -660,7 +660,7 @@ fn malformed_clipboard_payloads_do_not_change_the_model_or_history() {
             egui::Modifiers::NONE,
         );
         assert_eq!(h.app.doc.model, before);
-        assert_eq!(h.app.history.undo_label(), undo.as_deref());
+        assert_eq!(h.app.doc.history.undo_label(), undo.as_deref());
         assert!(h.app.paste_preview.is_none());
     }
 }
@@ -812,7 +812,7 @@ fn paint_target_buttons_apply_to_a_face_or_whole_group_with_one_undo_step() {
             .values()
             .all(|color| *color == h.app.paint_color)
     );
-    assert_eq!(h.app.history.undo_label(), Some("Paint group"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Paint group"));
     let painted = h.app.doc.model.clone();
     h.app.undo(&h.ctx, false);
     assert!(h.app.doc.model.face_colors.is_empty());
@@ -843,7 +843,7 @@ fn all_paint_swatches_apply_the_selected_color_to_a_face() {
         assert_eq!(h.app.paint_color, rgb);
         h.click(h.at(DVec3::new(2., 2., 0.)));
         assert_eq!(h.app.doc.model.face_colors[&face], rgb);
-        assert_eq!(h.app.history.undo_label(), Some("Paint face"));
+        assert_eq!(h.app.doc.history.undo_label(), Some("Paint face"));
     }
 }
 
@@ -870,7 +870,7 @@ fn freehand_return_to_start_closes_a_filled_face_and_is_one_undo_step() {
     h.app.doc.model.validate().unwrap();
     h.app.undo(&h.ctx, false);
     assert!(h.app.doc.model.edges.is_empty());
-    assert!(h.app.history.undo_label().is_none());
+    assert!(h.app.doc.history.undo_label().is_none());
 }
 
 #[test]
@@ -887,7 +887,7 @@ fn move_copy_array_maximum_count_stays_reloadable_and_undoes_once() {
     }
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model, before);
-    assert!(h.app.history.undo_label().is_none());
+    assert!(h.app.doc.history.undo_label().is_none());
 }
 
 #[test]

@@ -135,6 +135,7 @@ impl KetchupApp {
             .and_then(|array| Self::move_copies(&copy.base, &copy.source, copy.delta, array));
         match result {
             Ok((model, selected)) => {
+                self.doc.history.amend_last(&copy.base, &model);
                 self.doc.model = model;
                 self.selected = selected;
                 self.length_input.clear();

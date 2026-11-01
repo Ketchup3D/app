@@ -31,7 +31,7 @@ fn text_tool_places_edits_selects_deletes_and_undoes_a_geometry_attached_label()
     h.key(Key::Enter);
     assert!(h.app.text_editor.is_none());
     assert_eq!(h.app.doc.model.texts.len(), 1);
-    assert_eq!(h.app.history.undo_label(), Some("Add text"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Add text"));
     let id = *h.app.doc.model.texts.keys().next().unwrap();
     assert_eq!(h.app.doc.model.texts[&id].text, "Oak beam");
     assert_eq!(h.app.doc.model.texts[&id].anchor.weights.len(), 1);
@@ -52,7 +52,7 @@ fn text_tool_places_edits_selects_deletes_and_undoes_a_geometry_attached_label()
     );
     h.key(Key::Enter);
     assert_eq!(h.app.doc.model.texts[&id].text, "Revised beam");
-    assert_eq!(h.app.history.undo_label(), Some("Edit text"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Edit text"));
     h.key(Key::Delete);
     assert!(h.app.doc.model.texts.is_empty());
     assert!(h.app.doc.model.edges.contains_key(&edge));
@@ -89,7 +89,7 @@ fn text_placement_and_editor_cancel_without_mutations_or_history() {
     h.key(Key::Escape);
     assert!(h.app.text_editor.is_none());
     assert_eq!(h.app.doc.model, before);
-    assert!(h.app.history.undo_label().is_none());
+    assert!(h.app.doc.history.undo_label().is_none());
     assert_eq!(h.app.tool, Tool::Text);
 }
 

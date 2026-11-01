@@ -1014,6 +1014,8 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
             p.line_segment([c + egui::vec2(-5., 5.), c + egui::vec2(5., -5.)], s);
         }
         "undo" | "redo" => {
+            // The arrow spans -8..5 vertically; center its visible bounds.
+            let c = c + egui::vec2(0., 1.5);
             let sign = if kind == "undo" { 1. } else { -1. };
             let at = |x: f32, y: f32| c + egui::vec2(x * sign, y);
             p.add(egui::Shape::line(

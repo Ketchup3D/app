@@ -6,9 +6,11 @@ use crate::{
 };
 use eframe::egui::{self, Align2, Color32, FontId, Key, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 #[cfg(test)]
+use ketchup_core::History;
+#[cfg(test)]
 use ketchup_core::infer_move_with_snapping;
 use ketchup_core::{
-    Axis, AxisGuide, Camera, DVec2, DVec3, Document, History, Inference, Model, ObjectKind, Snap,
+    Axis, AxisGuide, Camera, DVec2, DVec3, Document, Inference, Model, ObjectKind, Snap,
     Tool, selection,
 };
 use std::{collections::BTreeSet, time::Duration};
@@ -271,7 +273,6 @@ pub struct KetchupApp {
     project: projects::Project,
     screenshot: screenshot_dialog::ScreenshotDialog,
     screenshot_gpu: Option<(eframe::wgpu::Device, eframe::wgpu::Queue)>,
-    history: History,
     tool: Tool,
     drawing_tool: Tool,
     measurement_tool: Tool,
@@ -406,7 +407,6 @@ impl KetchupApp {
                 modified,
                 ..Default::default()
             },
-            history: History::default(),
             screenshot: screenshot_dialog::ScreenshotDialog::default(),
             screenshot_gpu: None,
             tool: Tool::Select,
@@ -584,7 +584,7 @@ impl KetchupApp {
             self.last_move_copy = None;
             self.measurement = None;
             self.modeling = None;
-            self.history.record(label, before, &self.doc.model);
+            self.doc.history.record(label, before, &self.doc.model);
             self.selected.retain(|id| {
                 self.doc.model.entity_in_context(*id) == Some(*id) && !self.doc.model.is_hidden(*id)
             });
@@ -611,9 +611,9 @@ impl KetchupApp {
         self.length_input.clear();
         let path = self.doc.model.edit_path();
         let did = if redo {
-            self.history.redo(&mut self.doc.model)
+            self.doc.history.redo(&mut self.doc.model)
         } else {
-            self.history.undo(&mut self.doc.model)
+            self.doc.history.undo(&mut self.doc.model)
         };
         if did {
             self.outliner_anchor = None;
@@ -1994,8 +1994,8 @@ impl KetchupApp {
                             ui.visuals_mut().override_text_color = Some(colors.ink);
                             Self::configure_entity_menu(ui);
                             for (redo, action, label, modifiers) in [
-                                (false, "Undo", self.history.undo_label().map(str::to_owned), egui::Modifiers::COMMAND),
-                                (true, "Redo", self.history.redo_label().map(str::to_owned), egui::Modifiers::COMMAND | egui::Modifiers::SHIFT),
+                                (false, "Undo", self.doc.history.undo_label().map(str::to_owned), egui::Modifiers::COMMAND),
+                                (true, "Redo", self.doc.history.redo_label().map(str::to_owned), egui::Modifiers::COMMAND | egui::Modifiers::SHIFT),
                             ] {
                                 let enabled = label.is_some();
                                 let label = label.map(|label| format!("{action} {label}")).unwrap_or_else(|| action.to_owned());
@@ -2058,6 +2058,41 @@ impl KetchupApp {
                             if ui.button("About KetchUp").clicked() {
                                 self.about = true;
                                 ui.close();
+                            }
+                        });
+                        let (separator, _) = ui.allocate_exact_size(egui::vec2(32., 24.), Sense::hover());
+                        ui.painter().vline(
+                            separator.center().x,
+                            separator.y_range(),
+                            Stroke::new(1., if dark { colors.border } else { colors.muted.gamma_multiply(0.8) }),
+                        );
+                        ui.scope(|ui| {
+                            // Match the axis-lock buttons despite the AppBar's flat menu style.
+                            ui.visuals_mut().widgets.inactive = ctx.global_style().visuals.widgets.inactive;
+                            for (redo, kind, action, label) in [
+                                (false, "undo", "Undo", self.doc.history.undo_label().map(str::to_owned)),
+                                (true, "redo", "Redo", self.doc.history.redo_label().map(str::to_owned)),
+                            ] {
+                                let enabled = label.is_some();
+                                let tooltip = label
+                                    .map(|label| format!("{action} {label}"))
+                                    .unwrap_or_else(|| action.to_owned());
+                                let response = ui.add_enabled(
+                                    enabled,
+                                    egui::Button::new("").min_size(egui::vec2(32., 32.)),
+                                );
+                                icons::line_icon(
+                                    ui.painter(),
+                                    response.rect.center(),
+                                    kind,
+                                    foreground.gamma_multiply(if enabled { 1. } else { 0.3 }),
+                                );
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(egui::Role::Button, enabled, &tooltip)
+                                });
+                                if response.on_hover_text(&tooltip).clicked() {
+                                    self.undo(&ctx, redo);
+                                }
                             }
                         });
                         let (separator, _) = ui.allocate_exact_size(egui::vec2(32., 24.), Sense::hover());

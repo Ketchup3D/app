@@ -161,7 +161,7 @@ fn new_project_clears_geometry_history_and_previous_file() {
     let mut app = KetchupApp::with_document(Document::default(), None, true);
     let before = app.doc.model.clone();
     let edge = app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
-    app.history.record("Line", before, &app.doc.model);
+    app.doc.history.record("Line", before, &app.doc.model);
     app.selected.insert(edge);
     app.project.path = Some("old.ketchup".into());
     app.doc.snap_to_axes = false;
@@ -176,10 +176,32 @@ fn new_project_clears_geometry_history_and_previous_file() {
     assert_eq!(app.doc.name, Document::default().name);
     assert!(!app.doc.snap_to_axes);
     assert!(app.selected.is_empty());
-    assert!(app.history.undo_label().is_none());
+    assert!(app.doc.history.undo_label().is_none());
     assert!(app.project.path.is_none());
     assert!(!app.project.modified);
     assert!(app.line_start.is_none());
+}
+
+#[test]
+fn opening_a_saved_project_restores_undo_and_redo_in_the_app() {
+    let ctx = egui::Context::default();
+    let mut doc = Document::default();
+    for (y, label) in [(0., "First line"), (2., "Second line")] {
+        let before = doc.model.clone();
+        doc.model.add_edge(DVec3::Y * y, DVec3::Y * y + DVec3::X).unwrap();
+        doc.history.record(label, before, &doc.model);
+    }
+    assert!(doc.history.undo(&mut doc.model));
+    let bytes = serde_json::to_vec(&doc).unwrap();
+    let mut app = KetchupApp::with_document(Document::default(), None, true);
+    app.replace_project(crate::project_files::decode(&bytes).unwrap(), None, &ctx);
+    assert_eq!(app.doc.history.undo_label(), Some("First line"));
+    assert_eq!(app.doc.history.redo_label(), Some("Second line"));
+    app.undo(&ctx, false);
+    assert!(app.doc.model.edges.is_empty());
+    app.undo(&ctx, true);
+    app.undo(&ctx, true);
+    assert_eq!(app.doc.model.edges.len(), 2);
 }
 
 #[test]
@@ -188,7 +210,7 @@ fn opening_project_replaces_state_and_resets_history() {
     let mut app = KetchupApp::with_document(Document::default(), None, true);
     let before = app.doc.model.clone();
     let edge = app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
-    app.history.record("Line", before, &app.doc.model);
+    app.doc.history.record("Line", before, &app.doc.model);
     app.selected.insert(edge);
     app.set_tool(Tool::Line);
     app.line_start = Some(DVec3::ZERO);
@@ -210,7 +232,7 @@ fn opening_project_replaces_state_and_resets_history() {
     assert!(!app.doc.snap_to_geometry);
     assert_eq!(app.project.path, Some(path));
     assert!(!app.project.modified);
-    assert!(app.history.undo_label().is_none());
+    assert!(app.doc.history.undo_label().is_none());
     assert!(app.selected.is_empty());
     assert!(app.line_start.is_none());
     assert_eq!(app.tool, Tool::Select);
@@ -332,7 +354,7 @@ fn importing_adds_geometry_in_one_undo_step_and_keeps_project_destination() {
     assert_eq!(app.doc.name, name);
     assert_eq!(app.project.path, Some("original.ketchup".into()));
     assert!(app.project.modified);
-    assert_eq!(app.history.undo_label(), Some("Import SketchUp"));
+    assert_eq!(app.doc.history.undo_label(), Some("Import SketchUp"));
     assert!(!app.selected.is_empty());
     let after = app.doc.model.clone();
     app.undo(&ctx, false);
@@ -368,7 +390,7 @@ fn invalid_import_keeps_current_geometry_selection_and_history() {
     deliver(&mut app, result, &ctx);
     assert_eq!(app.doc.model, before);
     assert!(app.selected.contains(&edge));
-    assert!(app.history.undo_label().is_none());
+    assert!(app.doc.history.undo_label().is_none());
     assert!(app.project.error.is_some());
 }
 
@@ -447,5 +469,5 @@ fn cutting_plan_export_failure_preserves_project_selection_and_history() {
     assert_eq!(app.selected, BTreeSet::from([edge]));
     assert_eq!(app.project.path, Some("original.ketchup".into()));
     assert!(app.project.modified);
-    assert!(app.history.undo_label().is_none());
+    assert!(app.doc.history.undo_label().is_none());
 }

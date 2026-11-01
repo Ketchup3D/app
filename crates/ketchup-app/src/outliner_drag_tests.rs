@@ -81,7 +81,7 @@ fn outliner_drag_moves_selected_objects_into_and_out_of_a_group_with_undo() {
     assert_eq!(h.app.doc.model.parent(b), Some(destination));
     assert_eq!(h.app.selected, BTreeSet::from([a, b]));
     assert_eq!(h.app.doc.model.vertices, vertices);
-    assert_eq!(h.app.history.undo_label(), Some("Move objects"));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Move objects"));
     h.app.doc.model.validate().unwrap();
 
     let output = begin_drag(&mut h, "First");
@@ -135,14 +135,14 @@ fn outliner_drag_rejects_locked_targets_and_escape_cancels_the_move() {
     );
     h.pointer(target, egui::PointerButton::Primary, false, false);
     assert_eq!(h.app.doc.model, before);
-    assert!(h.app.history.undo_label().is_none());
+    assert!(h.app.doc.history.undo_label().is_none());
 
     begin_drag(&mut h, "Source");
     h.key(Key::Escape);
     h.pointer(target, egui::PointerButton::Primary, false, false);
     assert_eq!(h.app.doc.model.parent(source), None);
     assert_eq!(h.app.doc.model, before);
-    assert!(h.app.history.undo_label().is_none());
+    assert!(h.app.doc.history.undo_label().is_none());
 }
 
 fn has_label(output: &egui::FullOutput, label: &str) -> bool {

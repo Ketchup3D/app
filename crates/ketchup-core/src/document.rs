@@ -1,4 +1,5 @@
 use crate::Camera;
+pub use crate::history::History;
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -356,6 +357,12 @@ pub struct Document {
     pub version: u32,
     pub name: String,
     pub model: Model,
+    #[serde(
+        default,
+        deserialize_with = "crate::history::deserialize_history",
+        skip_serializing_if = "History::is_empty"
+    )]
+    pub history: History,
     pub camera: Camera,
     /// Per-viewport framing belongs to this project, unlike reusable layout preferences.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -382,6 +389,7 @@ impl Default for Document {
             version: 2,
             name: "Untitled model".into(),
             model: Model::default(),
+            history: History::default(),
             camera: Camera::default(),
             viewport_cameras: BTreeMap::new(),
             selection: BTreeSet::new(),
@@ -407,6 +415,7 @@ impl Document {
             doc.version = 2;
         }
         doc.model.initialize_instance_transforms();
+        doc.history.restore(&doc.model);
         if !doc.display.valid() {
             return Err("Invalid display settings".into());
         }
@@ -414,43 +423,5 @@ impl Document {
             return Err("Invalid camera".into());
         }
         Ok(doc)
-    }
-}
-
-#[derive(Default)]
-pub struct History {
-    undo: Vec<(String, Model)>,
-    redo: Vec<(String, Model)>,
-}
-impl History {
-    pub fn record(&mut self, label: impl Into<String>, before: Model, after: &Model) {
-        if before == *after {
-            return;
-        }
-        self.undo.push((label.into(), before));
-        self.redo.clear();
-        if self.undo.len() > 100 {
-            self.undo.remove(0);
-        }
-    }
-    pub fn undo(&mut self, model: &mut Model) -> bool {
-        let Some((label, old)) = self.undo.pop() else {
-            return false;
-        };
-        self.redo.push((label, std::mem::replace(model, old)));
-        true
-    }
-    pub fn redo(&mut self, model: &mut Model) -> bool {
-        let Some((label, new)) = self.redo.pop() else {
-            return false;
-        };
-        self.undo.push((label, std::mem::replace(model, new)));
-        true
-    }
-    pub fn undo_label(&self) -> Option<&str> {
-        self.undo.last().map(|v| v.0.as_str())
-    }
-    pub fn redo_label(&self) -> Option<&str> {
-        self.redo.last().map(|v| v.0.as_str())
     }
 }
