@@ -1,0 +1,7 @@
+{
+  "name": "ketchup/server",
+  "description": "PHP foundation for Google login",
+  "type": "project",
+  "require": {"php": ">=8.2", "ext-curl": "*", "ext-json": "*"},
+  "scripts": {"test": ["php tests/run.php", "php tests/http.php"]}
+}

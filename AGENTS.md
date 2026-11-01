@@ -36,3 +36,7 @@ All current and future right-sidebar tables use `crate::inspector_table::Inspect
 
 - Always vertically center the contents of every table cell, including headers, text, values, and controls. This applies to all current and future tables throughout the app. Use the shared table layout’s default centering; never opt a table into top alignment. Wrapped or multiline content must remain centered relative to the tallest cell in its row.
 
+# Project names
+
+- “KetchUp” / “Ketchup app” refers to the existing Rust desktop/WebAssembly client at this repository root.
+- “Ketchup Server” refers to the separate PHP project in `server/`. When the user names Ketchup Server, scope the work to that directory and read `server/AGENTS.md`.
