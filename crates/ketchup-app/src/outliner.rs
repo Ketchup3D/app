@@ -247,11 +247,15 @@ fn matching_outliner_objects(model: &Model, query: &str) -> Option<BTreeSet<u64>
 }
 
 fn empty_outliner_label(ui: &mut egui::Ui, icon: &str, label: &str) {
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(18., 18.), Sense::hover());
-        icons::line_icon(ui.painter(), rect.center(), icon, Palette::for_ui(ui).muted);
-        ui.text_weak(label);
-    });
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(10, 0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(18., 18.), Sense::hover());
+                icons::line_icon(ui.painter(), rect.center(), icon, Palette::for_ui(ui).muted);
+                ui.text_weak(label);
+            });
+        });
 }
 
 impl Outliner<'_> {
@@ -1448,7 +1452,9 @@ impl KetchupApp {
         )
         .show(ui, |ui| {
             ui.spacing_mut().indent = 16.;
-            tree.level(ui, roots, None);
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(10, 0))
+                .show(ui, |ui| tree.level(ui, roots, None));
             tree.root_drop_target(ui);
             if egui::DragAndDrop::has_payload_of_type::<OutlinerDrag>(ui.ctx())
                 && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
