@@ -1,5 +1,6 @@
 //! Reusable purchasing catalog. Geometry and project assignments remain in documents.
-use crate::natural_text::TextUi as _;
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use super::*;
 use crate::inspector_table::{Column, InspectorTable};
 use ketchup_core::LengthUnit;
@@ -527,7 +528,7 @@ mod tests {
             settings.currency = currency.into();
             let mut labels = Vec::new();
             for _ in 0..3 {
-                let output = ctx.run_ui(
+                let output = ctx.run_test_ui(
                     egui::RawInput {
                         screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200., 900.))),
                         ..Default::default()

@@ -1,5 +1,7 @@
 //! Persistent, nested split areas for inspector sections. A center drop joins
 //! the hovered stack; a drop within 10 points inside an edge splits that area.
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use super::*;
 
 const SNAP_RANGE: f32 = 10.;
@@ -986,7 +988,7 @@ mod tests {
         events: Vec<egui::Event>,
     ) -> (egui::FullOutput, Rect) {
         let mut rect = Rect::NOTHING;
-        let output = ctx.run_ui(
+        let output = ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600., 1000.))),
                 events,
@@ -1247,7 +1249,7 @@ mod tests {
             refreshed.inspector_layout.dock,
             restored.inspector_layout.dock
         );
-        let _ = restored_ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = restored_ctx.run_test_ui(egui::RawInput::default(), |ui| {
             ui.push_id("different_docked_or_floating_scope", |ui| {
                 assert_eq!(restored_header_open(ui, "components", true), Some(false));
             });

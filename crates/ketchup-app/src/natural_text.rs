@@ -1,4 +1,6 @@
 //! Text keeps natural glyph spacing even inside full-width control layouts.
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use eframe::egui::{self, Response, RichText, Ui, Widget, WidgetText};
 
 pub(crate) struct Label(egui::Label);
@@ -109,7 +111,7 @@ mod tests {
             let mut rendered = Vec::new();
             for justified in [false, true] {
                 let output =
-                    ctx.run_ui(egui::RawInput::default(), |ui| {
+                    ctx.run_test_ui(egui::RawInput::default(), |ui| {
                         ui.set_width(width);
                         ui.with_layout(
                             egui::Layout::top_down(egui::Align::Min).with_cross_justify(justified),
@@ -145,7 +147,7 @@ mod tests {
     #[test]
     fn rich_text_truncation_and_text_shortcuts_never_justify() {
         let ctx = egui::Context::default();
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let output = ctx.run_test_ui(egui::RawInput::default(), |ui| {
             ui.set_width(110.);
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
                 ui.add(

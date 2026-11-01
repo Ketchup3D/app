@@ -1,7 +1,10 @@
 use crate::natural_text::TextUi as _;
 use super::shortcut_input::{shortcut_input, valid_tool_key};
 use super::*;
-use crate::inspector_table::{Column, InspectorTable};
+use crate::inspector_table::{Column, InspectorTable, inspector_field};
+use ketchup_core::LengthUnit;
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Section {
@@ -498,7 +501,7 @@ mod tests {
             let mut app = KetchupApp::with_document(Document::default(), None, true);
             app.settings_open = true;
             app.general_settings.section = section;
-            let mut output = ctx.run_ui(
+            let mut output = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1100., 800.))),
                     ..Default::default()

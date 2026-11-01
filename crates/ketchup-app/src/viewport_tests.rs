@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use super::*;
 use eframe::Storage;
 
@@ -47,7 +49,7 @@ impl UiHarness {
     }
     fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
         self.time += 0.01;
-        self.ctx.run_ui(
+        self.ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1000., 700.))),
                 time: Some(self.time),

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::natural_text::TextUi as _;
 use crate::{
     modal::{Modal, primary_button},
@@ -181,7 +183,7 @@ mod tests {
             notes.open();
             let show = |notes: &mut ReleaseNotes| {
                 for _ in 0..4 {
-                    let _ = ctx.run_ui(
+                    let _ = ctx.run_test_ui(
                         egui::RawInput {
                             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
                             ..Default::default()
@@ -216,7 +218,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut notes = ReleaseNotes::default();
         let show = |notes: &mut ReleaseNotes| {
-            let _ = ctx.run_ui(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,

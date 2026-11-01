@@ -25,3 +25,5 @@ mod updates;
 pub use updates::initialize as initialize_updater;
 
 pub use app::KetchupApp;
+#[cfg(test)]
+mod test_ui;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_ui::ContextExt as _;
 use eframe::App;
 
 #[path = "compass_tests.rs"]
@@ -72,7 +73,7 @@ impl Harness {
         let app = &mut self.app;
         let mut output = self
             .ctx
-            .run_ui(input, |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()));
+            .run_test_ui(input, |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()));
         output.textures_delta.clear();
         output
     }
@@ -2170,7 +2171,7 @@ fn render_snapshots(state: eframe::egui_wgpu::RenderState, audit: bool) {
                 vec![]
             };
             let cpu_start = std::time::Instant::now();
-            let mut output = ctx.run_ui(
+            let mut output = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(
                         Pos2::ZERO,
@@ -3971,7 +3972,7 @@ fn selected_object_volume_is_reused_across_inspector_redraws_and_selection_chang
     h.app.solid_first = Some(a);
     for id in [a, a, b, b, a] {
         h.app.selected = BTreeSet::from([id]);
-        let _ = h.ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = h.ctx.run_test_ui(egui::RawInput::default(), |ui| {
             h.app.entity_info_contents(ui);
         });
     }
@@ -3979,7 +3980,7 @@ fn selected_object_volume_is_reused_across_inspector_redraws_and_selection_chang
     assert_eq!(h.app.solid_volume_cache.computations, 2);
     h.app.doc.camera.distance *= 2.;
     h.app.doc.display.units.precision.length = Some(1);
-    let _ = h.ctx.run_ui(egui::RawInput::default(), |ui| {
+    let _ = h.ctx.run_test_ui(egui::RawInput::default(), |ui| {
         h.app.entity_info_contents(ui);
     });
     assert_eq!(h.app.solid_volume_cache.computations, 2);

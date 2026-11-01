@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::natural_text::TextUi as _;
 use super::*;
 
@@ -842,7 +844,7 @@ mod tests {
                 (OutlinerMaterial::Full, 2),
             ] {
                 let mut color = Color32::TRANSPARENT;
-                let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let output = ctx.run_test_ui(egui::RawInput::default(), |ui| {
                     color = status.color(ui);
                     let colors = [
                         OutlinerMaterial::None.color(ui),
@@ -933,7 +935,7 @@ mod tests {
                 }
                 let mut output = None;
                 for _ in 0..2 {
-                    output = Some(ctx.run_ui(
+                    output = Some(ctx.run_test_ui(
                         egui::RawInput {
                             screen_rect: Some(Rect::from_min_size(
                                 Pos2::ZERO,
@@ -1000,7 +1002,7 @@ mod tests {
                     _ => {}
                 }
             }
-            let output = ctx.run_ui(
+            let output = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600., 900.))),
                     ..Default::default()
@@ -1216,7 +1218,7 @@ mod tests {
         app.doc.model.locked.insert(group);
         let ctx = egui::Context::default();
         ctx.memory_mut(|memory| memory.set_everything_is_visible(true));
-        let output = ctx.run_ui(
+        let output = ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600., 900.))),
                 ..Default::default()
@@ -1252,7 +1254,7 @@ mod tests {
             ctx: &egui::Context,
             events: Vec<egui::Event>,
         ) -> egui::FullOutput {
-            ctx.run_ui(
+            let mut output = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600., 900.))),
                     events,
@@ -1349,7 +1351,7 @@ mod tests {
             let ctx = egui::Context::default();
             let mut app = KetchupApp::with_document(doc.clone(), None, true);
             remember_scroll(&ctx, "outliner_tree", egui::vec2(0., offset));
-            let _ = ctx.run_ui(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(400., 650.))),
                     ..Default::default()

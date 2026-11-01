@@ -1,4 +1,6 @@
 //! One currency preference and one price format for catalogs and estimates.
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use super::searchable_selector::{Choice, SearchableSelector};
 use eframe::egui;
 
@@ -159,7 +161,7 @@ mod tests {
             }
         }
         let mut center = egui::Pos2::ZERO;
-        let output = ctx.run_ui(
+        let output = ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,

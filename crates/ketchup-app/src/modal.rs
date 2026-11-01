@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::{icons, theme::Palette};
 use eframe::egui::{self, Color32, Margin, Stroke};
 
@@ -573,7 +575,7 @@ mod tests {
             let id = egui::Id::unique(key);
             crate::app::remember_modal_size(&ctx, key, egui::vec2(600., 400.));
             let frame = |events| {
-                let _ = ctx.run_ui(
+                let _ = ctx.run_test_ui(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,
@@ -627,7 +629,7 @@ mod tests {
         let id = egui::Id::unique("modal_geometry_test");
         crate::app::remember_modal_size(&ctx, "modal_geometry_test", egui::vec2(600., 400.));
         let frame = |events| {
-            let _ = ctx.run_ui(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -699,7 +701,7 @@ mod tests {
             crate::app::remember_modal_size(&ctx, "resizable_test", size);
             let mut body_size = egui::Vec2::ZERO;
             for _ in 0..3 {
-                let _ = ctx.run_ui(
+                let _ = ctx.run_test_ui(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,

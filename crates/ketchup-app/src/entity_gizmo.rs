@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::natural_text::TextUi as _;
 use super::*;
 
@@ -288,7 +290,7 @@ mod tests {
         app.doc.display.units.precision.length = Some(1);
         let size = DVec3::new(1., 2., 0.);
         let render = |app: &KetchupApp| {
-            ctx.run_ui(egui::RawInput::default(), |ui| {
+            ctx.run_test_ui(egui::RawInput::default(), |ui| {
                 ui.set_max_width(224.);
                 app.entity_axis_gizmo(ui, size);
             })

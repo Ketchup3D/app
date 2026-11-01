@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use super::*;
 use crate::project_files::Outcome;
 
@@ -323,7 +325,7 @@ fn new_shortcut_prompts_for_unsaved_changes_and_escape_cancels() {
             }],
             ..Default::default()
         };
-        let mut output = ctx.run_ui(input, |_ui| {
+        let mut output = ctx.run_test_ui(input, |_ui| {
             app.keyboard(&ctx);
             app.project_dialogs(&ctx);
         });

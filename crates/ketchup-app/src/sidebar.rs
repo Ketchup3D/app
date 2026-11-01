@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use crate::natural_text::TextUi as _;
 use super::*;
 use ketchup_core::{
@@ -693,7 +695,7 @@ mod preference_tests {
     fn estimate_header_menu_does_not_toggle_the_disclosure() {
         fn frame(ctx: &egui::Context, events: Vec<egui::Event>) -> (Rect, egui::Id, bool) {
             let mut result = None;
-            let _ = ctx.run_ui(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     events,
                     ..Default::default()
@@ -773,7 +775,7 @@ mod preference_tests {
         let ctx = egui::Context::default();
         let mut app = KetchupApp::with_document(Document::default(), None, true);
         let mut header = Rect::NOTHING;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_test_ui(egui::RawInput::default(), |ui| {
             ui.set_width(400.);
             let viewport = ui.clip_rect();
             let panel = inspector_section_sized(
@@ -924,7 +926,7 @@ mod preference_tests {
         content: Vec2,
     ) -> Vec2 {
         let mut offset = Vec2::ZERO;
-        let _ = ctx.run_ui(
+        let _ = ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(500., 400.))),
                 ..Default::default()
@@ -970,7 +972,7 @@ mod preference_tests {
                 section: Rect::NOTHING,
                 header: Rect::NOTHING,
             }; 2];
-            let _ = ctx.run_ui(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(700., 400.))),
                     events,
@@ -1205,7 +1207,7 @@ mod preference_tests {
         remember_scroll(&ctx, &child_key, egui::vec2(0., 240.));
         let mut app = KetchupApp::with_document(doc.clone(), None, true);
         let render = |ctx: &egui::Context, app: &mut KetchupApp| {
-            let _ = ctx.run_ui(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(300., 900.))),
                     ..Default::default()
@@ -1241,7 +1243,7 @@ mod preference_tests {
             let mut body_visible = false;
             let mut panel = Rect::NOTHING;
             let mut header = Rect::NOTHING;
-            let _ = ctx.run_ui(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800., 900.))),
                     events,
@@ -1362,7 +1364,7 @@ mod preference_tests {
         let mut app = KetchupApp::with_document(Document::default(), None, true);
         app.persist_inspector_changes(&ctx, Some(&mut storage), false);
         for enabled in [false, true] {
-            let _ = ctx.run_ui(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     events: [true, false]
                         .map(|pressed| egui::Event::Key {
@@ -1545,7 +1547,7 @@ mod preference_tests {
         let mut app = KetchupApp::with_document(Document::default(), None, true);
         app.help = true;
         app.shortcut_filter = "Move".into();
-        let _ = ctx.run_ui(
+        let _ = ctx.run_test_ui(
             egui::RawInput {
                 events: vec![egui::Event::Key {
                     key: Key::Escape,
@@ -1745,7 +1747,7 @@ mod preference_tests {
                 set_section_open(&ctx, "outliner", false);
                 let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 900.)));
                 let mut other_text = String::new();
-                let _ = ctx.run_ui(
+                let _ = ctx.run_test_ui(
                     egui::RawInput {
                         screen_rect,
                         ..Default::default()
@@ -1758,7 +1760,7 @@ mod preference_tests {
                 );
                 assert!(ctx.egui_wants_keyboard_input());
                 app.inspector = false;
-                let _ = ctx.run_ui(
+                let _ = ctx.run_test_ui(
                     egui::RawInput {
                         screen_rect,
                         events: vec![
@@ -1781,7 +1783,7 @@ mod preference_tests {
                 );
                 // Allow newly opened windows and disclosures to finish their layout.
                 for _ in 0..2 {
-                    let _ = ctx.run_ui(
+                    let _ = ctx.run_test_ui(
                         egui::RawInput {
                             screen_rect,
                             ..Default::default()
@@ -2074,7 +2076,7 @@ mod preference_tests {
         let mut restored = KetchupApp::with_document(Document::default(), None, true);
         restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
         assert_eq!(restored.general_settings, app.general_settings);
-        let _ = restored_ctx.run_ui(Default::default(), |ui| {
+        let _ = restored_ctx.run_test_ui(Default::default(), |ui| {
             assert_eq!(
                 restored_header_open(ui, "settings/stock/finishes", true),
                 Some(false)
@@ -2100,7 +2102,7 @@ mod preference_tests {
             app.general_settings.stock.finishes,
             restored.general_settings.stock.finishes
         );
-        let _ = final_ctx.run_ui(Default::default(), |ui| {
+        let _ = final_ctx.run_test_ui(Default::default(), |ui| {
             assert_eq!(
                 restored_header_open(ui, "settings/stock/finishes", false),
                 Some(true)
@@ -2283,7 +2285,7 @@ mod preference_tests {
         assert!(app.release_notes.has_unread());
         app.release_notes.open_if_unread();
         assert!(app.release_notes.open);
-        let _ = ctx.run_ui(
+        let _ = ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1000., 700.))),
                 ..Default::default()
@@ -2324,7 +2326,7 @@ mod preference_tests {
     fn bulk_expansion_overrides_existing_headers_and_restores_after_immediate_save() {
         fn render(ctx: &egui::Context, moved: bool) -> (bool, bool) {
             let mut visible = (false, false);
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = ctx.run_test_ui(egui::RawInput::default(), |ui| {
                 ui.push_id(if moved { "floating" } else { "docked" }, |ui| {
                     let id = ui.make_persistent_id(("outliner_object", 42_u64));
                     restore_section(ctx, id, "outliner_object/42", false);
@@ -2473,7 +2475,7 @@ mod preference_tests {
         assert_eq!(restored.inspector_order, app.inspector_order);
         assert!(restored.selected.is_empty());
         assert!(!restored.project.modified);
-        let _ = restored_ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = restored_ctx.run_test_ui(egui::RawInput::default(), |ui| {
             ui.push_id("floating_estimator", |ui| {
                 assert_eq!(
                     restored_header_open(ui, "time_cost_estimates", true),
@@ -2556,7 +2558,7 @@ mod preference_tests {
             set_section_open(&ctx, key, true);
         }
         for frame in 0..3 {
-            let output = ctx.run_ui(
+            let output = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600., 2000.))),
                     time: Some(frame as f64 / 60.),
@@ -2872,7 +2874,7 @@ mod preference_tests {
             let mut reloaded = KetchupApp::with_document(Document::default(), None, true);
             reloaded.restore_inspector_preferences(&reloaded_ctx, Some(&storage));
             assert_eq!(reloaded.inspector_order, app.inspector_order);
-            let _ = reloaded_ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = reloaded_ctx.run_test_ui(egui::RawInput::default(), |ui| {
                 ui.push_id("floating_materials", |ui| {
                     assert_eq!(restored_header_open(ui, "materials", true), Some(open));
                 });
@@ -2887,7 +2889,7 @@ mod preference_tests {
         fn render(ctx: &egui::Context, events: Vec<egui::Event>, moved: bool) -> (Rect, bool) {
             let mut rect = Rect::NOTHING;
             let mut body_visible = false;
-            let _ = ctx.run_ui(
+            let _ = ctx.run_test_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600., 900.))),
                     events,
@@ -2971,7 +2973,7 @@ mod preference_tests {
             CameraPreferences::capture(&refreshed.doc.camera),
             CameraPreferences::capture(&app.doc.camera)
         );
-        let _ = refreshed_ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = refreshed_ctx.run_test_ui(egui::RawInput::default(), |ui| {
             ui.push_id("floating_view", |ui| {
                 assert_eq!(restored_header_open(ui, "view", true), Some(false));
                 assert_eq!(restored_header_open(ui, "view_camera", false), Some(true));

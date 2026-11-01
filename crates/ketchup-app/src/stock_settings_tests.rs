@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use super::*;
 
 fn catalog() -> Vec<Stock> {
@@ -74,7 +76,7 @@ fn frame(
     }
     let mut center = egui::Pos2::ZERO;
     let mut assigned = false;
-    let output = ctx.run_ui(
+    let output = ctx.run_test_ui(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(
                 egui::Pos2::ZERO,

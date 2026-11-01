@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use super::*;
 use ketchup_core::{DVec3, Face, Vertex};
 
@@ -49,7 +51,7 @@ fn wood_area(model: &Model, selected: &BTreeSet<u64>) -> f64 {
 fn cost_table_keeps_long_cells_inside_columns_and_wrapped_rows_apart() {
     for width in [200., 280., 420., 640.] {
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_test_ui(egui::RawInput::default(), |ui| {
             ui.set_width(width);
             let mut table = InspectorTable::new(
                 width,
@@ -540,7 +542,7 @@ fn material_estimate_prices_purchased_stock_and_flags_missing_prices() {
             }
         }
         let ctx = egui::Context::default();
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let output = ctx.run_test_ui(egui::RawInput::default(), |ui| {
             app.material_cost_estimate_contents(ui);
         });
         let mut text = String::new();
@@ -1261,7 +1263,7 @@ fn unified_cost_table_groups_stock_and_finishes_with_one_header() {
     app.time_estimates.stain.product_id = Some(paint.id);
     app.general_settings.stock.finishes = vec![paint];
     let ctx = egui::Context::default();
-    let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+    let output = ctx.run_test_ui(egui::RawInput::default(), |ui| {
         ui.set_width(600.);
         app.material_cost_estimate_contents(ui);
     });

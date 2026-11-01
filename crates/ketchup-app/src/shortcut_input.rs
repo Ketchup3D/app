@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use eframe::egui::{self, Key};
 
 pub(super) fn valid_tool_key(name: &str) -> bool {
@@ -103,7 +105,7 @@ mod tests {
         let mut assigned = None;
         let mut center = egui::Pos2::ZERO;
         let mut escape_left = false;
-        let _ = ctx.run_ui(
+        let _ = ctx.run_test_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,

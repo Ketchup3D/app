@@ -1,7 +1,7 @@
 use super::*;
 
 fn render(app: &mut KetchupApp, ctx: &egui::Context, rect: Rect) {
-    let _ = ctx.run_ui(
+    let _ = ctx.run_test_ui(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200., 900.))),
             ..Default::default()
