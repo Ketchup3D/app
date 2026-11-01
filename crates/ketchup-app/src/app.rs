@@ -3875,89 +3875,101 @@ impl KetchupApp {
             } else {
                 BTreeSet::new()
             };
-            for e in model
-                .edges
-                .values()
-                .filter(|e| entities.get(e.id).displayed(display))
-            {
-                let selected = selected_entities.contains(&e.id);
-                let emphasized = emphasized_entities.contains(&e.id);
-                let root = entities.get(e.id).context;
-                let outliner_hover = self.outliner_hover.contains(&e.id);
-                let hover = outliner_hover || self.hover.is_some() && self.hover == root;
-                let pending = erasing.is_some_and(|ids| root.is_some_and(|id| ids.contains(&id)));
-                let color = if emphasize_group && !emphasized {
-                    colors.muted.gamma_multiply(0.55)
-                } else if root.is_none() && !outliner_hover {
-                    if ui.visuals().dark_mode {
-                        colors.border
-                    } else {
-                        Color32::from_rgb(184, 193, 181)
-                    }
-                } else if pending {
-                    Color32::from_rgb(220, 91, 76)
-                } else if entities.get(e.id).locked {
-                    Color32::from_rgb(90, 133, 176)
-                } else if selected {
-                    ACCENT
-                } else if hover && self.tool == Tool::Erase && !outliner_hover {
-                    ACCENT
-                } else if hover {
-                    colors.green
-                } else {
-                    colors.ink
-                };
-                let (a, b) = model.points(e);
-                // Emphasis changes the surrounding geometry, preserving interaction feedback.
-                let active = selected || hover || pending;
-                let width = if emphasize_group && !emphasized {
-                    1.
-                } else if active {
-                    3.
-                } else if profiles.contains(&e.id) {
-                    display.profile_width
-                } else {
-                    1.8
-                };
-                let width = if display.depth_cue && !active && !emphasize_group {
-                    width
-                        * (camera.distance / view.view_distance((a + b) * 0.5).max(0.01))
-                            .clamp(0.35, 1.8)
-                } else {
-                    width
-                };
-                let color = if display.color_by_tag && !active && (!emphasize_group || emphasized) {
-                    entities
-                        .get(e.id)
-                        .tag_color
-                        .map(|c| Color32::from_rgb(c[0], c[1], c[2]))
-                        .unwrap_or(color)
-                } else {
-                    color
-                };
-                if display.back_edges || entities.get(e.id).entity_hidden {
-                    mesh.overlay_line(a, b, 1., color.gamma_multiply(0.4), true);
+            // Resolve ordinary edges in f64 before drawing selected strokes.
+            // GPU depth alone can round nearby edges to the same value, letting
+            // the wider selection color overwrite a nearer object's outline.
+            for selected_pass in [false, true] {
+                if selected_pass {
+                    mesh.begin_selected_edges();
                 }
-                if entities.get(e.id).entity_hidden {
-                    continue;
-                }
-                if display.edges
-                    || emphasize_group
-                    || profiles.contains(&e.id)
-                    || active
-                    || display.face_style == ketchup_core::FaceStyle::Wireframe
+                for e in model
+                    .edges
+                    .values()
+                    .filter(|e| entities.get(e.id).displayed(display))
+                    .filter(|e| selected_entities.contains(&e.id) == selected_pass)
                 {
-                    if display.x_ray || display.face_style == ketchup_core::FaceStyle::Wireframe {
-                        mesh.overlay_line(a, b, width, color, false);
+                    let selected = selected_entities.contains(&e.id);
+                    let emphasized = emphasized_entities.contains(&e.id);
+                    let root = entities.get(e.id).context;
+                    let outliner_hover = self.outliner_hover.contains(&e.id);
+                    let hover = outliner_hover || self.hover.is_some() && self.hover == root;
+                    let pending =
+                        erasing.is_some_and(|ids| root.is_some_and(|id| ids.contains(&id)));
+                    let color = if emphasize_group && !emphasized {
+                        colors.muted.gamma_multiply(0.55)
+                    } else if root.is_none() && !outliner_hover {
+                        if ui.visuals().dark_mode {
+                            colors.border
+                        } else {
+                            Color32::from_rgb(184, 193, 181)
+                        }
+                    } else if pending {
+                        Color32::from_rgb(220, 91, 76)
+                    } else if entities.get(e.id).locked {
+                        Color32::from_rgb(90, 133, 176)
+                    } else if selected {
+                        ACCENT
+                    } else if hover && self.tool == Tool::Erase && !outliner_hover {
+                        ACCENT
+                    } else if hover {
+                        colors.green
                     } else {
-                        mesh.styled_edge(
-                            e,
-                            model,
-                            width,
-                            color,
-                            display.extensions,
-                            display.endpoints,
-                        );
+                        colors.ink
+                    };
+                    let (a, b) = model.points(e);
+                    // Emphasis changes the surrounding geometry, preserving interaction feedback.
+                    let active = selected || hover || pending;
+                    let width = if emphasize_group && !emphasized {
+                        1.
+                    } else if active {
+                        3.
+                    } else if profiles.contains(&e.id) {
+                        display.profile_width
+                    } else {
+                        1.8
+                    };
+                    let width = if display.depth_cue && !active && !emphasize_group {
+                        width
+                            * (camera.distance / view.view_distance((a + b) * 0.5).max(0.01))
+                                .clamp(0.35, 1.8)
+                    } else {
+                        width
+                    };
+                    let color =
+                        if display.color_by_tag && !active && (!emphasize_group || emphasized) {
+                            entities
+                                .get(e.id)
+                                .tag_color
+                                .map(|c| Color32::from_rgb(c[0], c[1], c[2]))
+                                .unwrap_or(color)
+                        } else {
+                            color
+                        };
+                    if display.back_edges || entities.get(e.id).entity_hidden {
+                        mesh.overlay_line(a, b, 1., color.gamma_multiply(0.4), true);
+                    }
+                    if entities.get(e.id).entity_hidden {
+                        continue;
+                    }
+                    if display.edges
+                        || emphasize_group
+                        || profiles.contains(&e.id)
+                        || active
+                        || display.face_style == ketchup_core::FaceStyle::Wireframe
+                    {
+                        if display.x_ray || display.face_style == ketchup_core::FaceStyle::Wireframe
+                        {
+                            mesh.overlay_line(a, b, width, color, false);
+                        } else {
+                            mesh.styled_edge(
+                                e,
+                                model,
+                                width,
+                                color,
+                                display.extensions,
+                                display.endpoints,
+                            );
+                        }
                     }
                 }
             }
@@ -4005,6 +4017,7 @@ impl KetchupApp {
                     mesh.world_line(camera, a + offset, b + offset, 2.4, colors.green);
                 }
             }
+            mesh.occlude_annotations_with_edges();
             let dimensions = self.dimension_shapes(&mut mesh, &p, rect, model);
             let texts = self.text_shapes(&mut mesh, &p, rect, model);
             mesh.paint_cached(&p, rect, &mut self.scene_cache);

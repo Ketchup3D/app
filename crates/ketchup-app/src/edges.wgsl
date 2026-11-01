@@ -25,13 +25,29 @@ fn vertex_main_srgb(@location(0) position: vec3<f32>, @location(1) color: vec4<f
     return edge_vertex(position, vec4<f32>(linear, color.a), lateral);
 }
 
-@fragment
-fn fragment_main(input: EdgeVertex) -> @location(0) vec4<f32> {
+fn stroke_coverage(input: EdgeVertex) -> f32 {
     // The CPU expands the strip by this pixel footprint, including diagonals.
     // Limit subpixel strokes to their true coverage rather than darkening them.
     let gradient = max(fwidth(input.lateral), 0.0001);
     let peak = min(1.0, 2.0 / gradient - 1.0);
     let coverage = clamp((1.0 - abs(input.lateral)) / gradient, 0.0, peak);
+    return coverage;
+}
+
+@fragment
+fn fragment_edge_depth(input: EdgeVertex) -> @location(0) vec4<f32> {
+    // Resolve the entire visible footprint, including the antialias fringe.
+    // Otherwise rear selection strokes leak through the fringe of nearer edges.
+    // Screen overlays and translucent strokes do not occlude world geometry.
+    let coverage = stroke_coverage(input);
+    if input.position.z <= 0.0 || input.position.z >= 1.0 ||
+       input.color.a < 1.0 || coverage < 0.001 { discard; }
+    return vec4<f32>(0.0);
+}
+
+@fragment
+fn fragment_main(input: EdgeVertex) -> @location(0) vec4<f32> {
+    let coverage = stroke_coverage(input);
     if coverage < 0.001 { discard; }
     return input.color * coverage;
 }

@@ -48,6 +48,8 @@ pub struct SceneKey {
 #[derive(Default)]
 pub struct SceneCache {
     occlusion: Occlusion,
+    selection_occlusion: Occlusion,
+    annotation_occluders: Vec<[DVec3; 3]>,
     edge_surfaces: BTreeMap<(u64, u64), Vec<DVec2>>,
     buffers: BufferPool,
     gpu_buffers: GpuBufferPool,
@@ -87,6 +89,9 @@ struct MeshBuffers {
 }
 
 pub struct Mesh {
+    clip_stroke_footprints: bool,
+    selection_occlusion: Occlusion,
+    annotation_occluders: Vec<[DVec3; 3]>,
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
     triangle_ranges: Vec<std::ops::Range<u32>>,
@@ -103,6 +108,9 @@ pub struct Mesh {
 impl Mesh {
     pub fn new(camera: &Camera, size: DVec2) -> Self {
         Self {
+            clip_stroke_footprints: false,
+            selection_occlusion: Occlusion::default(),
+            annotation_occluders: Vec::new(),
             vertices: Vec::new(),
             indices: Vec::new(),
             triangle_ranges: Vec::new(),
@@ -138,6 +146,10 @@ impl Mesh {
         }
         mesh.occlusion = std::mem::take(&mut cache.occlusion);
         mesh.occlusion.begin_frame();
+        mesh.selection_occlusion = std::mem::take(&mut cache.selection_occlusion);
+        mesh.selection_occlusion.begin_frame();
+        mesh.annotation_occluders = std::mem::take(&mut cache.annotation_occluders);
+        mesh.annotation_occluders.clear();
         mesh.edge_surfaces = std::mem::take(&mut cache.edge_surfaces);
         for surfaces in mesh.edge_surfaces.values_mut() {
             surfaces.clear();
@@ -333,8 +345,107 @@ impl Mesh {
         } else {
             (&[(0, 1.), (0, -1.), (1, 1.), (1, -1.)], &[0, 1, 2, 2, 1, 3])
         };
+        if self.clip_stroke_footprints && depths.iter().all(|&z| z > 0. && z < 1.) {
+            // Clipping just the centerline leaves corners of a wide or oblique
+            // selection strip protruding across the foreground edge. Clip each
+            // triangle's complete footprint in f64 before GPU depth rounding.
+            let projected: Vec<_> = strip
+                .iter()
+                .map(|&(endpoint, lateral)| {
+                    let offset = n * lateral;
+                    let depth_offset = surfaces
+                        .iter()
+                        .map(|g| g.dot(offset))
+                        .reduce(f64::min)
+                        .unwrap_or(0.);
+                    ([a, b][endpoint] + offset).extend(depths[endpoint] + depth_offset)
+                })
+                .collect();
+            for triangle in indices.chunks_exact(3) {
+                let points = [
+                    projected[triangle[0] as usize],
+                    projected[triangle[1] as usize],
+                    projected[triangle[2] as usize],
+                ];
+                let Some(gradient) = depth_gradient(points) else {
+                    continue;
+                };
+                let origin = points[0];
+                let polygons = self.occlusion.visible_surface_polygons(
+                    points.map(DVec3::truncate).to_vec(),
+                    origin,
+                    gradient,
+                );
+                // Preserve the already-visible ordinary outlines at contacts.
+                // This is a screen-space mask: coincident model edges can have
+                // different incident face slopes, so depth cannot reliably
+                // decide which color owns the shared antialiased pixels.
+                let polygons: Vec<_> = polygons
+                    .into_iter()
+                    .flat_map(|polygon| self.selection_occlusion.visible_polygons(polygon, 1.))
+                    .collect();
+                for polygon in polygons {
+                    let base = self.vertices.len() as u32;
+                    for &p in &polygon {
+                        let depth = origin.z + gradient.dot(p - origin.truncate());
+                        self.vertices.push(Vertex {
+                            position: [
+                                (p.x / self.size.x * 2. - 1.) as f32,
+                                (1. - p.y / self.size.y * 2.) as f32,
+                                (depth as f32).next_down().max(0.),
+                            ],
+                            color: color.to_array(),
+                            lateral: ((p - a).dot(n) / n.length_squared()) as f32,
+                        });
+                    }
+                    for i in 1..polygon.len().saturating_sub(1) {
+                        self.indices
+                            .extend([base, base + i as u32, base + i as u32 + 1]);
+                        if color.a() == 255 {
+                            self.annotation_occluders.push(
+                                [polygon[0], polygon[i], polygon[i + 1]].map(|p| {
+                                    p.extend(origin.z + gradient.dot(p - origin.truncate()))
+                                }),
+                            );
+                        }
+                    }
+                }
+            }
+            return;
+        }
         let base = self.vertices.len() as u32;
         self.indices.extend(indices.iter().map(|&i| base + i));
+        // Retain f64 projected geometry for annotations painted by egui after
+        // the GPU scene. Add it to CPU occlusion only after all model strokes
+        // are drawn, so edge rendering does not depend on insertion order.
+        if color.a() == 255 && depths.iter().all(|&z| z > 0. && z < 1.) {
+            let projected: Vec<_> = strip
+                .iter()
+                .map(|&(endpoint, lateral)| {
+                    let offset = n * lateral;
+                    let depth_offset = surfaces
+                        .iter()
+                        .map(|g| g.dot(offset))
+                        .reduce(f64::min)
+                        .unwrap_or(0.);
+                    ([a, b][endpoint] + offset).extend(depths[endpoint] + depth_offset)
+                })
+                .collect();
+            for triangle in indices.chunks_exact(3) {
+                // The mask uses synthetic depth only; world and annotation
+                // occlusion keep their real geometric depth separately.
+                self.selection_occlusion
+                    .insert([triangle[0], triangle[1], triangle[2]].map(|i| {
+                        let (endpoint, lateral) = strip[i as usize];
+                        ([a, b][endpoint] + n * lateral).extend(0.)
+                    }));
+                self.annotation_occluders.push([
+                    projected[triangle[0] as usize],
+                    projected[triangle[1] as usize],
+                    projected[triangle[2] as usize],
+                ]);
+            }
+        }
         let color = color.to_array();
         for &(endpoint, lateral) in strip {
             let p = [a, b][endpoint] + n * lateral;
@@ -362,6 +473,19 @@ impl Mesh {
     }
     /// Keep projected depth after centerline clipping so the complete stroke
     /// can also be clipped against foreground surfaces before painting.
+    pub fn occlude_annotations_with_edges(&mut self) {
+        for triangle in self.annotation_occluders.drain(..) {
+            self.occlusion.insert(triangle);
+        }
+    }
+
+    pub fn begin_selected_edges(&mut self) {
+        // Selection has its own outline mask. Keep the face hierarchy free of
+        // edge triangles until annotations actually need them; otherwise every
+        // selected stroke clips against the same ordinary edges twice.
+        self.clip_stroke_footprints = true;
+    }
+
     pub fn annotation_line(&mut self, a: DVec3, b: DVec3) -> Vec<(DVec3, DVec3)> {
         let Some((a, b)) = self.section_line(a, b) else {
             return vec![];
@@ -580,6 +704,8 @@ impl Mesh {
     pub fn paint_cached(mut self, painter: &egui::Painter, rect: Rect, cache: &mut SceneCache) {
         self.occlusion.lines.truncate(self.occlusion.line_cursor);
         cache.occlusion = std::mem::take(&mut self.occlusion);
+        cache.selection_occlusion = std::mem::take(&mut self.selection_occlusion);
+        cache.annotation_occluders = std::mem::take(&mut self.annotation_occluders);
         self.edge_surfaces
             .retain(|_, surfaces| !surfaces.is_empty());
         cache.edge_surfaces = std::mem::take(&mut self.edge_surfaces);
@@ -999,20 +1125,54 @@ impl Occlusion {
                 }
                 let [a, b, c] = triangle.points.map(|p| p.truncate());
                 let winding = (b - a).perp_dot(c - a).signum();
+                // Test depth first: most nearby faces are coplanar with the
+                // stroke. Splitting along their infinite side planes first
+                // needlessly fragments an otherwise fully visible polygon.
+                let planes = [
+                    (
+                        gradient - triangle.gradient,
+                        a,
+                        depth_at(a) - triangle.points[0].z - 64. * f64::EPSILON,
+                    ),
+                    (DVec2::new(-(b - a).y, (b - a).x) * winding, a, 0.),
+                    (DVec2::new(-(c - b).y, (c - b).x) * winding, b, 0.),
+                    (DVec2::new(-(a - c).y, (a - c).x) * winding, c, 0.),
+                ];
                 let mut outside = vec![];
                 // The occluded region is the intersection of the triangle's
                 // three screen half-planes and its foreground depth half-plane.
                 for mut polygon in visible {
-                    for (normal, origin, offset) in [
-                        (DVec2::new(-(b - a).y, (b - a).x) * winding, a, 0.),
-                        (DVec2::new(-(c - b).y, (c - b).x) * winding, b, 0.),
-                        (DVec2::new(-(a - c).y, (a - c).x) * winding, c, 0.),
-                        (
-                            gradient - triangle.gradient,
-                            a,
-                            depth_at(a) - triangle.points[0].z - 64. * f64::EPSILON,
-                        ),
-                    ] {
+                    // A disjoint occluder must leave the polygon intact.
+                    // Bounding-box overlap alone does not imply intersection;
+                    // without this check each unrelated edge can multiply the
+                    // fragments processed by every subsequent occluder.
+                    if planes.iter().any(|&(normal, origin, offset)| {
+                        polygon
+                            .iter()
+                            .all(|&p| normal.dot(p - origin) + offset <= 0.)
+                    }) {
+                        outside.push(polygon);
+                        continue;
+                    }
+                    let mut hidden = polygon.clone();
+                    for &(normal, origin, offset) in &planes {
+                        hidden = clip_polygon(&hidden, |p| normal.dot(p - origin) + offset);
+                        if hidden.len() < 3 {
+                            break;
+                        }
+                    }
+                    let hidden_area = hidden.first().map_or(0., |&origin| {
+                        hidden
+                            .windows(2)
+                            .map(|edge| (edge[0] - origin).perp_dot(edge[1] - origin))
+                            .sum::<f64>()
+                            .abs()
+                    });
+                    if hidden.len() < 3 || hidden_area <= 1e-12 {
+                        outside.push(polygon);
+                        continue;
+                    }
+                    for &(normal, origin, offset) in &planes {
                         let side = |p: DVec2| normal.dot(p - origin) + offset;
                         let piece = clip_polygon(&polygon, |p| -side(p));
                         if piece.len() >= 3 {
@@ -1294,6 +1454,7 @@ fn stroke_depth(depth: f64, offset: DVec2, surfaces: &[DVec2]) -> f32 {
 struct Resources {
     face_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
+    edge_depth_pipeline: wgpu::RenderPipeline,
 }
 pub fn install(cc: &eframe::CreationContext<'_>) -> bool {
     let Some(state) = cc.wgpu_render_state.as_ref() else {
@@ -1313,24 +1474,33 @@ pub(crate) fn install_resources(
         label: Some("KetchUp edges"),
         source: wgpu::ShaderSource::Wgsl(include_str!("edges.wgsl").into()),
     });
-    let face_pipeline = create_pipeline(device, &shader, format, true);
-    let edge_pipeline = create_pipeline(device, &shader, format, false);
+    let face_pipeline = create_pipeline(device, &shader, format, PipelinePass::Faces);
+    let edge_pipeline = create_pipeline(device, &shader, format, PipelinePass::Edges);
+    let edge_depth_pipeline = create_pipeline(device, &shader, format, PipelinePass::EdgeDepth);
     renderer.callback_resources.insert(Resources {
         face_pipeline,
         edge_pipeline,
+        edge_depth_pipeline,
     });
 }
+#[derive(Clone, Copy, PartialEq)]
+enum PipelinePass {
+    Faces,
+    EdgeDepth,
+    Edges,
+}
+
 fn create_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     format: wgpu::TextureFormat,
-    faces: bool,
+    pass: PipelinePass,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(if faces {
-            "KetchUp filled faces"
-        } else {
-            "KetchUp antialiased edges"
+        label: Some(match pass {
+            PipelinePass::Faces => "KetchUp filled faces",
+            PipelinePass::EdgeDepth => "KetchUp opaque edge depth",
+            PipelinePass::Edges => "KetchUp antialiased edges",
         }),
         layout: None,
         vertex: wgpu::VertexState {
@@ -1349,19 +1519,27 @@ fn create_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fragment_main"),
+            entry_point: Some(if pass == PipelinePass::EdgeDepth {
+                "fragment_edge_depth"
+            } else {
+                "fragment_main"
+            }),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
+                write_mask: if pass == PipelinePass::EdgeDepth {
+                    wgpu::ColorWrites::empty()
+                } else {
+                    wgpu::ColorWrites::ALL
+                },
             })],
             compilation_options: Default::default(),
         }),
         primitive: Default::default(),
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
-            // Stroke fringes must not occlude subsequent strokes.
-            depth_write_enabled: Some(faces),
+            // Only opaque stroke cores contribute depth; fringes blend later.
+            depth_write_enabled: Some(pass != PipelinePass::Edges),
             depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: Default::default(),
             // Faces retain their actual depth. Only their own boundary strips
@@ -1517,16 +1695,21 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         for range in &self.triangle_ranges {
             pass.draw_indexed(range.clone(), 0, 0..1);
         }
-        pass.set_pipeline(&r.edge_pipeline);
-        let mut start = 0;
-        for range in &self.triangle_ranges {
-            if start < range.start {
-                pass.draw_indexed(start..range.start, 0, 0..1);
+        // Resolve edge-to-edge occlusion before blending any colors. Otherwise
+        // later strokes (including wide selection strokes) overwrite nearer
+        // edges because the antialiased color pass cannot safely write depth.
+        for pipeline in [&r.edge_depth_pipeline, &r.edge_pipeline] {
+            pass.set_pipeline(pipeline);
+            let mut start = 0;
+            for range in &self.triangle_ranges {
+                if start < range.start {
+                    pass.draw_indexed(start..range.start, 0, 0..1);
+                }
+                start = range.end;
             }
-            start = range.end;
-        }
-        if start < self.indices.len() as u32 {
-            pass.draw_indexed(start..self.indices.len() as u32, 0, 0..1);
+            if start < self.indices.len() as u32 {
+                pass.draw_indexed(start..self.indices.len() as u32, 0, 0..1);
+            }
         }
     }
 }
@@ -2017,6 +2200,242 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "Requires a GPU adapter; verifies edge occlusion and overlay pixels"]
+    fn crossing_selection_edges_respect_depth_in_both_draw_orders() {
+        use wgpu::util::DeviceExt;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(include_str!("edges.wgsl").into()),
+        });
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let pipelines = [PipelinePass::EdgeDepth, PipelinePass::Edges]
+            .map(|pass| create_pipeline(&device, &shader, format, pass));
+        let size = wgpu::Extent3d {
+            width: 64,
+            height: 64,
+            depth_or_array_layers: 1,
+        };
+        let texture = |format, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let color = texture(
+            format,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let depth = texture(
+            wgpu::TextureFormat::Depth32Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        let color_view = color.create_view(&Default::default());
+        let depth_view = depth.create_view(&Default::default());
+        for reverse in [false, true] {
+            // Depth zero is used by intentional x-ray/wireframe overlays.
+            for rear_depth in [0.7, 0.] {
+                let mut mesh = Mesh::new(&Camera::default(), DVec2::splat(64.));
+                let strokes = [
+                    (
+                        DVec3::new(8., 32., 0.3),
+                        DVec3::new(56., 32., 0.3),
+                        1.8,
+                        Color32::BLACK,
+                    ),
+                    (
+                        DVec3::new(32., 8., rear_depth),
+                        DVec3::new(32., 56., rear_depth),
+                        3.,
+                        Color32::RED,
+                    ),
+                ];
+                for index in if reverse { [1, 0] } else { [0, 1] } {
+                    let (a, b, width, color) = strokes[index];
+                    mesh.line(a, b, width, color);
+                }
+                let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(&mesh.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(&mesh.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: 256 * 64,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &color_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        ..Default::default()
+                    });
+                    pass.set_vertex_buffer(0, vertices.slice(..));
+                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for pipeline in &pipelines {
+                        pass.set_pipeline(pipeline);
+                        pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
+                    }
+                }
+                encoder.copy_texture_to_buffer(
+                    color.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &readback,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(256),
+                            rows_per_image: Some(64),
+                        },
+                    },
+                    size,
+                );
+                queue.submit([encoder.finish()]);
+                let (send, receive) = std::sync::mpsc::channel();
+                readback
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        send.send(result).unwrap();
+                    });
+                device
+                    .poll(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: Some(std::time::Duration::from_secs(30)),
+                    })
+                    .unwrap();
+                receive.recv().unwrap().unwrap();
+                let mapped = readback.slice(..).get_mapped_range().unwrap();
+                let pixel = |x: usize, y: usize| &mapped[(y * 256 + x * 4)..(y * 256 + x * 4 + 4)];
+                if rear_depth > 0. {
+                    let crossing = pixel(32, 32);
+                    assert!(crossing[0] < 64, "near edge wins, reverse={reverse}");
+                    assert_eq!(crossing[0], crossing[1]);
+                    assert_eq!(crossing[1], crossing[2]);
+                } else if !reverse {
+                    assert_eq!(pixel(32, 32), [255, 0, 0, 255], "overlay stays visible");
+                }
+                assert_eq!(
+                    pixel(32, 16),
+                    [255, 0, 0, 255],
+                    "selection color is preserved"
+                );
+                assert!(pixel(33, 16)[1] > 0, "antialiased fringe still blends");
+            }
+        }
+    }
+
+    #[test]
+    fn wide_diagonal_selection_is_clipped_across_its_entire_footprint() {
+        for rear_depth in [0.6, 0.3, 0.2] {
+            let mut mesh = Mesh::new(&Camera::default(), DVec2::splat(100.));
+            mesh.line(
+                DVec3::new(50., 0., 0.3),
+                DVec3::new(50., 100., 0.3),
+                2.,
+                Color32::WHITE,
+            );
+            mesh.begin_selected_edges();
+            let start = mesh.indices.len();
+            mesh.surface_stroke(
+                DVec3::new(20., 20., rear_depth),
+                DVec3::new(80., 80., rear_depth),
+                6.,
+                Color32::RED,
+                &[DVec2::X * 0.01],
+            );
+            assert!(mesh.indices.len() > start);
+            for triangle in mesh.indices[start..].chunks_exact(3) {
+                let xs = [triangle[0], triangle[1], triangle[2]]
+                    .map(|i| (f64::from(mesh.vertices[i as usize].position[0]) + 1.) * 50.);
+                assert!(
+                    xs.iter().all(|&x| x <= 48.5 + 1e-5) || xs.iter().all(|&x| x >= 51.5 - 1e-5),
+                    "selection triangle crosses the foreground stroke: {xs:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn edge_occlusion_preserves_depth_differences_lost_by_gpu_rounding() {
+        let mut mesh = Mesh::new(&Camera::default(), DVec2::splat(100.));
+        let near = 0.5_f64;
+        let rear = near + 1e-10;
+        assert_eq!(near as f32, rear as f32);
+        mesh.line(
+            DVec3::new(50., 10., near),
+            DVec3::new(50., 90., near),
+            1.8,
+            Color32::BLACK,
+        );
+        mesh.occlude_annotations_with_edges();
+        let spans = mesh
+            .occlusion
+            .visible_intervals(DVec3::new(10., 50., rear), DVec3::new(90., 50., rear));
+        assert_eq!(spans.len(), 2);
+        assert!(spans[0].1 < 0.5 && spans[1].0 > 0.5);
+    }
+
+    #[test]
+    fn foreground_edges_clip_annotation_strokes_and_label_footprints() {
+        let mut mesh = Mesh::new(&Camera::default(), DVec2::splat(100.));
+        mesh.line(
+            DVec3::new(50., 10., 0.3),
+            DVec3::new(50., 90., 0.3),
+            2.,
+            Color32::BLACK,
+        );
+        mesh.occlude_annotations_with_edges();
+        let a = DVec3::new(10., 50., 0.6);
+        let b = DVec3::new(90., 50., 0.6);
+        let lines = mesh.visible_annotation_line(a, b);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].1.x < 49. && lines[1].0.x > 51.);
+        assert_eq!(
+            mesh.visible_annotation_line(a.truncate().extend(0.2), b.truncate().extend(0.2)),
+            vec![(a.truncate().extend(0.2), b.truncate().extend(0.2))]
+        );
+        let polygon = vec![
+            DVec2::new(40., 40.),
+            DVec2::new(60., 40.),
+            DVec2::new(60., 60.),
+            DVec2::new(40., 60.),
+        ];
+        let visible = mesh.occlusion.visible_polygons(polygon, 0.6);
+        assert!((polygon_area(&visible) - 340.).abs() < 1e-7);
+    }
+
     fn occluding_rectangle(occlusion: &mut Occlusion, lo: DVec2, hi: DVec2, depth: f64) {
         let p = [lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y)].map(|p| p.extend(depth));
         occlusion.insert([p[0], p[1], p[2]]);
@@ -2112,6 +2531,32 @@ mod tests {
             });
             output.textures_delta.clear();
         }
+    }
+
+    #[test]
+    fn coplanar_occluders_do_not_fragment_visible_strokes() {
+        let mut occlusion = Occlusion::default();
+        let plane = |x, y| DVec3::new(x, y, 0.4 + x * 0.001);
+        for i in 0..128 {
+            let offset = f64::from(i) * 0.1;
+            occlusion.insert([
+                plane(0., offset),
+                plane(100., offset),
+                plane(50., 100. + offset),
+            ]);
+        }
+        let polygon = vec![
+            DVec2::new(40., 40.),
+            DVec2::new(60., 40.),
+            DVec2::new(60., 60.),
+            DVec2::new(40., 60.),
+        ];
+        let visible = occlusion.visible_surface_polygons(
+            polygon.clone(),
+            plane(0., 0.),
+            DVec2::new(0.001, 0.),
+        );
+        assert_eq!(visible, vec![polygon]);
     }
 
     fn polygon_area(polygons: &[Vec<DVec2>]) -> f64 {
