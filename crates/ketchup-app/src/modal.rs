@@ -326,6 +326,7 @@ pub(crate) struct ModalSlots<'a> {
 
 impl ModalSlots<'_> {
     pub(crate) fn header(&mut self, content: impl FnOnce(&mut egui::Ui)) {
+        let mut close_hovered = false;
         // A drag-sensing parent lets buttons in the header keep priority.
         let header =
             self.ui
@@ -359,7 +360,12 @@ impl ModalSlots<'_> {
                                     "close",
                                     colors.muted,
                                 );
-                                if response.on_hover_text("Close (Esc)").clicked() {
+                                close_hovered = response.hovered();
+                                if response
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .on_hover_text("Close (Esc)")
+                                    .clicked()
+                                {
                                     ui.close();
                                 }
                             }
@@ -371,7 +377,12 @@ impl ModalSlots<'_> {
                         });
                     });
                 });
-        let response = header.response.on_hover_cursor(egui::CursorIcon::Grab);
+        let response = header.response;
+        // The drag-sensing parent can also be hovered over its close button.
+        // Preserve the button cursor instead of overwriting it with Grab.
+        if !close_hovered && response.hovered() {
+            self.ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
         let origin_id = self.id.with("header_drag_origin");
         if response.dragged() {
             let ctx = self.ui.ctx();
