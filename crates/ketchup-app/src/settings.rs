@@ -267,26 +267,28 @@ impl KetchupApp {
                             egui::vec2(ui.available_width(), size.y),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
-                                egui::Frame::new().inner_margin(20).show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.spacing_mut().item_spacing = egui::vec2(8., 12.);
-                                    let key = match self.general_settings.section {
-                                        Section::Colors => "settings/colors",
-                                        Section::Navigation => "settings/navigation",
-                                        Section::Shortcuts => "settings/shortcuts",
-                                        Section::Units => "settings/units",
-                                        Section::Grid => "settings/grid",
-                                        Section::StockPricing => "settings/stock",
-                                        Section::SurfaceTreatment => "settings/treatment",
-                                    };
-                                    let scroll = sidebar::restored_scroll_area(
-                                        ui,
-                                        key,
-                                        egui::ScrollArea::vertical()
-                                            .id_salt(key)
-                                            .auto_shrink([false, false]),
-                                    );
-                                    let output = scroll.show(ui, |ui| {
+                                let key = match self.general_settings.section {
+                                    Section::Colors => "settings/colors",
+                                    Section::Navigation => "settings/navigation",
+                                    Section::Shortcuts => "settings/shortcuts",
+                                    Section::Units => "settings/units",
+                                    Section::Grid => "settings/grid",
+                                    Section::StockPricing => "settings/stock",
+                                    Section::SurfaceTreatment => "settings/treatment",
+                                };
+                                let scroll = sidebar::restored_scroll_area(
+                                    ui,
+                                    key,
+                                    egui::ScrollArea::vertical()
+                                        .id_salt(key)
+                                        .auto_shrink([false, false]),
+                                );
+                                let output = scroll.show(ui, |ui| {
+                                    // Keep padding inside the viewport so the scrollbar
+                                    // stays against the settings panel edge.
+                                    egui::Frame::new().inner_margin(20).show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.spacing_mut().item_spacing = egui::vec2(8., 12.);
                                         ui.horizontal(|ui| {
                                             let (rect, _) = ui.allocate_exact_size(
                                                 egui::vec2(22., 22.),
@@ -303,12 +305,12 @@ impl KetchupApp {
                                         ui.add_space(8.);
                                         self.settings_contents(ui);
                                     });
-                                    sidebar::remember_scroll(
-                                        ui.ctx(),
-                                        key,
-                                        output.state.clamped_offset(),
-                                    );
                                 });
+                                sidebar::remember_scroll(
+                                    ui.ctx(),
+                                    key,
+                                    output.state.clamped_offset(),
+                                );
                             },
                         );
                     });
