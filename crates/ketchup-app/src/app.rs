@@ -1865,7 +1865,8 @@ impl KetchupApp {
 
     fn app_bar_menu(ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui)) {
         // MenuConfig carries the same padding into nested submenus.
-        egui::menu::MenuButton::new(title)
+        // Override the stroke for every state, including hover and an open menu.
+        egui::menu::MenuButton::from_button(egui::Button::new(title).stroke(Stroke::NONE))
             .config(egui::menu::MenuConfig::new().style(Self::menu_style))
             .ui(ui, content);
     }
@@ -1914,10 +1915,16 @@ impl KetchupApp {
                     if self.updates.ready() && ui.button("Update ready").clicked() {
                         self.updates.open = true;
                     }
+                    let avatar = ui.add(egui::Button::new("").min_size(egui::vec2(32., 32.))
+                        .corner_radius(16).stroke(Stroke::new(1., foreground.gamma_multiply(0.65))))
+                        .on_hover_text("Account · Not connected");
+                    avatar.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Account"));
+                    icons::line_icon(ui.painter(), avatar.rect.center(), "account", foreground);
+                    ui.add(egui::Separator::default().vertical().spacing(12.));
                     let suggestion_icon = egui::Atom::paint(egui::vec2(18., 18.), |ui, args| {
                         icons::line_icon(ui.painter(), args.rect.center(), "suggest_feature", args.fallback_text_color);
                     });
-                    if ui.add(egui::Button::new((suggestion_icon, "Suggest a feature")))
+                    if ui.add(egui::Button::new((suggestion_icon, "Suggest a feature")).stroke(Stroke::new(1., foreground.gamma_multiply(0.65))))
                         .on_hover_text("Suggest a feature on GitHub")
                         .clicked()
                     {
@@ -2003,7 +2010,7 @@ impl KetchupApp {
                                     ("obj", "Wavefront OBJ (.obj; metres)…", "Faces and lines, including negative vertex indices. Metres, Z up. No materials, textures or group hierarchy."),
                                     ("dxf", "DXF 2D (.dxf)…", "Text DXF: LINE, straight LWPOLYLINE, ARC and CIRCLE in XY. Curves approximated with up to 96 segments per circle. No blocks, bulges or widths. Declared units; unitless files use millimetres."),
                                 ] {
-                                    if ui.selectable_label(self.project.import_format == extension, label).on_hover_text(help).clicked() && !self.project.blocked() {
+                                    if ui.button(label).on_hover_text(help).clicked() && !self.project.blocked() {
                                         self.project.import_format = extension.into();
                                         self.import_model(&ctx);
                                         ui.close();
@@ -2015,7 +2022,7 @@ impl KetchupApp {
                                     (false, "Wavefront OBJ (.obj)…", "Visible edges and triangulated faces in metres, Z up. Geometry only."),
                                     (true, "STL (.stl; millimetres)…", "Binary STL of visible faces in millimetres, Z up. No edges or materials. Ensure solids are closed before printing; no automatic repair."),
                                 ] {
-                                    if ui.selectable_label(self.project.export_stl == stl, label).on_hover_text(help).clicked() && !self.project.blocked() {
+                                    if ui.button(label).on_hover_text(help).clicked() && !self.project.blocked() {
                                         self.project.export_stl = stl;
                                         self.export_model(&ctx);
                                         ui.close();
@@ -2129,7 +2136,7 @@ impl KetchupApp {
                                     .unwrap_or_else(|| action.to_owned());
                                 let response = ui.add_enabled(
                                     enabled,
-                                    egui::Button::new("").min_size(egui::vec2(32., 32.)),
+                                    egui::Button::new("").min_size(egui::vec2(32., 32.)).stroke(Stroke::new(1., foreground.gamma_multiply(0.65))),
                                 );
                                 icons::line_icon(
                                     ui.painter(),
