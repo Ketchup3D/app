@@ -26,13 +26,13 @@ impl SolidOperation {
     }
 }
 #[derive(Clone, Copy)]
-struct Frame {
+pub(crate) struct Frame {
     center: DVec3,
     scale: f64,
-    epsilon: f64,
+    pub(crate) epsilon: f64,
 }
 impl Frame {
-    fn new(models: &[&Model]) -> Result<Self, &'static str> {
+    pub(crate) fn new(models: &[&Model]) -> Result<Self, &'static str> {
         let mut points = models
             .iter()
             .flat_map(|m| m.vertices.values().map(|v| v.position));
@@ -50,7 +50,7 @@ impl Frame {
             epsilon: (1e-7 / scale).clamp(1e-12, 1e-8),
         })
     }
-    fn local(self, p: DVec3) -> DVec3 {
+    pub(crate) fn local(self, p: DVec3) -> DVec3 {
         (p - self.center) / self.scale
     }
     fn world(self, p: DVec3) -> DVec3 {
@@ -269,7 +269,7 @@ fn import_surfaces(model: &Model, frame: Frame) -> Result<Vec<Polygon>, &'static
     }
     Ok(surfaces)
 }
-fn import(model: &Model, frame: Frame) -> Result<Vec<Polygon>, &'static str> {
+pub(crate) fn import(model: &Model, frame: Frame) -> Result<Vec<Polygon>, &'static str> {
     // Object boundaries isolate their geometry. Combine child volumes rather
     // than welding overlapping or touching children into a non-manifold mesh.
     let roots = model.root_entities();
@@ -577,7 +577,7 @@ fn merged_surfaces(mesh: &Indexed, epsilon: f64) -> Result<Vec<Surface>, &'stati
     }
     Ok(result)
 }
-fn output(
+pub(crate) fn output(
     model: &mut Model,
     surfaces: Vec<Polygon>,
     frame: Frame,

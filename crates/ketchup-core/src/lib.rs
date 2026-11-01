@@ -1,3 +1,5 @@
+pub mod connections;
+pub mod joinery;
 mod cleanup;
 pub mod annotations;
 pub mod camera;
@@ -265,3 +267,7 @@ impl Tool {
 
 /// Stable identity shared by catalog entries and document material assignments.
 pub type MaterialId = uuid::Uuid;
+
+pub use document::SharedProject;
+
+pub use history::{HistoryAuthor, HistoryAction};

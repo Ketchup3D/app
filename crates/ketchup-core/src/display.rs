@@ -31,7 +31,14 @@ impl FaceStyle {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DisplaySettings {
+    pub joinery_preview: bool,
+    pub fasteners: bool,
+    pub fastener_preview: bool,
+    pub fastener_face_handles: bool,
     pub units: crate::UnitSettings,
+    /// Smooth only cast-shadow boundaries, preserving original geometry rendering.
+    #[serde(alias = "antialiasing")]
+    pub shadow_antialiasing: bool,
     pub grid: bool,
     pub grid_auto_size: bool,
     pub grid_spacing: f64,
@@ -80,7 +87,12 @@ pub struct DisplaySettings {
 impl Default for DisplaySettings {
     fn default() -> Self {
         Self {
+            joinery_preview: true,
+            fasteners: true,
+            fastener_preview: false,
+            fastener_face_handles: false,
             units: crate::UnitSettings::default(),
+            shadow_antialiasing: true,
             grid: false,
             grid_auto_size: true,
             grid_spacing: 1.,

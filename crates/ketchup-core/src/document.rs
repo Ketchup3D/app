@@ -4,6 +4,43 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// PHP's associative JSON roundtrip historically encoded empty objects as [].
+/// Accept that one legacy representation only on map fields; real sequences
+/// are still rejected, and serialization always emits a JSON object.
+pub(crate) fn deserialize_map_or_empty_sequence<'de, D, K, V>(
+    deserializer: D,
+) -> Result<BTreeMap<K, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    K: Deserialize<'de> + Ord,
+    V: Deserialize<'de>,
+{
+    struct MapVisitor<K, V>(std::marker::PhantomData<(K, V)>);
+    impl<'de, K: Deserialize<'de> + Ord, V: Deserialize<'de>> serde::de::Visitor<'de>
+        for MapVisitor<K, V>
+    {
+        type Value = BTreeMap<K, V>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map or an empty legacy array")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Self::Value, M::Error> {
+            Deserialize::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+        fn visit_seq<S: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: S,
+        ) -> Result<Self::Value, S::Error> {
+            if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::custom(
+                    "expected a map; only empty legacy arrays are supported",
+                ));
+            }
+            Ok(BTreeMap::new())
+        }
+    }
+    deserializer.deserialize_any(MapVisitor::<K, V>(std::marker::PhantomData))
+}
+
 pub const EPS: f64 = 1.0e-7;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -29,19 +66,30 @@ pub struct Face {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Model {
+    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
+    pub connections: BTreeMap<u64, crate::connections::Connection>,
+    #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
     pub vertices: BTreeMap<u64, Vertex>,
+    #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
     pub edges: BTreeMap<u64, Edge>,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
     pub faces: BTreeMap<u64, Face>,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
     pub face_colors: BTreeMap<u64, [u8; 3]>,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
     pub dimensions: BTreeMap<u64, crate::Dimension>,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
     pub texts: BTreeMap<u64, crate::TextAnnotation>,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
     pub objects: BTreeMap<u64, crate::Object>,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
     pub stock_materials: BTreeMap<crate::MaterialId, crate::StockMaterial>,
     #[serde(default)]
     pub hidden: BTreeSet<u64>,
@@ -50,8 +98,10 @@ pub struct Model {
     #[serde(skip)]
     pub edit_context: Option<u64>,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
     pub tags: BTreeMap<u64, crate::Tag>,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
     pub entity_tags: BTreeMap<u64, u64>,
     pub(crate) next_id: u64,
 }
@@ -253,7 +303,8 @@ impl Model {
         Some(vertices.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p))))
     }
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.vertices.len() > 1_000_000
+        if self.connections.len() > 10000
+            || self.vertices.len() > 1_000_000
             || self.edges.len() > 1_000_000
             || self.faces.len() > 1_000_000
             || self.objects.len() > 1_000_000
@@ -261,6 +312,12 @@ impl Model {
             || self.texts.len() > 1_000_000
         {
             return Err("Model is too large");
+        }
+        if self.connections.values().any(|c| match &c.operation {
+            crate::connections::ConnectionOperation::Fasteners(s) => !s.valid(),
+            crate::connections::ConnectionOperation::Joinery(s) => !s.valid(),
+        }) {
+            return Err("Invalid connection parameters");
         }
         let max_id = self
             .vertices
@@ -270,6 +327,7 @@ impl Model {
             .chain(self.objects.keys())
             .chain(self.dimensions.keys())
             .chain(self.texts.keys())
+            .chain(self.connections.keys())
             .max()
             .copied()
             .unwrap_or(0);
@@ -349,8 +407,23 @@ impl Model {
     }
 }
 
+/// Public linkage only. Credentials and selection leases are never stored in a project.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SharedProject {
+    pub server: String,
+    pub id: String,
+    pub revision: u64,
+    pub server_updated_at: u64,
+    #[serde(default)]
+    pub file_updated_at: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Document {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_project: Option<SharedProject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_author: Option<crate::HistoryAuthor>,
     /// Assigned when tracking shared material usage; absent in older projects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<uuid::Uuid>,
@@ -366,6 +439,7 @@ pub struct Document {
     pub camera: Camera,
     /// Per-viewport framing belongs to this project, unlike reusable layout preferences.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
     pub viewport_cameras: BTreeMap<u64, Camera>,
     /// Selection belongs to this project, including the object open for editing.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -386,6 +460,8 @@ impl Default for Document {
     fn default() -> Self {
         Self {
             project_id: None,
+            shared_project: None,
+            project_author: None,
             version: 2,
             name: "Untitled model".into(),
             model: Model::default(),
@@ -423,5 +499,76 @@ impl Document {
             return Err("Invalid camera".into());
         }
         Ok(doc)
+    }
+}
+
+#[cfg(test)]
+mod legacy_json_map_tests {
+    use super::*;
+    #[test]
+    fn php_empty_maps_load_and_are_saved_as_objects() {
+        let mut json = serde_json::to_value(Document::default()).unwrap();
+        for field in [
+            "connections",
+            "vertices",
+            "edges",
+            "faces",
+            "face_colors",
+            "dimensions",
+            "texts",
+            "objects",
+            "stock_materials",
+            "tags",
+            "entity_tags",
+        ] {
+            json["model"][field] = serde_json::json!([]);
+        }
+        json["viewport_cameras"] = serde_json::json!([]);
+        let loaded = Document::from_json(&json.to_string()).unwrap();
+        let saved = serde_json::to_value(loaded).unwrap();
+        for field in [
+            "connections",
+            "vertices",
+            "edges",
+            "faces",
+            "face_colors",
+            "dimensions",
+            "texts",
+            "objects",
+            "stock_materials",
+            "tags",
+            "entity_tags",
+        ] {
+            assert!(saved["model"][field].is_object(), "{field}");
+        }
+        assert!(saved["model"]["hidden"].is_array());
+        assert!(saved["model"]["locked"].is_array());
+    }
+    #[test]
+    fn legacy_definition_maps_preserve_groups_and_undo_history() {
+        let mut doc = Document::default();
+        let edge = doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+        let before = doc.model.clone();
+        let group = doc
+            .model
+            .make_object(&BTreeSet::from([edge]), false, "Group")
+            .unwrap();
+        doc.history.record("Group", before, &doc.model);
+        let mut json = serde_json::to_value(&doc).unwrap();
+        json["model"]["objects"][group.to_string()]["definition_entities"] = serde_json::json!([]);
+        json["history"]["undo"][0]["change"]["objects"][0][2]["definition_entities"] =
+            serde_json::json!([]);
+        let mut loaded = Document::from_json(&json.to_string()).unwrap();
+        assert_eq!(loaded.history.undo_label(), Some("Group"));
+        assert!(loaded.history.undo(&mut loaded.model));
+        assert!(loaded.model.objects.is_empty());
+        assert!(loaded.history.redo(&mut loaded.model));
+        assert!(loaded.model.objects.contains_key(&group));
+    }
+    #[test]
+    fn nonempty_sequences_are_not_silently_treated_as_maps() {
+        let mut json = serde_json::to_value(Document::default()).unwrap();
+        json["model"]["vertices"] = serde_json::json!([{"id":1,"position":[0,0,0]}]);
+        assert!(Document::from_json(&json.to_string()).is_err());
     }
 }

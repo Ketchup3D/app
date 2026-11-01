@@ -139,7 +139,7 @@ impl Model {
         self.objects.get_mut(&id).unwrap().entities.clear();
         Ok(())
     }
-    fn replace_contents(&mut self, id: u64, contents: &Self) -> Result<(), &'static str> {
+    pub(crate) fn replace_contents(&mut self, id: u64, contents: &Self) -> Result<(), &'static str> {
         self.remove_contents(id)?;
         self.vertices.extend(contents.vertices.clone());
         self.edges.extend(contents.edges.clone());

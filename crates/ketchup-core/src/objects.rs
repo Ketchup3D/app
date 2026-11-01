@@ -45,6 +45,7 @@ pub struct Object {
     pub entities: BTreeSet<u64>,
     /// Stable definition entity -> this instance's entity, retained by copies.
     #[serde(default)]
+    #[serde(deserialize_with = "crate::document::deserialize_map_or_empty_sequence")]
     pub definition_entities: BTreeMap<u64, u64>,
 }
 
@@ -313,6 +314,8 @@ impl Model {
         let mut ids = self.expand_entities(roots);
         ids.extend(self.boundary_edges(&ids));
         let mut copy = self.clone();
+        copy.connections
+            .retain(|_, c| c.members.iter().all(|id| ids.contains(id)));
         copy.sync_dimensions();
         copy.dimensions.retain(|id, _| ids.contains(id));
         copy.texts.retain(|id, _| ids.contains(id));
@@ -482,6 +485,20 @@ impl Model {
                 .collect();
             self.objects.insert(o.id, o);
         }
+        for connection in source.connections.values() {
+            if let (Some(a), Some(b)) = (
+                ids.get(&connection.members[0]),
+                ids.get(&connection.members[1]),
+            ) {
+                let mut connection = connection.clone();
+                connection.members = [*a, *b];
+                connection.entry_face = connection
+                    .entry_face
+                    .and_then(|face| ids.get(&face).copied());
+                let id = self.id();
+                self.connections.insert(id, connection);
+            }
+        }
         let mut tags = BTreeMap::new();
         for tag in source.tags.values() {
             let folded = tag.name.to_lowercase();
@@ -525,7 +542,9 @@ impl Model {
             return None;
         }
         let ids = self.expand_entities(selected);
-        let copy = self.copy_entities(selected);
+        let mut copy = self.copy_entities(selected);
+        // Regrouping remaps existing relations rather than duplicating them.
+        copy.connections.clear();
         if copy.edges.is_empty() && copy.dimensions.is_empty() && copy.texts.is_empty() {
             return None;
         }
@@ -551,7 +570,18 @@ impl Model {
             .retain(|id, _| !ids.contains(id) || outside_edges.contains(id));
         self.objects.retain(|id, _| !ids.contains(id));
         self.clean_entity_state();
-        let entities = self.paste_entities(&copy, DVec3::ZERO);
+        let prepared = self.prepare_clipboard(&copy).ok()?;
+        let (entities, remap) = self.paste_mapped(&prepared, DVec3::ZERO, true);
+        for connection in self.connections.values_mut() {
+            for member in &mut connection.members {
+                if let Some(id) = remap.get(member) {
+                    *member = *id;
+                }
+            }
+            if let Some(face) = connection.entry_face.and_then(|id| remap.get(&id).copied()) {
+                connection.entry_face = Some(face);
+            }
+        }
         let id = self.id();
         let definition_entities = if component {
             self.expand_entities(&entities)

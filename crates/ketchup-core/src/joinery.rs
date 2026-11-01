@@ -1,0 +1,842 @@
+//! Parametric joinery: source boards and their persistent relations stay intact.
+//! Work on a clone and publish both members together, only after solid validation.
+use crate::{
+    DVec3, Model, ObjectKind,
+    csg::{self, Boolean, Polygon},
+    solids::{self, Frame},
+};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+const EPS: f64 = 1e-7;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JointKind {
+    #[default]
+    MortiseTenon,
+    HalfLap,
+    TongueGroove,
+    Rabbet,
+    Dovetail,
+    Finger,
+}
+impl JointKind {
+    pub const ALL: [Self; 6] = [
+        Self::MortiseTenon,
+        Self::HalfLap,
+        Self::TongueGroove,
+        Self::Rabbet,
+        Self::Dovetail,
+        Self::Finger,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MortiseTenon => "Mortise and tenon",
+            Self::HalfLap => "Half lap",
+            Self::TongueGroove => "Tongue and groove",
+            Self::Rabbet => "Rabbet",
+            Self::Dovetail => "Dovetail",
+            Self::Finger => "Finger joint",
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JointSettings {
+    pub kind: JointKind,
+    /// World axis along the insertion direction; width is a distinct world axis.
+    pub depth_axis: usize,
+    pub width_axis: usize,
+    pub width_ratio: f64,
+    pub height_ratio: f64,
+    pub fingers: u32,
+    pub taper_degrees: f64,
+    /// Extra lateral clearance removed from the receiving part, in metres.
+    pub clearance: f64,
+}
+impl Default for JointSettings {
+    fn default() -> Self {
+        Self {
+            kind: JointKind::MortiseTenon,
+            depth_axis: 0,
+            width_axis: 1,
+            width_ratio: 0.5,
+            height_ratio: 0.5,
+            fingers: 4,
+            taper_degrees: 8.,
+            clearance: 0.0001,
+        }
+    }
+}
+impl JointSettings {
+    pub fn valid(&self) -> bool {
+        self.depth_axis < 3
+            && self.width_axis < 3
+            && self.depth_axis != self.width_axis
+            && self.width_ratio.is_finite()
+            && (0.1..=0.9).contains(&self.width_ratio)
+            && self.height_ratio.is_finite()
+            && (0.1..=0.9).contains(&self.height_ratio)
+            && (2..=16).contains(&self.fingers)
+            && self.taper_degrees.is_finite()
+            && (1. ..=30.).contains(&self.taper_degrees)
+            && self.clearance.is_finite()
+            && (0. ..=0.01).contains(&self.clearance)
+    }
+}
+
+fn board(model: &Model, id: u64) -> Result<(DVec3, DVec3), &'static str> {
+    let object = model
+        .objects
+        .get(&id)
+        .ok_or("Choose two groups or components")?;
+    if object
+        .entities
+        .iter()
+        .any(|id| !model.edges.contains_key(id) && !model.faces.contains_key(id))
+    {
+        return Err(
+            "Each part must contain only board geometry; select individual boards, not assemblies",
+        );
+    }
+    let contents = model.object_contents(id).ok_or("Missing board")?;
+    let mut points = contents.vertices.values().map(|v| v.position);
+    let first = points.next().ok_or("The board has no geometry")?;
+    let (lo, hi) = points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p)));
+    if !lo.is_finite() || !hi.is_finite() || (hi - lo).min_element() <= EPS * 10. {
+        return Err("Boards must have finite, positive dimensions");
+    }
+    // Volume alone cannot distinguish a rotated/non-box surface from a box.
+    for face in contents.faces.values() {
+        if !face.holes.is_empty() {
+            return Err("Start with rectangular boards without existing joints or holes");
+        }
+        let vertices: Vec<_> = face
+            .vertices
+            .iter()
+            .map(|id| contents.vertices[id].position)
+            .collect();
+        if !(0..3).any(|axis| {
+            [lo[axis], hi[axis]]
+                .into_iter()
+                .any(|x| vertices.iter().all(|p| (p[axis] - x).abs() < EPS))
+        }) {
+            return Err(
+                "Wood Joinery currently requires rectangular boards aligned with the project axes",
+            );
+        }
+    }
+    let volume = model
+        .copy_entities(&BTreeSet::from([id]))
+        .solid_volume(id)?;
+    let size = hi - lo;
+    let expected = size.x * size.y * size.z;
+    if (volume - expected).abs() > expected * 1e-6 {
+        return Err("Start with solid rectangular boards without existing joints or holes");
+    }
+    Ok((lo, hi))
+}
+
+/// Convex eight-corner prism, with winding determined in world coordinates.
+fn prism(points: [DVec3; 8], frame: Frame) -> Result<Vec<Polygon>, &'static str> {
+    let center = points.iter().copied().sum::<DVec3>() / 8.;
+    [
+        [0, 1, 2, 3],
+        [4, 7, 6, 5],
+        [0, 4, 5, 1],
+        [1, 5, 6, 2],
+        [2, 6, 7, 3],
+        [3, 7, 4, 0],
+    ]
+    .into_iter()
+    .map(|ring| {
+        let mut p = Polygon::new(
+            ring.map(|i| frame.local(points[i])).to_vec(),
+            None,
+            frame.epsilon,
+        )
+        .ok_or("Joint details are too small for the model precision")?;
+        if p.normal
+            .dot(frame.local(points[ring[0]]) - frame.local(center))
+            < 0.
+        {
+            p.flip();
+        }
+        Ok(p)
+    })
+    .collect()
+}
+fn box_points(lo: DVec3, hi: DVec3) -> [DVec3; 8] {
+    [
+        DVec3::new(lo.x, lo.y, lo.z),
+        DVec3::new(hi.x, lo.y, lo.z),
+        DVec3::new(hi.x, hi.y, lo.z),
+        DVec3::new(lo.x, hi.y, lo.z),
+        DVec3::new(lo.x, lo.y, hi.z),
+        DVec3::new(hi.x, lo.y, hi.z),
+        DVec3::new(hi.x, hi.y, hi.z),
+        DVec3::new(lo.x, hi.y, hi.z),
+    ]
+}
+impl Model {
+    /// Apply a relation to a disposable evaluated model. Original board bounds
+    /// always come from stock, allowing multiple joints to affect the same board.
+    pub(crate) fn cut_joint(
+        &mut self,
+        members: [u64; 2],
+        settings: &JointSettings,
+        stock: &Model,
+    ) -> Result<(), &'static str> {
+        if !settings.valid() || members[0] == members[1] {
+            return Err("Invalid wood joint settings or pair of boards");
+        }
+        let (a, b) = (board(stock, members[0])?, board(stock, members[1])?);
+        let (lo, hi) = (a.0.max(b.0), a.1.min(b.1));
+        let size = hi - lo;
+        if size.min_element() <= EPS * 10. {
+            return Err(
+                "Position the boards with a shared volume: their overlap defines the joint depth",
+            );
+        }
+        let (d, u) = (settings.depth_axis, settings.width_axis);
+        let v = 3 - d - u;
+        // Both parts must have stock outside opposite ends of the joint.
+        let forward = (a.0[d] + a.1[d]) < (b.0[d] + b.1[d]);
+        let (first_end, second_end) = if forward {
+            (a.0[d], b.1[d])
+        } else {
+            (b.0[d], a.1[d])
+        };
+        if lo[d] - first_end <= EPS || second_end - hi[d] <= EPS {
+            return Err(
+                "Choose a depth axis along which both boards extend beyond opposite ends of their overlap",
+            );
+        }
+        if settings.clearance * 2. >= size[u].min(size[v]) * 0.1 {
+            return Err("Clearance is too large for this joint");
+        }
+        let copies = members.map(|id| self.copy_entities(&BTreeSet::from([id])));
+        let frame = Frame::new(&[&copies[0], &copies[1]])?;
+        let mut solids = [
+            solids::import(&copies[0], frame)?,
+            solids::import(&copies[1], frame)?,
+        ];
+        let overlap = prism(box_points(lo, hi), frame)?;
+        let mut profiles = Vec::new();
+        let mut pockets = Vec::new();
+        let count = if settings.kind == JointKind::Finger {
+            settings.fingers * 2
+        } else {
+            1
+        };
+        for i in 0..count {
+            if settings.kind == JointKind::Finger && i % 2 == 1 {
+                continue;
+            }
+            let (mut l, mut h) = (lo, hi);
+            match settings.kind {
+                JointKind::MortiseTenon | JointKind::TongueGroove | JointKind::Dovetail => {
+                    let margin = size[u] * (1. - settings.width_ratio) * 0.5;
+                    l[u] += margin;
+                    h[u] -= margin;
+                    if settings.kind == JointKind::MortiseTenon {
+                        let margin = size[v] * (1. - settings.height_ratio) * 0.5;
+                        l[v] += margin;
+                        h[v] -= margin;
+                    }
+                }
+                JointKind::HalfLap => {
+                    h[v] = lo[v] + size[v] * 0.5;
+                }
+                JointKind::Rabbet => {
+                    h[u] = lo[u] + size[u] * settings.width_ratio;
+                }
+                JointKind::Finger => {
+                    l[u] = lo[u] + size[u] * i as f64 / count as f64;
+                    h[u] = lo[u] + size[u] * (i + 1) as f64 / count as f64;
+                }
+            }
+            let mut points = box_points(l, h);
+            if settings.kind == JointKind::Dovetail {
+                let taper = size[d] * settings.taper_degrees.to_radians().tan();
+                if taper * 2. >= h[u] - l[u] - EPS {
+                    return Err("Dovetail angle or depth leaves no material at the neck");
+                }
+                // A narrow neck at the first board's shoulder, widening into B.
+                for p in &mut points {
+                    let neck = if forward {
+                        (p[d] - lo[d]).abs() < EPS
+                    } else {
+                        (p[d] - hi[d]).abs() < EPS
+                    };
+                    if neck {
+                        p[u] += if (p[u] - l[u]).abs() < EPS {
+                            taper
+                        } else {
+                            -taper
+                        };
+                    }
+                }
+            }
+            profiles.push(prism(points, frame)?);
+            // Grow the receiver cut only laterally; clip it to its stock by CSG.
+            let center = (l + h) * 0.5;
+            for p in &mut points {
+                for axis in [u, v] {
+                    p[axis] += if p[axis] < center[axis] {
+                        -settings.clearance
+                    } else {
+                        settings.clearance
+                    };
+                }
+            }
+            pockets.push(prism(points, frame)?);
+        }
+        let mut waste = overlap;
+        for profile in profiles {
+            waste = csg::apply(waste, profile, Boolean::Difference, frame.epsilon)?;
+        }
+        solids[0] = csg::apply(solids[0].clone(), waste, Boolean::Difference, frame.epsilon)?;
+        for pocket in pockets {
+            solids[1] = csg::apply(
+                solids[1].clone(),
+                pocket,
+                Boolean::Difference,
+                frame.epsilon,
+            )?;
+        }
+        // Output and validate both members before replacing any live document data.
+        let mut next = self.clone();
+        for (id, polygons) in members.into_iter().zip(solids) {
+            let temp = solids::output(&mut next, polygons, frame, "Joint result", false, true)?
+                .ok_or("The joint would remove an entire board")?;
+            next.solid_volume(temp)?;
+            let contents = next
+                .object_contents(temp)
+                .ok_or("Cannot read joint result")?;
+            next.objects.remove(&temp);
+            next.replace_contents(id, &contents)?;
+            let object = next.objects.get_mut(&id).unwrap();
+            if matches!(object.kind, ObjectKind::Component { .. }) {
+                object.kind = ObjectKind::Component {
+                    definition: uuid::Uuid::new_v4(),
+                };
+                object.definition_entities = object.entities.iter().map(|id| (*id, *id)).collect();
+            }
+        }
+        // Only the derived instances change. Refresh ancestor mappings without
+        // propagating a cut into unconnected copies of a source component.
+        let mut ancestors = BTreeSet::new();
+        for member in members {
+            let mut parent = next.parent(member);
+            while let Some(id) = parent {
+                ancestors.insert(id);
+                parent = next.parent(id);
+            }
+        }
+        for id in ancestors {
+            let geometry = next
+                .expand_entities(&next.objects[&id].entities)
+                .into_iter()
+                .filter(|id| !next.objects.contains_key(id))
+                .map(|id| (id, id))
+                .collect();
+            let object = next.objects.get_mut(&id).unwrap();
+            if matches!(object.kind, ObjectKind::Component { .. }) {
+                object.kind = ObjectKind::Component {
+                    definition: uuid::Uuid::new_v4(),
+                };
+                object.definition_entities = geometry;
+            }
+        }
+        // Geometry replacement invalidates saved entry-face IDs. Re-evaluate the
+        // existing hardware against the new surfaces without deleting relations.
+        for connection in next.connections.values_mut() {
+            if connection.members.iter().any(|id| members.contains(id)) {
+                connection.entry_face = None;
+            }
+        }
+
+        next.validate()
+            .map_err(|_| "The joint cannot be represented as valid solid geometry")?;
+        for id in members {
+            next.copy_entities(&BTreeSet::from([id])).solid_volume(id)?;
+        }
+        *self = next;
+        Ok(())
+    }
+}
+
+/// Derived geometry is deliberately absent from saved projects and history.
+/// Invalid or separated pairs retain their source boards and their relation, so
+/// bringing them back into a usable position reactivates the joint automatically.
+pub struct GeometryEvaluation {
+    pub model: Model,
+    pub errors: Vec<(u64, String)>,
+}
+impl Model {
+    pub fn evaluate_joinery(&self) -> GeometryEvaluation {
+        use crate::connections::ConnectionOperation;
+        let mut model = self.clone();
+        let context = model.edit_context.take();
+        let mut errors = Vec::new();
+        for (id, connection) in &self.connections {
+            if let ConnectionOperation::Joinery(settings) = &connection.operation {
+                if let Err(error) = model.cut_joint(connection.members, settings, self) {
+                    errors.push((*id, error.into()));
+                }
+            }
+        }
+        model.edit_context = context;
+        // An evaluated mesh is a terminal product, not another source model.
+        // Keeping only hardware prevents accidental repeated evaluation of cuts.
+        model
+            .connections
+            .retain(|_, c| matches!(c.operation, ConnectionOperation::Fasteners(_)));
+        GeometryEvaluation { model, errors }
+    }
+    #[cfg(test)]
+    fn test_cut_joint(
+        &mut self,
+        members: [u64; 2],
+        settings: &JointSettings,
+    ) -> Result<(), &'static str> {
+        if self.selection_protected(&BTreeSet::from(members))
+            || members.iter().any(|id| self.is_hidden(*id))
+        {
+            return Err("Protected board");
+        }
+        let stock = self.clone();
+        let context = self.edit_context.take();
+        let result = self.cut_joint(members, settings, &stock);
+        self.edit_context = context;
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        Document, History, SolidOperation,
+        connections::{Connection, ConnectionOperation},
+    };
+
+    fn board_at(model: &mut Model, lo: DVec3, hi: DVec3, component: bool) -> u64 {
+        let mut body = Model::default();
+        let corners = [
+            lo,
+            DVec3::new(hi.x, lo.y, lo.z),
+            DVec3::new(hi.x, hi.y, lo.z),
+            DVec3::new(lo.x, hi.y, lo.z),
+        ];
+        for i in 0..4 {
+            body.add_edge(corners[i], corners[(i + 1) % 4]).unwrap();
+        }
+        let face = *body.faces.keys().next().unwrap();
+        let normal = crate::faces::plane(&body, &body.faces[&face].vertices)
+            .unwrap()
+            .normal;
+        body.push_pull(face, (hi.z - lo.z) / normal.z).unwrap();
+        let ids = model.paste_entities(&body, DVec3::ZERO);
+        model.make_object(&ids, component, "Board").unwrap()
+    }
+    pub(super) fn pair() -> (Model, [u64; 2]) {
+        let mut model = Model::default();
+        let a = board_at(&mut model, DVec3::ZERO, DVec3::new(0.3, 0.1, 0.04), false);
+        let b = board_at(
+            &mut model,
+            DVec3::new(0.25, 0., 0.),
+            DVec3::new(0.55, 0.1, 0.04),
+            false,
+        );
+        (model, [a, b])
+    }
+    #[test]
+    fn all_six_profiles_remove_only_overlap_and_leave_two_valid_nonintersecting_boards() {
+        for kind in JointKind::ALL {
+            for reverse in [false, true] {
+                let (mut model, mut members) = pair();
+                if reverse {
+                    members.swap(0, 1);
+                }
+                let settings = JointSettings {
+                    kind,
+                    clearance: 0.,
+                    ..Default::default()
+                };
+                let before = model.clone();
+                model
+                    .test_cut_joint(members, &settings)
+                    .unwrap_or_else(|e| panic!("{kind:?}, reverse={reverse}: {e}"));
+                model.validate().unwrap();
+                let volumes = members.map(|id| model.solid_volume(id).unwrap());
+                assert!(
+                    (volumes[0] + volumes[1] - 0.0022).abs() < 1e-9,
+                    "{kind:?}: {volumes:?}"
+                );
+                for (id, volume) in members.into_iter().zip(volumes) {
+                    assert!(volume > 0. && volume < before.solid_volume(id).unwrap());
+                    assert_eq!(model.objects[&id].name, before.objects[&id].name);
+                }
+                assert!(
+                    model
+                        .boolean_solids(members[0], members[1], SolidOperation::Intersect)
+                        .is_err(),
+                    "{kind:?} still intersects"
+                );
+            }
+        }
+    }
+    #[test]
+    fn clearance_removes_more_receiver_stock_without_altering_first_member() {
+        for kind in JointKind::ALL {
+            let (mut tight, members) = pair();
+            let mut loose = tight.clone();
+            tight
+                .test_cut_joint(
+                    members,
+                    &JointSettings {
+                        kind,
+                        clearance: 0.,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            loose
+                .test_cut_joint(
+                    members,
+                    &JointSettings {
+                        kind,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert!(
+                (tight.solid_volume(members[0]).unwrap() - loose.solid_volume(members[0]).unwrap())
+                    .abs()
+                    < 1e-10
+            );
+            assert!(
+                loose.solid_volume(members[1]).unwrap() < tight.solid_volume(members[1]).unwrap()
+            );
+        }
+    }
+    #[test]
+    fn invalid_settings_missing_locked_touching_and_rotated_boards_are_atomic() {
+        let (model, members) = pair();
+        for settings in [
+            JointSettings {
+                depth_axis: 3,
+                ..Default::default()
+            },
+            JointSettings {
+                clearance: f64::NAN,
+                ..Default::default()
+            },
+            JointSettings {
+                width_axis: 0,
+                ..Default::default()
+            },
+            JointSettings {
+                taper_degrees: 30.,
+                kind: JointKind::Dovetail,
+                ..Default::default()
+            },
+        ] {
+            let mut next = model.clone();
+            assert!(next.test_cut_joint(members, &settings).is_err());
+            assert_eq!(next, model);
+        }
+        for variant in 0..5 {
+            let mut next = model.clone();
+            match variant {
+                0 => {
+                    next.locked.insert(members[0]);
+                }
+                1 => {
+                    next.hidden.insert(members[1]);
+                }
+                2 => {
+                    next.objects.remove(&members[1]);
+                }
+                3 => {
+                    let ids = next.selection_vertices(&BTreeSet::from([members[1]]));
+                    for id in ids {
+                        next.vertices.get_mut(&id).unwrap().position.x += 0.05;
+                    }
+                }
+                _ => {
+                    for vertex in next.vertices.values_mut() {
+                        let p = vertex.position;
+                        vertex.position =
+                            DVec3::new(p.x * 0.8 - p.y * 0.6, p.x * 0.6 + p.y * 0.8, p.z);
+                    }
+                }
+            }
+            let before = next.clone();
+            assert!(next.test_cut_joint(members, &Default::default()).is_err());
+            assert_eq!(next, before);
+        }
+    }
+    #[test]
+    fn independent_components_preserve_materials_peers_and_history_roundtrip() {
+        let (mut model, members) = pair();
+        let definition = uuid::Uuid::new_v4();
+        let object = model.objects.get_mut(&members[0]).unwrap();
+        object.kind = ObjectKind::Component { definition };
+        object.definition_entities = object.entities.iter().map(|id| (*id, *id)).collect();
+        object.stock_material = Some(crate::StockMaterial {
+            name: "Oak".into(),
+            dimensions: [400, 1000, 3000],
+        });
+        let peer_source = model.copy_entities(&BTreeSet::from([members[0]]));
+        let peer = *model
+            .paste_entities(&peer_source, DVec3::Y)
+            .first()
+            .unwrap();
+        let peer_before = model.object_contents(peer).unwrap();
+        let before = model.clone();
+        model.test_cut_joint(members, &Default::default()).unwrap();
+        let peer_after = model.object_contents(peer).unwrap();
+        assert_eq!(peer_after.vertices, peer_before.vertices);
+        assert_eq!(peer_after.faces, peer_before.faces);
+        assert_eq!(peer_after.objects, peer_before.objects);
+        assert_ne!(model.objects[&members[0]].kind, model.objects[&peer].kind);
+        assert_eq!(
+            model.objects[&members[0]].stock_material,
+            before.objects[&members[0]].stock_material
+        );
+        let after = model.clone();
+        let mut history = History::default();
+        history.record("Wood joint", before.clone(), &model);
+        assert!(history.undo(&mut model));
+        assert_eq!(model, before);
+        assert!(history.redo(&mut model));
+        assert_eq!(model, after);
+        let doc = Document {
+            model,
+            history,
+            ..Default::default()
+        };
+        let restored = Document::from_json(&serde_json::to_string(&doc).unwrap()).unwrap();
+        assert_eq!(restored.model, doc.model);
+    }
+    #[test]
+    fn all_axis_pairs_and_nested_editing_contexts_work() {
+        for d in 0..3 {
+            for u in 0..3 {
+                if d == u {
+                    continue;
+                }
+                let (mut model, members) = pair();
+                for vertex in model.vertices.values_mut() {
+                    let p = vertex.position;
+                    let mut q = DVec3::ZERO;
+                    q[d] = p.x;
+                    q[u] = p.y;
+                    q[3 - d - u] = p.z;
+                    vertex.position = q;
+                }
+                let container = model
+                    .make_object(&BTreeSet::from(members), true, "Assembly")
+                    .unwrap();
+                let members: Vec<_> = model.objects[&container].entities.iter().copied().collect();
+                assert!(model.enter_object(container));
+                model
+                    .test_cut_joint(
+                        [members[0], members[1]],
+                        &JointSettings {
+                            depth_axis: d,
+                            width_axis: u,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                model.validate().unwrap();
+            }
+        }
+    }
+    #[test]
+    fn existing_fasteners_survive_machining_and_follow_actual_pocket_surfaces() {
+        let (mut model, members) = pair();
+        let id = model
+            .add_connection(Connection {
+                members,
+                entry_face: None,
+                operation: ConnectionOperation::Fasteners(Default::default()),
+            })
+            .unwrap();
+        model
+            .test_cut_joint(
+                members,
+                &JointSettings {
+                    clearance: 0.,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(model.connections.contains_key(&id));
+        assert_eq!(model.connections[&id].entry_face, None);
+        let result = model.connections[&id].evaluate(&model);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.placements.len(), 1);
+        assert!((result.placements[0].first_depth - 0.3).abs() < EPS);
+        assert!((result.placements[0].penetration - 0.125).abs() < EPS);
+    }
+}
+
+#[cfg(test)]
+mod dynamic_tests {
+    use super::*;
+    use crate::{
+        Document, History,
+        connections::{Connection, ConnectionOperation},
+    };
+    fn pair() -> (Model, [u64; 2]) {
+        super::tests::pair()
+    }
+    fn add(model: &mut Model, members: [u64; 2], kind: JointKind) -> u64 {
+        model
+            .add_connection(Connection {
+                members,
+                entry_face: None,
+                operation: ConnectionOperation::Joinery(JointSettings {
+                    kind,
+                    clearance: 0.,
+                    ..Default::default()
+                }),
+            })
+            .unwrap()
+    }
+    fn shift(model: &mut Model, id: u64, delta: DVec3) {
+        for vertex in model.selection_vertices(&BTreeSet::from([id])) {
+            model.vertices.get_mut(&vertex).unwrap().position += delta;
+        }
+    }
+    #[test]
+    fn moves_recompute_all_profiles_and_separation_recovers_without_baking_source() {
+        for kind in JointKind::ALL {
+            let (mut model, members) = pair();
+            let source = model.clone();
+            let id = add(&mut model, members, kind);
+            assert_eq!(model.vertices, source.vertices);
+            assert_eq!(model.faces, source.faces);
+            assert_eq!(model.objects, source.objects);
+            let first = model.evaluate_joinery();
+            assert!(first.errors.is_empty(), "{kind:?}: {:?}", first.errors);
+            let volume = first.model.solid_volume(members[0]).unwrap();
+            shift(&mut model, members[1], DVec3::X * 0.01);
+            let moved_source = model.clone();
+            let moved = model.evaluate_joinery();
+            assert!(moved.errors.is_empty(), "{kind:?}: {:?}", moved.errors);
+            assert!((moved.model.solid_volume(members[0]).unwrap() - volume).abs() > 1e-8);
+            assert_eq!(model, moved_source, "Evaluation mutated the source");
+            shift(&mut model, members[1], DVec3::X);
+            let separated = model.evaluate_joinery();
+            assert_eq!(separated.errors.len(), 1);
+            assert_eq!(separated.errors[0].0, id);
+            assert_eq!(separated.model.vertices, model.vertices);
+            assert!(model.connections.contains_key(&id));
+            shift(&mut model, members[1], -DVec3::X);
+            assert!(model.evaluate_joinery().errors.is_empty());
+            model.connections.remove(&id);
+            assert_eq!(model.evaluate_joinery().model.vertices, model.vertices);
+        }
+    }
+    #[test]
+    fn relation_roundtrip_undo_copy_and_grouping_keep_dynamic_members() {
+        let (mut model, members) = pair();
+        let before = model.clone();
+        let id = add(&mut model, members, JointKind::MortiseTenon);
+        let mut history = History::default();
+        history.record("Dynamic joint", before.clone(), &model);
+        assert!(history.undo(&mut model));
+        assert_eq!(model, before);
+        assert!(history.redo(&mut model));
+        assert!(model.connections.contains_key(&id));
+        let doc = Document {
+            model: model.clone(),
+            history,
+            ..Default::default()
+        };
+        let loaded = Document::from_json(&serde_json::to_string(&doc).unwrap()).unwrap();
+        assert_eq!(loaded.model, model);
+        assert!(loaded.model.evaluate_joinery().errors.is_empty());
+        assert!(
+            model
+                .copy_entities(&BTreeSet::from([members[0]]))
+                .connections
+                .is_empty()
+        );
+        let copy = model.copy_entities(&BTreeSet::from(members));
+        model.paste_entities(&copy, DVec3::Y);
+        assert_eq!(model.connections.len(), 2);
+        assert!(model.evaluate_joinery().errors.is_empty());
+        model
+            .make_object(&BTreeSet::from(members), false, "Assembly")
+            .unwrap();
+        assert!(model.evaluate_joinery().errors.is_empty());
+    }
+    #[test]
+    fn settings_edits_deletion_and_invalid_positions_restore_source_without_accumulating_cuts() {
+        let (mut model, members) = pair();
+        let source = model.clone();
+        let id = add(&mut model, members, JointKind::MortiseTenon);
+        let baseline = model
+            .evaluate_joinery()
+            .model
+            .solid_volume(members[0])
+            .unwrap();
+        if let ConnectionOperation::Joinery(settings) =
+            &mut model.connections.get_mut(&id).unwrap().operation
+        {
+            settings.width_ratio = 0.7;
+        }
+        let edited = model.evaluate_joinery();
+        assert!(edited.errors.is_empty());
+        assert!(edited.model.solid_volume(members[0]).unwrap() > baseline);
+        model.locked.insert(members[0]);
+        assert!(
+            model.evaluate_joinery().errors.is_empty(),
+            "Locking must not suppress an existing joint"
+        );
+        model.locked.clear();
+        model.connections.remove(&id);
+        let restored = model.evaluate_joinery();
+        assert_eq!(restored.model.vertices, source.vertices);
+        assert_eq!(restored.model.faces, source.faces);
+        assert_eq!(restored.model.objects, source.objects);
+        let mut legacy = serde_json::to_value(Document::default()).unwrap();
+        legacy["model"]
+            .as_object_mut()
+            .unwrap()
+            .remove("connections");
+        assert!(
+            Document::from_json(&legacy.to_string())
+                .unwrap()
+                .model
+                .evaluate_joinery()
+                .errors
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn multiple_relations_on_one_board_evaluate_from_original_stock() {
+        let (mut model, members) = pair();
+        let copy = model.copy_entities(&BTreeSet::from([members[1]]));
+        let c = *model
+            .paste_entities(&copy, DVec3::X * -0.5)
+            .first()
+            .unwrap();
+        add(&mut model, members, JointKind::MortiseTenon);
+        add(&mut model, [members[0], c], JointKind::Finger);
+        let evaluation = model.evaluate_joinery();
+        assert!(evaluation.errors.is_empty(), "{:?}", evaluation.errors);
+        evaluation.model.validate().unwrap();
+        assert_eq!(
+            model.objects[&members[0]].entities.len(),
+            model.objects[&members[1]].entities.len()
+        );
+    }
+}
