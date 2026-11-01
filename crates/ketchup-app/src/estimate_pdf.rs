@@ -9,7 +9,6 @@ use std::{collections::BTreeMap, fmt::Write};
 #[derive(Default)]
 pub(crate) struct Report {
     pub name: String,
-    pub scope: String,
     pub summary: [String; 3],
     pub notes: Vec<String>,
     pub costs: Vec<Group>,
@@ -34,6 +33,8 @@ struct Pdf<'a> {
     chars: BTreeMap<char, (u16, u16, f64)>,
     pages: Vec<String>,
     page: String,
+    header_name: String,
+    header_date: String,
     y: f64,
 }
 impl<'a> Pdf<'a> {
@@ -55,6 +56,12 @@ impl<'a> Pdf<'a> {
     }
     fn text(&mut self, x: f64, y: f64, size: f64, text: &str) {
         self.text_color(x, y, size, text, INK);
+    }
+    fn bold_text_color(&mut self, x: f64, y: f64, size: f64, text: &str, color: &str) {
+        // Fill and stroke the embedded light font to give emphasized text bold weight.
+        let _ = writeln!(self.page, "q {color} RG 0.45 w 2 Tr");
+        self.text_color(x, y, size, text, color);
+        self.page.push_str("Q\n");
     }
     fn text_color(&mut self, mut x: f64, y: f64, size: f64, text: &str, color: &str) {
         for ch in text.chars().filter(|ch| !ch.is_control()) {
@@ -110,8 +117,16 @@ impl<'a> Pdf<'a> {
         self.page.push_str("q 32 0 0 32 42 768 cm /Logo Do Q\n");
         self.text(85., 785., 17., "KetchUp");
         self.text(85., 770., 10., "Time & Cost Estimates");
-        self.line(756.);
-        self.y = 733.;
+        let mut header_y = 785.;
+        for line in self.wrap(&self.header_name, 245., 20.) {
+            self.text(RIGHT - self.width(&line, 20.), header_y, 20., &line);
+            header_y -= 24.;
+        }
+        let date = self.header_date.clone();
+        self.text(RIGHT - self.width(&date, 9.), header_y + 6., 9., &date);
+        let separator_y = (header_y - 16.).min(748.);
+        self.line(separator_y);
+        self.y = separator_y - 31.;
     }
     fn ensure(&mut self, height: f64) {
         if self.y - height < BOTTOM {
@@ -163,10 +178,9 @@ impl<'a> Pdf<'a> {
     fn heading(&mut self, title: &str) {
         self.ensure(75.);
         self.y -= 6.;
-        self.panel(LEFT, self.y - 9., RIGHT - LEFT, 29., "0.93 0.95 0.93");
-        self.text(LEFT + 10., self.y, 14., title);
-        self.y -= 12.;
-        self.y -= 22.;
+        self.bold_text_color(LEFT, self.y, 14., title, INK);
+        // Leave every section's content top the same distance below its title.
+        self.y -= 26.;
     }
     fn table_header(&mut self, headers: &[String], widths: &[f64]) {
         let bottom = self.y - 10.;
@@ -391,11 +405,7 @@ pub(crate) fn render(report: &Report) -> Result<Vec<u8>, String> {
     let fallback_data: &[u8] = definitions.font_data["Hack"].font.as_ref().as_ref();
     let fallback = FontRef::new(fallback_data)
         .map_err(|error| format!("Could not load report symbol font: {error}"))?;
-    let mut text = vec![
-        report.name.as_str(),
-        report.scope.as_str(),
-        report.currency.as_str(),
-    ];
+    let mut text = vec![report.name.as_str(), report.currency.as_str()];
     text.extend(report.summary.iter().map(String::as_str));
     text.extend(report.notes.iter().map(String::as_str));
     text.extend(report.totals.iter().map(String::as_str));
@@ -427,38 +437,44 @@ pub(crate) fn render(report: &Report) -> Result<Vec<u8>, String> {
         chars: BTreeMap::new(),
         pages: Vec::new(),
         page: String::new(),
+        header_name: report.name.clone(),
+        header_date: generation_date()?,
         y: 0.,
     };
     pdf.new_page();
-    pdf.y -= 12.;
-    pdf.paragraph(&report.name, 20.);
-    pdf.paragraph(&generation_date()?, 9.);
-    pdf.paragraph(&report.scope, 10.);
-    let gap = 8.;
-    let width = (RIGHT - LEFT - 2. * gap) / 3.;
+    let width = (RIGHT - LEFT) / 4.;
     let summary_lines: Vec<_> = report
         .summary
         .iter()
+        .chain(std::iter::once(&report.totals[0]))
         .map(|value| pdf.wrap(value, width - 14., 17.))
         .collect();
     let summary_height = summary_lines.iter().map(Vec::len).max().unwrap_or(1);
-    let height = summary_height as f64 * 21. + 46.;
-    pdf.ensure(height + 65.);
+    let vertical_padding = 8.;
+    let height = summary_height as f64 * 21. + 34. + 2. * vertical_padding;
+    pdf.ensure(height + 81.);
+    pdf.y -= 16.;
     pdf.heading("Summary");
-    let top = pdf.y + 18.;
+    let top = pdf.y;
     let bottom = top - height;
     let metrics = pdf.font.metrics(Size::new(17.), LocationRef::default());
-    for (column, (label, lines)) in ["Materials", "Hands-on work", "Drying / Waiting"]
-        .iter()
-        .zip(&summary_lines)
-        .enumerate()
+    for (column, (label, lines)) in [
+        "Materials",
+        "Hands-on work",
+        "Drying / Waiting",
+        "Sequential total",
+    ]
+    .iter()
+    .zip(&summary_lines)
+    .enumerate()
     {
-        let x = LEFT + column as f64 * (width + gap);
-        // Match the light-theme KPI fills and strengthened value colors on paper.
+        let x = LEFT + column as f64 * width;
+        // Cost is green; active work is warm, waiting is cool, and their total is purple.
         let (background, foreground) = [
             ([234., 239., 235.], [64., 97., 75.]),
-            ([253., 244., 243.], [155., 65., 51.]),
-            ([247., 248., 247.], [93., 104., 96.]),
+            ([252., 241., 228.], [139., 83., 29.]),
+            ([234., 242., 250.], [49., 87., 129.]),
+            ([241., 235., 248.], [100., 66., 135.]),
         ][column];
         let [r, g, b] = background.map(|channel| channel / 255.);
         pdf.panel(x, bottom, width, height, &format!("{r:.5} {g:.5} {b:.5}"));
@@ -469,7 +485,7 @@ pub(crate) fn render(report: &Report) -> Result<Vec<u8>, String> {
         let first_baseline = center + lines.len().saturating_sub(1) as f64 * 10.5
             - f64::from(metrics.ascent + metrics.descent) * 0.5;
         for (index, line) in lines.iter().enumerate() {
-            pdf.text_color(
+            pdf.bold_text_color(
                 x + (width - pdf.width(line, 17.)) * 0.5,
                 first_baseline - index as f64 * 21.,
                 17.,
@@ -477,11 +493,12 @@ pub(crate) fn render(report: &Report) -> Result<Vec<u8>, String> {
                 &foreground,
             );
         }
-        pdf.text(
+        pdf.text_color(
             x + (width - pdf.width(label, 9.)) * 0.5,
-            bottom + 12.,
+            bottom + 12. + vertical_padding,
             9.,
             label,
+            &foreground,
         );
     }
     pdf.y = bottom - 16.;
@@ -511,9 +528,9 @@ pub(crate) fn render(report: &Report) -> Result<Vec<u8>, String> {
     pdf.ensure(150.);
     pdf.y -= 16.;
     pdf.heading("Sequential total");
-    pdf.paragraph(&report.totals[0], 17.);
     let headers = ["Task".into(), "Hands-on".into(), "Drying / Waiting".into()];
     let widths = [285., 113., 113.];
+    pdf.y -= 14.; // Align the table's top edge with the shared section content top.
     pdf.table_header(&headers, &widths);
     for (index, row) in report.tasks.iter().enumerate() {
         pdf.table_row(row, &widths, &headers, "Sequential total", index % 2 == 0);
@@ -529,6 +546,7 @@ pub(crate) fn render(report: &Report) -> Result<Vec<u8>, String> {
         "Sequential total",
         true,
     );
+    pdf.y -= 16.;
     pdf.note("Includes final drying. Objects dry together between steps. Time covers sanding and finishing only; labor is not priced.");
     pdf.finish(data, fallback_data)
 }
@@ -567,6 +585,8 @@ mod tests {
             chars: BTreeMap::new(),
             pages: Vec::new(),
             page: String::new(),
+            header_name: String::new(),
+            header_date: String::new(),
             y: 700.,
         };
         pdf.table_row(
@@ -595,7 +615,6 @@ mod tests {
     fn report_paginates_long_rows_and_embeds_real_logo_and_unicode_font() {
         let report = Report {
             name: "Étagère - pièce № 1".into(),
-            scope: "Selected parts (visible only)".into(),
             summary: [
                 "CAD 125.00 (partial)".into(),
                 "1 h 20 min".into(),

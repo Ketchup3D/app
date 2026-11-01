@@ -694,12 +694,6 @@ impl KetchupApp {
         let mut partial = finishes.iter().any(|cost| cost.amount.is_none());
         let mut report = Report {
             name: self.doc.name.clone(),
-            scope: if self.selected.is_empty() {
-                "All visible parts"
-            } else {
-                "Selected parts (visible only)"
-            }
-            .into(),
             currency: currency::code(&catalog.currency).into(),
             tasks: tasks
                 .iter()
