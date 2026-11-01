@@ -462,7 +462,8 @@ fn finish_controls(
             return;
         }
         let mut table =
-            InspectorTable::new(ui.available_width(), [Column::flex(0.4), Column::flex(0.6)]);
+            InspectorTable::new(ui.available_width(), [Column::flex(0.4), Column::flex(0.6)])
+                .centered();
         for (row, label) in [
             "Product",
             "Minutes / m²",
@@ -674,7 +675,7 @@ impl KetchupApp {
                 .striped();
                 let currency = currency::code(&catalog.currency);
                 let headers = [
-                    "Material / Product".to_owned(),
+                    "Item".to_owned(),
                     "Quantity".to_owned(),
                     format!("Unit price ({currency})"),
                     format!("Amount ({currency})"),

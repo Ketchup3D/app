@@ -553,6 +553,113 @@ pub(super) fn save_order(
 #[cfg(test)]
 mod preference_tests {
     use super::*;
+
+    #[test]
+    fn estimate_header_menu_does_not_toggle_the_disclosure() {
+        fn frame(ctx: &egui::Context, events: Vec<egui::Event>) -> (Rect, egui::Id, bool) {
+            let mut result = None;
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.set_width(400.);
+                    let viewport = ui.clip_rect();
+                    let panel = inspector_section_sized(
+                        ui,
+                        "Time & Cost Estimates",
+                        "time_cost_estimates",
+                        true,
+                        None,
+                        Some(viewport),
+                        |ui| {
+                            ui.label("Estimate contents");
+                        },
+                    );
+                    let header = panel.inner;
+                    let rect = Rect::from_center_size(
+                        egui::pos2(header.rect.right() - 22., header.rect.center().y),
+                        egui::vec2(32., 32.),
+                    );
+                    let mut action = ui.new_child(
+                        egui::UiBuilder::new()
+                            .id_salt("test_estimate_menu")
+                            .layer_id(header.layer_id)
+                            .max_rect(rect),
+                    );
+                    let clicked = egui::menu::MenuButton::from_button(
+                        egui::Button::new("⋯").min_size(rect.size()),
+                    )
+                    .ui(&mut action, |ui| {
+                        let _ = ui.button("PDF");
+                    })
+                    .0
+                    .clicked();
+                    result = Some((rect, header.id, clicked));
+                },
+            );
+            result.unwrap()
+        }
+        let ctx = egui::Context::default();
+        let (rect, id, _) = frame(&ctx, vec![]);
+        let pos = rect.center();
+        frame(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let (_, _, clicked) = frame(
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(clicked);
+        assert!(
+            egui::collapsing_header::CollapsingState::load(&ctx, id)
+                .unwrap()
+                .is_open()
+        );
+    }
+
+    #[test]
+    fn outliner_search_fills_section_width_and_abuts_header() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let mut header = Rect::NOTHING;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.set_width(400.);
+            let viewport = ui.clip_rect();
+            let panel = inspector_section_sized(
+                ui,
+                "Outliner",
+                "outliner",
+                true,
+                None,
+                Some(viewport),
+                |ui| app.outliner_contents(ui),
+            );
+            header = panel.inner.rect;
+        });
+        let search = ctx
+            .read_response(egui::Id::unique(OUTLINER_SEARCH_ID))
+            .unwrap()
+            .rect;
+        assert!((search.left() - header.left()).abs() <= 1.);
+        assert!((search.right() - header.right()).abs() <= 1.);
+        assert!((search.top() - header.bottom()).abs() <= 1.);
+    }
     use eframe::Storage;
 
     #[derive(Default)]
@@ -2821,6 +2928,12 @@ fn inspector_section_sized<R>(
     sticky_viewport: Option<Rect>,
     contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<egui::Response> {
+    let body_margin = if id == "outliner" { 0 } else { 10 };
+    let header_action_width = if matches!(id, "materials" | "time_cost_estimates") {
+        44.
+    } else {
+        0.
+    };
     let colors = Palette::for_ui(ui);
     let icon_color = inspector_icon_color(ui, id);
     let body_style = ui.style().as_ref().clone();
@@ -2847,6 +2960,9 @@ fn inspector_section_sized<R>(
         }
         ui.scope(|ui| {
             ui.spacing_mut().button_padding = egui::vec2(10., if primary { 10. } else { 7. });
+            if id == "outliner" {
+                ui.spacing_mut().item_spacing.y = 0.;
+            }
             // Reclaim the disclosure slot for lone sections, keeping a little left padding.
             ui.spacing_mut().indent = if fill_size.is_some() { 34. } else { 52. };
             let visuals = ui.visuals_mut();
@@ -2882,7 +2998,7 @@ fn inspector_section_sized<R>(
                 let openness = state.as_ref().map_or(1., |state| state.openness(ui.ctx()));
                 *ui.style_mut() = body_style;
                 let body = |ui: &mut egui::Ui| {
-                    egui::Frame::new().inner_margin(10).show(ui, |ui| {
+                    egui::Frame::new().inner_margin(body_margin).show(ui, |ui| {
                         if fill_size.is_some() {
                             ui.set_min_size(ui.available_size());
                         }
@@ -2911,7 +3027,16 @@ fn inspector_section_sized<R>(
                 );
                 header_ui.set_clip_rect(viewport.intersect(ui.clip_rect()));
                 header_ui.set_style(header_style);
-                let mut header = header_ui.interact(rect, header_id, Sense::click_and_drag());
+                let interaction_rect = Rect::from_min_max(
+                    rect.min,
+                    egui::pos2(
+                        (rect.right() - header_action_width).max(rect.left()),
+                        rect.bottom(),
+                    ),
+                );
+                let mut header =
+                    header_ui.interact(interaction_rect, header_id, Sense::click_and_drag());
+                header.rect = rect;
                 if let Some(state) = &mut state {
                     if header.clicked() {
                         state.toggle(&header_ui);
@@ -2940,8 +3065,8 @@ fn inspector_section_sized<R>(
                     .rect_filled(rect, 7, visuals.weak_bg_fill);
                 let galley = egui::WidgetText::from(RichText::new(title).strong()).into_galley(
                     &header_ui,
-                    Some(egui::TextWrapMode::Extend),
-                    (rect.width() - header_ui.spacing().indent).max(0.),
+                    Some(egui::TextWrapMode::Truncate),
+                    (rect.width() - header_ui.spacing().indent - header_action_width).max(0.),
                     egui::TextStyle::Button,
                 );
                 header_ui.painter().galley(
@@ -3002,8 +3127,8 @@ fn inspector_section_sized<R>(
                 ui.painter().rect_filled(rect, 7, visuals.weak_bg_fill);
                 let galley = egui::WidgetText::from(RichText::new(title).strong()).into_galley(
                     ui,
-                    Some(egui::TextWrapMode::Extend),
-                    (rect.width() - ui.spacing().indent).max(0.),
+                    Some(egui::TextWrapMode::Truncate),
+                    (rect.width() - ui.spacing().indent - header_action_width).max(0.),
                     egui::TextStyle::Button,
                 );
                 ui.painter().galley(
@@ -3021,7 +3146,7 @@ fn inspector_section_sized<R>(
                     icon_color,
                 );
                 *ui.style_mut() = body_style;
-                egui::Frame::new().inner_margin(10).show(ui, |ui| {
+                egui::Frame::new().inner_margin(body_margin).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
                     contents(ui)
                 });
@@ -3057,7 +3182,10 @@ fn inspector_section_sized<R>(
                 })
                 .show_unindented(ui, |ui| {
                     *ui.style_mut() = body_style;
-                    egui::Frame::new().inner_margin(10).show(ui, contents).inner
+                    egui::Frame::new()
+                        .inner_margin(body_margin)
+                        .show(ui, contents)
+                        .inner
                 })
                 .header_response;
             remember_section(ui.ctx(), header.id, id);
@@ -3386,8 +3514,7 @@ impl KetchupApp {
             let current = precision
                 .unwrap_or(default)
                 .min(ketchup_core::units::MAX_DECIMAL_PLACES);
-            ui.horizontal(|ui| {
-                let label = ui.label(label);
+            crate::inspector_table::inspector_field(ui, id, label, |ui| {
                 egui::ComboBox::from_id_salt(id)
                     .selected_text(name(current))
                     .width(ui.available_width())
@@ -3403,7 +3530,6 @@ impl KetchupApp {
                         }
                     })
                     .response
-                    .labelled_by(label.id);
             });
         }
 
@@ -3539,14 +3665,13 @@ impl KetchupApp {
             ui.checkbox(&mut d.section_planes, "Section planes");
             ui.checkbox(&mut d.section_cuts, "Section cuts");
             ui.checkbox(&mut d.section_fill, "Section fill");
-            ui.horizontal(|ui| {
-                ui.label("Height");
+            crate::inspector_table::inspector_field(ui, "section_height", "Height", |ui| {
                 ui.add(
                     egui::DragValue::new(&mut d.section_height)
                         .speed(0.05)
                         .range(-1e8..=1e8)
                         .suffix(" m"),
-                );
+                )
             });
             ui.label(
                 RichText::new("Horizontal section: keeps geometry below the plane.")
@@ -3557,46 +3682,47 @@ impl KetchupApp {
         inspector_section(ui, "Shadows", "shadows", false, |ui| {
             ui.checkbox(&mut d.shadows, "Display shadows");
             ui.add_enabled_ui(d.shadows, |ui| {
-                ui.add(
-                    egui::Slider::new(&mut d.sun_angle, 0. ..=360.)
-                        .text("Direction")
-                        .suffix("°"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut d.sun_elevation, 5. ..=85.)
-                        .text("Elevation")
-                        .suffix("°"),
-                );
-                ui.add(egui::Slider::new(&mut d.shadow_darkness, 0. ..=1.).text("Darkness"));
+                crate::inspector_table::inspector_field(ui, "sun_direction", "Direction", |ui| {
+                    ui.add(egui::Slider::new(&mut d.sun_angle, 0. ..=360.).suffix("°"))
+                });
+                crate::inspector_table::inspector_field(ui, "sun_elevation", "Elevation", |ui| {
+                    ui.add(egui::Slider::new(&mut d.sun_elevation, 5. ..=85.).suffix("°"))
+                });
+                crate::inspector_table::inspector_field(ui, "shadow_darkness", "Darkness", |ui| {
+                    ui.add(egui::Slider::new(&mut d.shadow_darkness, 0. ..=1.))
+                });
             });
         });
         inspector_section(ui, "Fog", "fog", false, |ui| {
             ui.checkbox(&mut d.fog, "Display fog");
             ui.add_enabled_ui(d.fog, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Start");
+                crate::inspector_table::inspector_field(ui, "fog_start", "Start", |ui| {
                     ui.add(
                         egui::DragValue::new(&mut d.fog_start)
                             .speed(0.5)
                             .range(0. ..=1e8)
                             .suffix(" m"),
-                    );
+                    )
                 });
-                ui.horizontal(|ui| {
-                    ui.label("End");
+                crate::inspector_table::inspector_field(ui, "fog_end", "End", |ui| {
                     ui.add(
                         egui::DragValue::new(&mut d.fog_end)
                             .speed(0.5)
                             .range(0.1..=1e9)
                             .suffix(" m"),
-                    );
+                    )
                 });
                 d.fog_end = d.fog_end.max(d.fog_start + 0.1);
             });
-            ui.horizontal(|ui| {
-                crate::environment::background_control(ui, d);
-                ui.label("Background / fog color");
-            });
+            crate::inspector_table::inspector_field(
+                ui,
+                "fog_color",
+                "Background / fog color",
+                |ui| {
+                    ui.spacing_mut().interact_size.x = ui.available_width();
+                    crate::environment::background_control(ui, d)
+                },
+            );
         });
         inspector_section(ui, "Environment", "display_environment", false, |ui| {
             crate::environment::controls(ui, d);

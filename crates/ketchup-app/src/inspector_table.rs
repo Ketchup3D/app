@@ -5,6 +5,34 @@ use eframe::egui::{self, Rect};
 const COLUMN_SPACING: f32 = 8.;
 const ROW_HEIGHT: f32 = 26.;
 
+pub(crate) fn inspector_field(
+    ui: &mut egui::Ui,
+    key: impl std::hash::Hash + std::fmt::Debug,
+    label: impl Into<egui::WidgetText>,
+    contents: impl FnOnce(&mut egui::Ui) -> egui::Response,
+) -> egui::Response {
+    let mut table = InspectorTable::new(ui.available_width(), [Column::flex(1.); 2]).centered();
+    let mut label = Some(label.into());
+    let mut contents = Some(contents);
+    let mut label_id = None;
+    let mut response = None;
+    table.row(ui, key, |column, cell| {
+        if column == 0 {
+            label_id = Some(
+                cell.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.add(egui::Label::new(label.take().unwrap()).wrap())
+                })
+                .inner
+                .id,
+            );
+        } else {
+            cell.spacing_mut().slider_width = (cell.available_width() - 60.).max(20.);
+            response = Some(contents.take().unwrap()(cell).labelled_by(label_id.unwrap()));
+        }
+    });
+    response.unwrap()
+}
+
 /// Product descriptions share a three-line budget, including status messages.
 /// Label supplies one tooltip containing the complete text only when elided.
 pub(crate) fn product_cell_text(ui: &mut egui::Ui, lines: Vec<egui::RichText>) {
@@ -71,6 +99,7 @@ pub(crate) struct InspectorTable<const N: usize> {
     row: usize,
     striped: bool,
     column_spacing: f32,
+    centered: bool,
 }
 
 impl<const N: usize> InspectorTable<N> {
@@ -98,11 +127,19 @@ impl<const N: usize> InspectorTable<N> {
             row: 0,
             striped: false,
             column_spacing,
+            centered: false,
         }
     }
 
     pub(crate) fn striped(mut self) -> Self {
         self.striped = true;
+        self
+    }
+
+    /// Center label/value cells using measured content heights, without fixing
+    /// row heights or stretching text. Other tables retain top-aligned cells.
+    pub(crate) fn centered(mut self) -> Self {
+        self.centered = true;
         self
     }
 
@@ -129,9 +166,23 @@ impl<const N: usize> InspectorTable<N> {
         let mut x = origin.x;
         let mut height = ROW_HEIGHT;
         let id = ui.make_persistent_id(key);
+        let heights_id = id.with("centered_cell_heights");
+        let previous: [f32; N] = if self.centered {
+            ui.data(|data| data.get_temp(heights_id))
+                .unwrap_or([ROW_HEIGHT; N])
+        } else {
+            [ROW_HEIGHT; N]
+        };
+        let previous_height = previous.iter().copied().fold(ROW_HEIGHT, f32::max);
+        let mut measured = [0.; N];
         for (column, width) in self.widths.into_iter().enumerate() {
+            let offset = if self.centered {
+                (previous_height - previous[column]) * 0.5
+            } else {
+                0.
+            };
             let rect = Rect::from_min_max(
-                egui::pos2(x, origin.y),
+                egui::pos2(x, origin.y + offset),
                 egui::pos2(x + width, ui.max_rect().bottom()),
             );
             let mut cell = ui.new_child(
@@ -151,8 +202,21 @@ impl<const N: usize> InspectorTable<N> {
                 egui::pos2(x + width, clip.bottom()),
             )));
             contents(column, &mut cell);
-            height = height.max(cell.min_rect().height());
+            measured[column] = cell.min_rect().height();
+            height = height.max(measured[column] + offset);
             x += width + self.column_spacing;
+        }
+        if self.centered {
+            height = height.max(previous_height);
+            if measured
+                .iter()
+                .zip(previous)
+                .any(|(now, before)| (*now - before).abs() > 0.5)
+            {
+                ui.data_mut(|data| data.insert_temp(heights_id, measured));
+                ui.ctx()
+                    .request_discard("Center inspector label/value rows after measuring content");
+            }
         }
         let (_, row) = ui.allocate_space(egui::vec2(
             (x - origin.x - self.column_spacing).max(0.),
@@ -172,6 +236,36 @@ impl<const N: usize> InspectorTable<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn centered_fields_align_wrapped_labels_and_controls_after_resizing() {
+        let ctx = egui::Context::default();
+        for width in [360., 180., 500., 240.] {
+            let mut bounds = [Rect::NOTHING; 2];
+            let mut value = "Editable value".to_owned();
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.set_width(width);
+                let mut table = InspectorTable::new(width, [Column::flex(1.); 2]).centered();
+                table.row(ui, "centered_test", |column, cell| {
+                    bounds[column] = if column == 0 {
+                        cell.add(
+                            egui::Label::new("A long property label that wraps onto several lines")
+                                .wrap(),
+                        )
+                        .rect
+                    } else {
+                        cell.add(egui::TextEdit::singleline(&mut value)).rect
+                    };
+                });
+            });
+            assert!(
+                (bounds[0].center().y - bounds[1].center().y).abs() <= 1.,
+                "{bounds:?}"
+            );
+            assert!(bounds[0].right() <= bounds[1].left());
+            assert!(bounds[1].right() - bounds[1].left() >= (width - COLUMN_SPACING) * 0.5 - 1.);
+        }
+    }
 
     #[test]
     fn product_text_limits_the_whole_cell_and_keeps_full_tooltip_text() {

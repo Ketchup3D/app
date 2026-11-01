@@ -2577,7 +2577,7 @@ impl KetchupApp {
                 .solid_selection_size(&self.doc.model, &self.selected)
         {
             self.entity_axis_gizmo(ui, size);
-            ui.add_space(12.);
+            ui.add_space(4.);
         }
         self.solid_inspector(ui);
         self.measurement_inspector(ui);
@@ -2589,9 +2589,9 @@ impl KetchupApp {
                 ui.selectable_value(&mut self.paint_target, PaintTarget::Face, "Face");
                 ui.selectable_value(&mut self.paint_target, PaintTarget::Group, "Group");
             });
-            ui.horizontal(|ui| {
-                ui.color_edit_button_srgb(&mut self.paint_color);
-                ui.label("Choose paint");
+            crate::inspector_table::inspector_field(ui, "paint_color", "Choose paint", |ui| {
+                ui.spacing_mut().interact_size.x = ui.available_width();
+                ui.color_edit_button_srgb(&mut self.paint_color)
             });
             ui.horizontal_wrapped(|ui| {
                 for color in [
@@ -2732,13 +2732,19 @@ impl KetchupApp {
 
     fn property_row(ui: &mut egui::Ui, label: &str, value: &str) {
         let colors = Palette::for_ui(ui);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(label).size(12.).color(colors.muted));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(value).monospace().size(12.));
-            });
-        });
+        crate::inspector_table::inspector_field(
+            ui,
+            ("property", label),
+            RichText::new(label).size(12.).color(colors.muted),
+            |ui| {
+                ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                    ui.add(egui::Label::new(RichText::new(value).monospace().size(12.)).wrap())
+                })
+                .inner
+            },
+        );
     }
+
     fn inspector_panel(&mut self, ui: &mut egui::Ui) {
         let colors = Palette::for_ui(ui);
         if !self.inspector {

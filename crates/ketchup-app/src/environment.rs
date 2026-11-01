@@ -136,7 +136,8 @@ pub fn controls(ui: &mut egui::Ui, display: &mut DisplaySettings) -> bool {
     let mut themed = for_theme(display, ui.visuals().dark_mode);
     ui.label("Environment");
     ui.separator();
-    let mut table = InspectorTable::new(ui.available_width(), [Column::flex(1.), Column::flex(1.)]);
+    let mut table =
+        InspectorTable::new(ui.available_width(), [Column::flex(1.), Column::flex(1.)]).centered();
     for (row, label) in ["Sky", "Ground", "Horizon", "Background"]
         .into_iter()
         .enumerate()
@@ -185,7 +186,9 @@ pub fn controls(ui: &mut egui::Ui, display: &mut DisplaySettings) -> bool {
                             }
                         });
                     }
-                    _ => background_control(ui, display),
+                    _ => {
+                        background_control(ui, display);
+                    }
                 }
             }
         });
@@ -200,11 +203,13 @@ pub fn controls(ui: &mut egui::Ui, display: &mut DisplaySettings) -> bool {
     *display != before
 }
 
-pub fn background_control(ui: &mut egui::Ui, display: &mut DisplaySettings) {
+pub fn background_control(ui: &mut egui::Ui, display: &mut DisplaySettings) -> egui::Response {
     let mut background = for_theme(display, ui.visuals().dark_mode).background;
-    if ui.color_edit_button_srgb(&mut background).changed() {
+    let response = ui.color_edit_button_srgb(&mut background);
+    if response.changed() {
         display.background = background;
     }
+    response
 }
 
 #[cfg(test)]

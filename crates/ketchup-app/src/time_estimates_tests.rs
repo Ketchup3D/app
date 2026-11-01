@@ -1243,13 +1243,7 @@ fn unified_cost_table_groups_stock_and_finishes_with_one_header() {
     for shape in output.shapes {
         collect(&shape.shape, &mut labels);
     }
-    for label in [
-        "Cost estimate",
-        "Material / Product",
-        "Quantity",
-        "Wood stock",
-        "Paint",
-    ] {
+    for label in ["Cost estimate", "Item", "Quantity", "Wood stock", "Paint"] {
         assert_eq!(
             labels.iter().filter(|text| text.as_str() == label).count(),
             1,

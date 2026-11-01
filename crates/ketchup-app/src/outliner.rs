@@ -1325,22 +1325,74 @@ mod tests {
         app.undo(&ctx, true);
         assert!(!app.doc.model.hidden.contains(&component));
     }
+    #[test]
+    fn tree_scroll_keeps_search_stationary_and_restores_its_own_offset() {
+        let mut doc = Document::default();
+        for index in 0..40 {
+            let start = DVec3::X * index as f64 * 2.;
+            let edge = doc.model.add_edge(start, start + DVec3::Y).unwrap();
+            doc.model
+                .make_object(
+                    &BTreeSet::from([edge]),
+                    false,
+                    &format!("Object {index:02}"),
+                )
+                .unwrap();
+        }
+        let mut search_rect = None;
+        for offset in [0., 200.] {
+            let ctx = egui::Context::default();
+            let mut app = KetchupApp::with_document(doc.clone(), None, true);
+            remember_scroll(&ctx, "outliner_tree", egui::vec2(0., offset));
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(400., 650.))),
+                    ..Default::default()
+                },
+                |ui| app.outliner_contents(ui),
+            );
+            let rect = ctx
+                .read_response(egui::Id::unique(OUTLINER_SEARCH_ID))
+                .unwrap()
+                .rect;
+            if let Some(previous) = search_rect {
+                assert_eq!(rect, previous);
+            }
+            search_rect = Some(rect);
+            let saved = ctx.data(|data| {
+                data.get_temp::<ScrollMemory>(scroll_memory_id())
+                    .unwrap()
+                    .positions["outliner_tree"]
+            });
+            assert!((saved[1] - offset).abs() < 1.);
+        }
+    }
 }
 
 impl KetchupApp {
     pub(super) fn outliner_contents(&mut self, ui: &mut egui::Ui) {
+        use egui::AtomExt as _;
+
         let search = ui
             .add(
                 egui::TextEdit::singleline(&mut self.outliner_filter)
                     .id(egui::Id::unique(OUTLINER_SEARCH_ID))
-                    .prefix(egui::Atom::paint(egui::vec2(18., 18.), |ui, args| {
-                        icons::line_icon(
-                            ui.painter(),
-                            args.rect.center(),
-                            "search",
-                            Palette::for_ui(ui).muted,
-                        );
-                    }))
+                    // An explicit frame overrides TextEdit::margin, so keep
+                    // the padding on the frame itself.
+                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 7)))
+                    .align(egui::Align2::LEFT_CENTER)
+                    .min_size(egui::vec2(0., 36.))
+                    .prefix(
+                        egui::Atom::paint(egui::vec2(18., 18.), |ui, args| {
+                            icons::line_icon(
+                                ui.painter(),
+                                args.rect.center(),
+                                "search",
+                                Palette::for_ui(ui).muted,
+                            );
+                        })
+                        .atom_align(egui::Align2::CENTER_CENTER),
+                    )
                     .hint_text("Search objects")
                     .desired_width(f32::INFINITY),
             )
@@ -1384,18 +1436,41 @@ impl KetchupApp {
                 .data(|data| data.get_temp::<Option<OutlinerDragHover>>(hover_id))
                 .flatten(),
         };
-        // Let the inspector handle vertical scrolling as the tree expands.
+        // Keep search outside the bounded tree viewport so it stays visible while browsing objects.
         let scroll = restored_scroll_area(
             ui,
             "outliner_tree",
-            egui::ScrollArea::horizontal()
+            egui::ScrollArea::both()
                 .id_salt("outliner_tree")
+                .max_height((ui.clip_rect().bottom() - ui.cursor().min.y).clamp(60., 480.))
                 .auto_shrink([false, true]),
         )
         .show(ui, |ui| {
             ui.spacing_mut().indent = 16.;
             tree.level(ui, roots, None);
             tree.root_drop_target(ui);
+            if egui::DragAndDrop::has_payload_of_type::<OutlinerDrag>(ui.ctx())
+                && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
+            {
+                let clip = ui.clip_rect();
+                if ui.input(|input| input.pointer.primary_down())
+                    && clip.contains(pointer)
+                    && ui.min_rect().contains(pointer)
+                {
+                    let edge = 28.;
+                    let speed = ((clip.top() + edge - pointer.y).max(0.)
+                        - (pointer.y - (clip.bottom() - edge)).max(0.))
+                        * 12.;
+                    if speed != 0. {
+                        let dt = ui.input(|input| input.stable_dt.min(0.05));
+                        ui.scroll_with_delta_animation(
+                            egui::vec2(0., speed * dt),
+                            egui::style::ScrollAnimation::none(),
+                        );
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
         });
         remember_scroll(ui.ctx(), "outliner_tree", scroll.state.clamped_offset());
         let Outliner {
@@ -1436,24 +1511,6 @@ impl KetchupApp {
             );
             painter.rect_filled(rect, 4, colors.paper);
             painter.galley(rect.min + egui::vec2(8., 5.), text, colors.ink);
-            let clip = ui.clip_rect();
-            if ui.input(|input| input.pointer.primary_down())
-                && clip.contains(pointer)
-                && ui.min_rect().contains(pointer)
-            {
-                let edge = 28.;
-                let speed = ((clip.top() + edge - pointer.y).max(0.)
-                    - (pointer.y - (clip.bottom() - edge)).max(0.))
-                    * 12.;
-                if speed != 0. {
-                    let dt = ui.input(|input| input.stable_dt.min(0.05));
-                    ui.scroll_with_delta_animation(
-                        egui::vec2(0., speed * dt),
-                        egui::style::ScrollAnimation::none(),
-                    );
-                    ui.ctx().request_repaint();
-                }
-            }
         }
         if let Some(drop) = drop {
             self.apply_outliner_drop(drop, ui.ctx());

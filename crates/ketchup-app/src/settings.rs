@@ -15,6 +15,15 @@ pub(super) enum Section {
 }
 
 impl Section {
+    const GROUPS: [(&'static str, &'static [Self]); 3] = [
+        ("Workspace", &[Self::Units, Self::Grid, Self::Colors]),
+        ("Controls", &[Self::Navigation, Self::Shortcuts]),
+        (
+            "Materials & estimates",
+            &[Self::StockPricing, Self::SurfaceTreatment],
+        ),
+    ];
+    #[cfg(test)]
     const ALL: [Self; 7] = [
         Self::Units,
         Self::Navigation,
@@ -225,15 +234,28 @@ impl KetchupApp {
                                         ui.set_width((sidebar_width - 28.).max(1.));
                                         ui.set_min_height((size.y - 28.).max(24.));
                                         ui.spacing_mut().item_spacing.y = 8.;
-                                        for section in Section::ALL {
-                                            if section
-                                                .button(
-                                                    ui,
-                                                    self.general_settings.section == section,
-                                                )
-                                                .clicked()
-                                            {
-                                                self.general_settings.section = section;
+                                        for (index, (title, sections)) in
+                                            Section::GROUPS.iter().enumerate()
+                                        {
+                                            if index > 0 {
+                                                ui.add_space(12.);
+                                            }
+                                            ui.label(
+                                                RichText::new(*title)
+                                                    .small()
+                                                    .strong()
+                                                    .color(Palette::for_ui(ui).muted),
+                                            );
+                                            for &section in *sections {
+                                                if section
+                                                    .button(
+                                                        ui,
+                                                        self.general_settings.section == section,
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.general_settings.section = section;
+                                                }
                                             }
                                         }
                                     });
@@ -358,6 +380,7 @@ impl KetchupApp {
                     ui.available_width(),
                     [Column::flex(0.55), Column::flex(0.45)],
                 )
+                .centered()
                 .striped();
                 table.header(ui, ["Tool", "Shortcut"]);
                 let mut matches = 0;
@@ -430,6 +453,17 @@ fn color_row(ui: &mut egui::Ui, label: &str, color: &mut [u8; 3]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settings_groups_include_every_section_once() {
+        let grouped: Vec<_> = super::Section::GROUPS
+            .iter()
+            .flat_map(|(_, sections)| sections.iter().copied())
+            .collect();
+        assert_eq!(grouped.len(), super::Section::ALL.len());
+        for section in super::Section::ALL {
+            assert_eq!(grouped.iter().filter(|&&value| value == section).count(), 1);
+        }
+    }
     use super::*;
 
     #[test]
@@ -456,13 +490,14 @@ mod tests {
             let mut app = KetchupApp::with_document(Document::default(), None, true);
             app.settings_open = true;
             app.general_settings.section = section;
-            let _ = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1100., 800.))),
                     ..Default::default()
                 },
                 |_| app.settings_window(&ctx),
             );
+            output.textures_delta.clear();
             assert!(app.settings_open);
         }
     }
