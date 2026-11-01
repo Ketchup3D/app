@@ -21,7 +21,11 @@ pub(super) fn shortcut_input(
             .ctx()
             .data_mut(|data| data.get_temp::<egui::Id>(state_id));
         let mut listening =
-            listening_button.is_some_and(|id| ui.memory(|memory| memory.has_focus(id)));
+            listening_button.is_some_and(|id| {
+                ui.memory(|memory| memory.has_focus(id))
+                    // egui may surrender focus on Escape before this recorder runs.
+                    || ui.input(|input| input.key_pressed(Key::Escape))
+            });
         let mut assigned = None;
         let mut finished = false;
         if listening {

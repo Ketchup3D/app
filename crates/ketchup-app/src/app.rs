@@ -707,6 +707,11 @@ impl KetchupApp {
         }
     }
     fn name_input(ui: &mut egui::Ui, name: &mut String, id: egui::Id) -> egui::Response {
+        // On the first visible frame, focus before TextEdit reads typed input.
+        // The opening click still needs the post-registration focus below.
+        if !ui.input(|input| input.pointer.any_pressed() || input.pointer.any_released()) {
+            Self::focus_name_input(ui, name, id);
+        }
         let response = ui.add(
             egui::TextEdit::singleline(&mut *name)
                 .id(id)

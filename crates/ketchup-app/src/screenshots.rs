@@ -114,6 +114,7 @@ impl Format {
             Self::Pdf => "pdf",
         }
     }
+    #[cfg(target_arch = "wasm32")]
     pub fn mime(self) -> &'static str {
         match self {
             Self::Png => "image/png",
@@ -230,6 +231,7 @@ pub(crate) fn compose(settings: &Settings, views: &[RgbaImage], size: [u32; 2]) 
 
 pub(crate) struct Export {
     pub extension: &'static str,
+    #[cfg(target_arch = "wasm32")]
     pub mime: &'static str,
     pub bytes: Vec<u8>,
 }
@@ -264,6 +266,7 @@ pub(crate) fn encode(settings: &Settings, pages: &[RgbaImage]) -> Result<Export,
     if settings.format == Format::Pdf {
         return Ok(Export {
             extension: "pdf",
+            #[cfg(target_arch = "wasm32")]
             mime: "application/pdf",
             bytes: pdf(settings.paper_mm(), pages),
         });
@@ -281,6 +284,7 @@ pub(crate) fn encode(settings: &Settings, pages: &[RgbaImage]) -> Result<Export,
     if pages.len() == 1 {
         return Ok(Export {
             extension: settings.format.extension(),
+            #[cfg(target_arch = "wasm32")]
             mime: settings.format.mime(),
             bytes: encode_image(&pages[0])?,
         });
@@ -302,6 +306,7 @@ pub(crate) fn encode(settings: &Settings, pages: &[RgbaImage]) -> Result<Export,
     }
     Ok(Export {
         extension: "zip",
+        #[cfg(target_arch = "wasm32")]
         mime: "application/zip",
         bytes: zip.finish().map_err(|e| e.to_string())?.into_inner(),
     })
