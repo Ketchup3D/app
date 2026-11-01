@@ -1,6 +1,8 @@
 use crate::{icons, theme::Palette};
 use eframe::egui::{self, Color32, Margin, Stroke};
 
+const RESIZE_OUTSET: f32 = 6.;
+
 /// The shared shell for app dialogs. Slots are rendered sequentially so their
 /// closures can edit the same state without holding overlapping borrows.
 pub(crate) struct Modal {
@@ -155,6 +157,13 @@ impl Modal {
     ) {
         // The shell's one-point stroke surrounds the content rectangle.
         let frame = ui.min_rect().expand(1.);
+        // Only resize interactions extend beyond the shell; keep content clipped.
+        let original_clip = ui.clip_rect();
+        ui.set_clip_rect(
+            frame
+                .expand(RESIZE_OUTSET)
+                .intersect(ui.ctx().content_rect()),
+        );
         for border in ResizeBorder::ALL {
             let id = self.id.with(("resize_border", border as u8));
             let hitbox = border.hitbox(frame);
@@ -188,6 +197,7 @@ impl Modal {
                     .data_mut(|data| data.remove::<egui::Rect>(origin_id));
             }
         }
+        ui.set_clip_rect(original_clip);
     }
 }
 
@@ -236,24 +246,24 @@ impl ResizeBorder {
         // Edge strips stop at the corner zones, so diagonal resizing wins there.
         match self {
             Self::Left => egui::Rect::from_min_max(
-                egui::pos2(rect.left() - 2., rect.top() + 12.),
+                egui::pos2(rect.left() - RESIZE_OUTSET, rect.top() + 12.),
                 egui::pos2(rect.left() + 6., rect.bottom() - 12.),
             ),
             Self::Right => egui::Rect::from_min_max(
                 egui::pos2(rect.right() - 6., rect.top() + 12.),
-                egui::pos2(rect.right() + 2., rect.bottom() - 12.),
+                egui::pos2(rect.right() + RESIZE_OUTSET, rect.bottom() - 12.),
             ),
             Self::Top => egui::Rect::from_min_max(
-                egui::pos2(rect.left() + 12., rect.top() - 2.),
+                egui::pos2(rect.left() + 12., rect.top() - RESIZE_OUTSET),
                 egui::pos2(rect.right() - 12., rect.top() + 6.),
             ),
             Self::Bottom => egui::Rect::from_min_max(
                 egui::pos2(rect.left() + 12., rect.bottom() - 6.),
-                egui::pos2(rect.right() - 12., rect.bottom() + 2.),
+                egui::pos2(rect.right() - 12., rect.bottom() + RESIZE_OUTSET),
             ),
             _ => egui::Rect::from_center_size(
-                self.point(rect) + self.inward() * 5.,
-                egui::vec2(14., 14.),
+                self.point(rect) + self.inward() * ((12. - RESIZE_OUTSET) * 0.5),
+                egui::Vec2::splat(12. + RESIZE_OUTSET),
             ),
         }
     }
@@ -557,7 +567,10 @@ mod tests {
 
     #[test]
     fn all_edges_and_corners_resize_the_modal() {
-        for border in ResizeBorder::ALL {
+        for (border, offset) in ResizeBorder::ALL
+            .into_iter()
+            .flat_map(|border| [-4., 5.].map(|offset| (border, offset)))
+        {
             let ctx = egui::Context::default();
             let key = "border_resize_test";
             let id = egui::Id::unique(key);
@@ -595,7 +608,7 @@ mod tests {
             frame(vec![]);
             frame(vec![]);
             let before = frame(vec![]);
-            let start = border.point(before) + border.inward() * 5.;
+            let start = border.point(before) + border.inward() * offset;
             frame(vec![egui::Event::PointerMoved(start)]);
             frame(vec![button(start, true)]);
             let end = start - border.inward() * egui::vec2(80., 60.);
