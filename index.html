@@ -86,8 +86,28 @@
     <div id="loading">
       <img src="assets/branding/logo.svg" alt="" width="72" height="72" />
       <strong>KetchUp<span>.</span></strong>
-      <p id="loading-label" role="status">Loading KetchUp…</p>
+      <p id="loading-label" role="status">Making room for your next big idea…</p>
       <div class="loading-progress" role="progressbar" aria-labelledby="loading-label"></div>
     </div>
+    <script>
+      (() => {
+        const phrases = [
+          "Making room for your next big idea…",
+          "Let’s KetchUp on your ideas…",
+          "A little squeeze of inspiration…",
+          "Warming up your creative corner…",
+          "Good things are taking shape…",
+          "Putting a fresh spin on things…",
+          "Your imagination is welcome here…",
+          "Sketch a little, dream a lot…",
+          "Rolling out the welcome grid…",
+          "Adding a dash of possibility…",
+          "Pull up a chair and a fresh canvas…",
+          "Almost thyme to create…",
+        ];
+        document.getElementById("loading-label").textContent =
+          phrases[Math.floor(Math.random() * phrases.length)];
+      })();
+    </script>
   </body>
 </html>
