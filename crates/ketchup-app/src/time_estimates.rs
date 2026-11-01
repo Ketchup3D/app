@@ -553,53 +553,84 @@ pub(super) fn treatment_controls(
     };
     sidebar::inspector_section(ui, "Sanding", keys[0], false, |ui| {
         settings.sanitize();
-        let scroll_key = format!("{}/grits", keys[0]);
         let mut remove = None;
-        let scroll = sidebar::restored_scroll_area(
-            ui,
-            &scroll_key,
-            egui::ScrollArea::horizontal()
-                .id_salt((&scroll_key, "table"))
-                .auto_shrink([false, true]),
-        ).show(ui, |ui| {
-            let mut table = InspectorTable::new(
-                ui.available_width(),
-                [Column::at_least(100.), Column::at_least(85.), Column::at_least(70.), Column::fixed(26.)],
-            );
-            table.header(ui, ["Grit", "Between coats", "Min / m²", ""]);
-            for i in 0..settings.sanding_grits.len() {
-                let mut grit = settings.sanding_grits[i];
-                table.row(ui, ("sanding", i), |column, ui| {
-                    match column {
-                        0 => {
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut settings.sanding[i].enabled, "")
-                                    .on_hover_text("Include this grit in the estimate");
-                                ui.add(egui::DragValue::new(&mut grit).range(1..=u32::MAX).speed(1.))
-                                    .on_hover_text("Enter any positive grit number, including values above 320");
-                            });
-                        }
-                        1 => { ui.checkbox(&mut settings.sanding_after_varnish[i], "").on_hover_text("Between varnish coats: sand after each coat except the last, instead of before finishing."); }
-                        2 => { ui.add_enabled_ui(settings.sanding[i].enabled, |ui| rate_input(ui, &mut settings.sanding[i].minutes_per_m2)); }
-                        _ => {
-                            if ui.small_button("×").on_hover_text("Remove this grit").clicked() {
-                                remove = Some(i);
+        for i in 0..settings.sanding_grits.len() {
+            let mut grit = settings.sanding_grits[i];
+            let alias = format!("{}/grit/{grit}", keys[0]);
+            let section_key = sidebar::item_section_key(ui.ctx(), &alias);
+            if sidebar::inspector_section_with_remove(
+                ui,
+                &format!("{grit} grit"),
+                &section_key,
+                |ui| {
+                    ui.checkbox(&mut settings.sanding[i].enabled, "Include in estimate");
+                    let mut table = InspectorTable::new(
+                        ui.available_width(),
+                        [Column::flex(0.4), Column::flex(0.6)],
+                    )
+                    .centered();
+                    for (row, label) in ["Grit", "Minutes / m²", "Between coats"]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        table.row(ui, ("sanding", row), |column, ui| {
+                            if column == 0 {
+                                ui.text_label(label);
+                            } else {
+                                match row {
+                                    0 => {
+                                        ui.add(
+                                            egui::DragValue::new(&mut grit)
+                                                .range(1..=u32::MAX)
+                                                .speed(1.),
+                                        )
+                                        .on_hover_text("Enter any positive grit number, including values above 320");
+                                    }
+                                    1 => {
+                                        ui.add_enabled_ui(settings.sanding[i].enabled, |ui| {
+                                            rate_input(ui, &mut settings.sanding[i].minutes_per_m2);
+                                        });
+                                }
+                                _ => {
+                                    ui.checkbox(&mut settings.sanding_after_varnish[i], "")
+                                        .on_hover_text("Between varnish coats: sand after each coat except the last, instead of before finishing.");
+                                }
                             }
                         }
+                    });
                     }
-                });
-                if !settings.sanding_grits.iter().enumerate().any(|(j, value)| j != i && *value == grit) {
+                },
+            ) {
+                remove = Some(i);
+            }
+            if !settings
+                .sanding_grits
+                .iter()
+                .enumerate()
+                .any(|(j, value)| j != i && *value == grit)
+            {
+                if settings.sanding_grits[i] != grit {
+                    sidebar::rename_item_section(
+                        ui.ctx(),
+                        &alias,
+                        &format!("{}/grit/{grit}", keys[0]),
+                    );
                     settings.sanding_grits[i] = grit;
                 }
             }
-        });
-        sidebar::remember_scroll(ui.ctx(), &scroll_key, scroll.state.clamped_offset());
+        }
         if let Some(i) = remove {
             settings.sanding_grits.remove(i);
             settings.sanding.remove(i);
             settings.sanding_after_varnish.remove(i);
         }
-        if ui.button("Add grit").clicked() {
+        if ui
+            .add_sized(
+                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                egui::Button::new("Add grit"),
+            )
+            .clicked()
+        {
             let mut grit = settings
                 .sanding_grits
                 .iter()

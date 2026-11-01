@@ -49,6 +49,7 @@ pub(super) struct InspectorPreferences {
     import_format: String,
     export_stl: bool,
     sections: std::collections::BTreeMap<String, bool>,
+    section_aliases: std::collections::BTreeMap<String, String>,
     scroll_positions: std::collections::BTreeMap<String, [f32; 2]>,
     modal_sizes: std::collections::BTreeMap<String, [f32; 2]>,
     modal_positions: std::collections::BTreeMap<String, [f32; 2]>,
@@ -81,6 +82,7 @@ impl Default for InspectorPreferences {
             import_format: "skp".into(),
             export_stl: false,
             sections: Default::default(),
+            section_aliases: Default::default(),
             scroll_positions: Default::default(),
             modal_sizes: Default::default(),
             modal_positions: Default::default(),
@@ -238,6 +240,7 @@ impl CameraPreferences {
 struct SectionMemory(
     std::collections::BTreeMap<String, bool>,
     std::collections::BTreeMap<String, egui::Id>,
+    std::collections::BTreeMap<String, String>,
 );
 
 #[derive(Clone, Default)]
@@ -345,6 +348,26 @@ fn section_memory_id() -> egui::Id {
 
 // All inspector disclosures (including future ones) use these helpers, with a
 // stable key independent of their position, title, and docked/floating layout.
+// Editable items keep opaque disclosure keys when their label or position changes.
+pub(super) fn item_section_key(ctx: &egui::Context, alias: &str) -> String {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
+            .2
+            .entry(alias.to_owned())
+            .or_insert_with(|| format!("inspector/item/{}", ketchup_core::MaterialId::new_v4()))
+            .clone()
+    })
+}
+
+pub(super) fn rename_item_section(ctx: &egui::Context, from: &str, to: &str) {
+    ctx.data_mut(|data| {
+        let memory = data.get_temp_mut_or_default::<SectionMemory>(section_memory_id());
+        if let Some(key) = memory.2.remove(from) {
+            memory.2.insert(to.to_owned(), key);
+        }
+    });
+}
+
 pub(super) fn restore_section(ctx: &egui::Context, id: egui::Id, key: &str, default_open: bool) {
     let open = ctx.data_mut(|data| {
         data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
@@ -489,7 +512,11 @@ impl KetchupApp {
             );
             data.insert_temp(
                 section_memory_id(),
-                SectionMemory(preferences.sections.clone(), Default::default()),
+                SectionMemory(
+                    preferences.sections.clone(),
+                    Default::default(),
+                    preferences.section_aliases.clone(),
+                ),
             )
         });
         self.inspector_preferences = preferences;
@@ -535,6 +562,11 @@ impl KetchupApp {
             screenshot: self.screenshot.settings.clone(),
             import_format: self.project.import_format.clone(),
             export_stl: self.project.export_stl,
+            section_aliases: ctx.data_mut(|data| {
+                data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
+                    .2
+                    .clone()
+            }),
             sections: ctx.data_mut(|data| {
                 data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
                     .0
@@ -2638,6 +2670,50 @@ mod preference_tests {
     }
 
     #[test]
+    fn grit_disclosures_keep_identity_and_save_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let alias = "entity/treatment/sanding/grit/80";
+        let renamed = "entity/treatment/sanding/grit/1000";
+        let key = item_section_key(&ctx, alias);
+        assert_ne!(
+            key,
+            item_section_key(&ctx, "entity/treatment/sanding/grit/120")
+        );
+        assert_ne!(
+            key,
+            item_section_key(&ctx, "settings/treatment/sanding/grit/80")
+        );
+        let id = egui::Id::unique("grit_docked");
+        restore_section(&ctx, id, &key, true);
+        assert!(
+            egui::collapsing_header::CollapsingState::load(&ctx, id)
+                .unwrap()
+                .is_open()
+        );
+        set_section_open(&ctx, &key, false);
+        rename_item_section(&ctx, alias, renamed);
+        assert_eq!(item_section_key(&ctx, renamed), key);
+
+        let mut storage = SavedPreferences::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        let restored_ctx = egui::Context::default();
+        app.restore_inspector_preferences(&restored_ctx, Some(&storage));
+        assert_eq!(item_section_key(&restored_ctx, renamed), key);
+        let moved_id = egui::Id::unique("grit_floating");
+        restore_section(&restored_ctx, moved_id, &key, true);
+        assert!(
+            !egui::collapsing_header::CollapsingState::load(&restored_ctx, moved_id)
+                .unwrap()
+                .is_open()
+        );
+        let older: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert!(older.section_aliases.is_empty());
+    }
+
+    #[test]
     fn unit_choices_and_disclosure_save_immediately_without_a_model_edit() {
         let ctx = egui::Context::default();
         let mut app = KetchupApp::with_document(Document::default(), None, true);
@@ -3142,6 +3218,69 @@ fn inspector_icon_color(ui: &egui::Ui, id: &str) -> Color32 {
 
 // Keep egui's disclosure behavior, animation, and accessibility while giving
 // inspector groups a shared surface and a full-width click target.
+pub(super) fn inspector_section_with_remove(
+    ui: &mut egui::Ui,
+    title: &str,
+    key: &str,
+    contents: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let colors = Palette::for_ui(ui);
+    let mut remove = false;
+    ui.push_id(key, |ui| {
+        egui::Frame::new()
+            .fill(colors.surface)
+            .stroke(Stroke::new(1., colors.border))
+            .corner_radius(5)
+            .inner_margin(1)
+            .show(ui, |ui| {
+                let id = ui.make_persistent_id(key);
+                restore_section(ui.ctx(), id, key, true);
+                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    true,
+                );
+                egui::Frame::new()
+                    .fill(colors.canvas)
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.set_min_width(ui.available_width());
+                            state.show_toggle_button(
+                                ui,
+                                egui::collapsing_header::paint_default_icon,
+                            );
+                            let label = ui
+                                .add(crate::natural_text::Label::new(
+                                    RichText::new(title).strong(),
+                                ))
+                                .interact(Sense::click());
+                            if label.clicked() {
+                                state.toggle(ui);
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let side = ui.spacing().interact_size.y;
+                                    remove = ui
+                                        .add_sized(egui::vec2(side, side), egui::Button::new("×"))
+                                        .on_hover_text("Remove this grit")
+                                        .clicked();
+                                },
+                            );
+                        });
+                    });
+                state.show_body_unindented(ui, |ui| {
+                    egui::Frame::new().inner_margin(10).show(ui, contents);
+                });
+                remember_section(ui.ctx(), id, key);
+            });
+    });
+    ui.add_space(1.);
+    remove
+}
+
 pub(super) fn inspector_section<R>(
     ui: &mut egui::Ui,
     title: &str,
