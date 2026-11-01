@@ -334,11 +334,16 @@ impl ModalSlots<'_> {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                             if self.dismissible {
                                 let colors = Palette::for_ui(ui);
-                                let response = ui.add(
-                                    egui::Button::new("")
-                                        .frame(false)
-                                        .min_size(egui::vec2(28., 28.)),
-                                );
+                                let response = ui.scope(|ui| {
+                                    // Match the Material header menu: a 32px target
+                                    // with the painted button frame inset by 4px.
+                                    let widgets = &mut ui.visuals_mut().widgets;
+                                    widgets.inactive.expansion = -4.;
+                                    widgets.hovered.expansion = -4.;
+                                    widgets.active.expansion = -4.;
+                                    widgets.open.expansion = -4.;
+                                    ui.add(egui::Button::new("").min_size(egui::vec2(32., 32.)))
+                                }).inner;
                                 response.widget_info(|| {
                                     egui::WidgetInfo::labeled(
                                         egui::Role::Button,
@@ -346,14 +351,6 @@ impl ModalSlots<'_> {
                                         "Close dialog",
                                     )
                                 });
-                                if response.hovered() {
-                                    ui.painter().rect_stroke(
-                                        response.rect,
-                                        7,
-                                        ui.visuals().widgets.hovered.bg_stroke,
-                                        egui::StrokeKind::Inside,
-                                    );
-                                }
                                 icons::line_icon(
                                     ui.painter(),
                                     response.rect.center(),
