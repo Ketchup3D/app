@@ -417,8 +417,6 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, colors: ToolPalette) {
                 stroke,
             ));
             p.circle_filled(c, 2., red);
-            p.line_segment([xy(0.75, -0.4), xy(1.06, -0.37)], stroke);
-            p.line_segment([xy(1.06, -0.37), xy(0.97, -0.75)], stroke);
         }
     }
 }
