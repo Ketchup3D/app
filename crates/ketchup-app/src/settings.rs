@@ -1,9 +1,9 @@
 use super::shortcut_input::{shortcut_input, valid_tool_key};
 use super::*;
 use crate::inspector_table::{Column, InspectorTable, inspector_field};
-use ketchup_core::LengthUnit;
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
+use ketchup_core::LengthUnit;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Section {
@@ -16,6 +16,7 @@ pub(super) enum Section {
     StockPricing,
     SurfaceTreatment,
     Diagnostics,
+    Rendering,
 }
 
 impl Section {
@@ -26,10 +27,10 @@ impl Section {
             "Materials & estimates",
             &[Self::StockPricing, Self::SurfaceTreatment],
         ),
-        ("System", &[Self::Diagnostics]),
+        ("System", &[Self::Diagnostics, Self::Rendering]),
     ];
     #[cfg(test)]
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Units,
         Self::Navigation,
         Self::Shortcuts,
@@ -38,6 +39,7 @@ impl Section {
         Self::StockPricing,
         Self::SurfaceTreatment,
         Self::Diagnostics,
+        Self::Rendering,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -49,6 +51,7 @@ impl Section {
             Self::StockPricing => "Material",
             Self::SurfaceTreatment => "Sanding & Finishing",
             Self::Diagnostics => "Diagnostics",
+            Self::Rendering => "Rendering",
         }
     }
 
@@ -62,6 +65,7 @@ impl Section {
             Self::StockPricing => "settings_stock",
             Self::SurfaceTreatment => "time_estimates_sanding",
             Self::Diagnostics => "diagnostics",
+            Self::Rendering => "settings_colors",
         }
     }
 
@@ -285,6 +289,7 @@ impl KetchupApp {
                                     Section::StockPricing => "settings/stock",
                                     Section::SurfaceTreatment => "settings/treatment",
                                     Section::Diagnostics => "settings/diagnostics",
+                                    Section::Rendering => "settings/rendering",
                                 };
                                 let scroll = sidebar::restored_scroll_area(
                                     ui,
@@ -338,6 +343,10 @@ impl KetchupApp {
 
     fn settings_contents(&mut self, ui: &mut egui::Ui) {
         match self.general_settings.section {
+            Section::Rendering => {
+                ui.checkbox(&mut self.doc.display.shadow_antialiasing, "Shadow antialiasing")
+                    .on_hover_text("Smooth shadow boundaries with 4× multisampling. Only shadows are affected. Changes apply immediately.");
+            }
             Section::Diagnostics => {
                 ui.text_weak("Tools for checking performance and troubleshooting.");
                 ui.checkbox(&mut self.general_settings.show_fps, "Show frames per second")

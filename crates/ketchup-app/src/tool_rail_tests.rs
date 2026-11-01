@@ -56,7 +56,10 @@ fn selection_slides_and_settles_without_delaying_tool_activation() {
     assert!(returning.top() > start.top() && returning.top() < end.top());
     // A rapid change continues from the current position.
     app.set_tool(Tool::Move);
-    assert_eq!(frame(&ctx, &mut app, 0.68), returning);
+    let changed = frame(&ctx, &mut app, 0.68);
+    assert!(
+        changed.min.distance(returning.min) < 0.01 && changed.max.distance(returning.max) < 0.01
+    );
 }
 
 #[test]

@@ -10,14 +10,14 @@ mod context_menus;
 mod drawing_inference;
 #[path = "feature_audit_tests.rs"]
 mod feature_audit;
+#[path = "feature_suggestion_tests.rs"]
+mod feature_suggestion;
 #[path = "grid_tests.rs"]
 mod grid_snapping;
 #[path = "outliner_drag_tests.rs"]
 mod outliner_drag;
 #[path = "precision_tests.rs"]
 mod precision_input;
-#[path = "feature_suggestion_tests.rs"]
-mod feature_suggestion;
 #[path = "release_notes_tests.rs"]
 mod release_notes;
 #[path = "rendering_tests.rs"]
@@ -2372,17 +2372,20 @@ fn text_position(output: &egui::FullOutput, label: &str) -> Pos2 {
 }
 
 fn menu_text_position(output: &egui::FullOutput, label: &str) -> Pos2 {
+    fn locate(shape: &egui::Shape, label: &str) -> Option<Pos2> {
+        match shape {
+            egui::Shape::Text(text) if text.galley.job.text == label => {
+                Some(text.pos + text.galley.size() * 0.5)
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().rev().find_map(|shape| locate(shape, label)),
+            _ => None,
+        }
+    }
     output
         .shapes
         .iter()
-        .find_map(|shape| match &shape.shape {
-            egui::Shape::Text(text)
-                if text.galley.job.text == label && (76.0..400.0).contains(&text.pos.x) =>
-            {
-                Some(text.pos + text.galley.size() * 0.5)
-            }
-            _ => None,
-        })
+        .rev()
+        .find_map(|shape| locate(&shape.shape, label))
         .unwrap_or_else(|| panic!("Missing submenu text: {label}"))
 }
 
@@ -4290,16 +4293,24 @@ fn dimensions_locked_during_selection_or_placement_keep_three_lines_and_a_label(
         }
     }
 
-    fn collect_lines(shape: &egui::Shape, color: Color32, lines: &mut Vec<[Pos2; 2]>) {
+    // Occlusion clipping can tessellate annotation strokes into meshes.
+    fn colored_points(shape: &egui::Shape, color: Color32, points: &mut Vec<Pos2>) {
         match shape {
-            egui::Shape::LineSegment { points, stroke }
-                if stroke.width == 1. && stroke.color == color =>
-            {
-                lines.push(*points);
+            egui::Shape::LineSegment {
+                points: ends,
+                stroke,
+            } if stroke.color == color => {
+                points.extend([ends[0], ends[0].lerp(ends[1], 0.5), ends[1]]);
             }
+            egui::Shape::Mesh(mesh) => points.extend(
+                mesh.vertices
+                    .iter()
+                    .filter(|v| v.color == color)
+                    .map(|v| v.pos),
+            ),
             egui::Shape::Vec(shapes) => {
                 for shape in shapes {
-                    collect_lines(shape, color, lines);
+                    colored_points(shape, color, points);
                 }
             }
             _ => {}
@@ -4376,16 +4387,41 @@ fn dimensions_locked_during_selection_or_placement_keep_three_lines_and_a_label(
                 vec![egui::Event::PointerMoved(placement)],
                 egui::Modifiers::NONE,
             );
-            let mut lines = vec![];
-            for shape in &preview.shapes {
-                collect_lines(&shape.shape, axis_color(axis), &mut lines);
-            }
-            assert_eq!(lines.len(), 3);
+            let dimension = ketchup_core::Dimension {
+                id: 0,
+                start: ketchup_core::DimensionAnchor {
+                    point: a,
+                    weights: vec![],
+                },
+                end: ketchup_core::DimensionAnchor {
+                    point: b,
+                    weights: vec![],
+                },
+                offset: h.app.measurement.as_ref().unwrap().offset,
+                axis: Some(axis),
+            };
+            let layout = dimension.layout(&h.app.doc.model).map(|point| h.at(point));
+            let lines = [
+                [layout[0], layout[2]],
+                [layout[1], layout[3]],
+                [layout[2], layout[3]],
+            ];
             assert!(
                 lines
                     .iter()
                     .all(|[a, b]| a.is_finite() && b.is_finite() && a.distance(*b) > 1.)
             );
+            let mut ink = vec![];
+            for shape in &preview.shapes {
+                colored_points(&shape.shape, axis_color(axis), &mut ink);
+            }
+            for [a, b] in lines {
+                assert!(
+                    ink.iter().any(|p| p.distance(a) < 2.)
+                        && ink.iter().any(|p| p.distance(b) < 2.),
+                    "Missing dimension stroke {a:?}–{b:?}, axis {axis:?}, stage {lock_stage}"
+                );
+            }
             let label_at = lines[2][0].lerp(lines[2][1], 0.5);
             assert!(preview.shapes.iter().any(|shape| has_label(
                 &shape.shape,
@@ -4409,11 +4445,18 @@ fn dimensions_locked_during_selection_or_placement_keep_three_lines_and_a_label(
                 assert!((line_start - start).length() > 1.);
                 assert!((line_end - end).length() > 1.);
             }
-            let mut placed_lines = vec![];
+            let placed_layout = dimension.layout(&h.app.doc.model).map(|point| h.at(point));
+            assert_eq!(placed_layout, layout);
+            let mut ink = vec![];
             for shape in &placed.shapes {
-                collect_lines(&shape.shape, ACCENT, &mut placed_lines);
+                colored_points(&shape.shape, ACCENT, &mut ink);
             }
-            assert_eq!(placed_lines, lines);
+            for [a, b] in lines {
+                assert!(
+                    ink.iter().any(|p| p.distance(a) < 2.)
+                        && ink.iter().any(|p| p.distance(b) < 2.)
+                );
+            }
             assert!(placed.shapes.iter().any(|shape| has_label(
                 &shape.shape,
                 &h.app.doc.display.units.format_length(expected),
@@ -4643,18 +4686,21 @@ fn sidebar_sections_collapse_and_display_controls_change_saved_settings() {
         h.frame(vec![], egui::Modifiers::NONE);
     }
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(text_position(&output, "Axes"));
+    h.click(text_position(&output, "View"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(menu_text_position(&output, "Axes"));
+    h.key(Key::Escape);
     assert!(!h.app.doc.display.axes);
     assert!(h.app.project.modified);
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    let tags_y = text_position(&output, "Tags").y;
+    let display_y = text_position(&output, "Display").y;
     h.click(text_position(&output, "Components"));
     for _ in 0..30 {
         h.frame(vec![], egui::Modifiers::NONE);
     }
     let output = h.frame(vec![], egui::Modifiers::NONE);
     // The next section moves up when Components is collapsed.
-    assert!(text_position(&output, "Tags").y < tags_y - 30.);
+    assert!(text_position(&output, "Display").y < display_y - 30.);
     h.click(text_position(&output, "Components"));
     for _ in 0..30 {
         h.frame(vec![], egui::Modifiers::NONE);
@@ -4676,7 +4722,7 @@ fn sidebar_headers_dock_and_rejoin_in_memory_and_keep_their_disclosure_state() {
     h.click(text_position(&output, "Components"));
     let output = h.frame(vec![], egui::Modifiers::NONE);
     let from = text_position(&output, "Components");
-    let to = text_position(&output, "Outliner") - egui::vec2(0., 50.);
+    let to = text_position(&output, "Outliner") - egui::vec2(0., 12.);
     h.pointer(from, egui::PointerButton::Primary, true, false);
     h.frame(vec![egui::Event::PointerMoved(to)], egui::Modifiers::NONE);
     h.pointer(to, egui::PointerButton::Primary, false, false);
@@ -4690,7 +4736,7 @@ fn sidebar_headers_dock_and_rejoin_in_memory_and_keep_their_disclosure_state() {
     text_position(&output, "No components yet");
 
     let from = text_position(&output, "Components");
-    let mut to = text_position(&output, "Tags") + egui::vec2(0., 8.);
+    let mut to = text_position(&output, "Display") + egui::vec2(0., 8.);
     to.x = h.size.x - h.app.inspector_width * 0.5;
     h.pointer(from, egui::PointerButton::Primary, true, false);
     h.frame(vec![egui::Event::PointerMoved(to)], egui::Modifiers::NONE);
@@ -4707,6 +4753,7 @@ fn sidebar_headers_dock_and_rejoin_in_memory_and_keep_their_disclosure_state() {
             InspectorSection::View,
             InspectorSection::TimeCostEstimates,
             InspectorSection::Materials,
+            InspectorSection::History,
         ]
     );
     let order = h.app.inspector_order;
@@ -5001,6 +5048,11 @@ fn materials_section_assigns_catalog_material_as_an_undoable_document_edit() {
     assert_eq!(h.app.doc.model.stock_materials[&material_id], assigned);
     assert!(h.app.project.modified);
     let output = h.frame(vec![], egui::Modifiers::NONE);
+    assert!(
+        h.app.selected.contains(&object),
+        "Selection after assigning material: {:?}",
+        h.app.selected
+    );
     assert!(text_position(&output, "Stock material").y < text_position(&output, "Sanding").y);
     assert!(text_position(&output, "Sanding").y < text_position(&output, "Finishing").y);
     text_position(&output, "Revert to defaults");
@@ -5013,7 +5065,9 @@ fn materials_section_assigns_catalog_material_as_an_undoable_document_edit() {
             matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == label)
         }));
     }
+    // History navigation clears the selection; reselect the restored object.
     h.app.undo(&h.ctx, false);
+    h.app.selected = BTreeSet::from([object]);
     let output = h.frame(vec![], egui::Modifiers::NONE);
     text_position(&output, "Sanding");
     text_position(&output, "Finishing");
@@ -5044,6 +5098,14 @@ fn materials_section_assigns_catalog_material_as_an_undoable_document_edit() {
     assert_eq!(
         h.app.doc.model.objects[&object].stock_material_id,
         Some(material_id)
+    );
+    assert_eq!(
+        h.app.doc.model.stock_materials[&material_id].name,
+        "Renamed oak"
+    );
+    assert_eq!(
+        h.app.doc.model.stock_materials[&material_id].dimensions[1],
+        1400
     );
 }
 
@@ -5097,6 +5159,8 @@ fn shared_finishing_editor_selects_products_for_defaults_and_objects() {
             h.click(text_position(&output, "Propriétés"));
             Some(id)
         };
+        // Let the newly opened settings modal complete its sizing pass.
+        h.frame(vec![], egui::Modifiers::NONE);
         let before = h.app.doc.model.clone();
         let output = h.frame(vec![], egui::Modifiers::NONE);
         h.click(text_position(&output, "Finishing"));
@@ -5410,7 +5474,6 @@ fn materials_revert_button_clears_only_selected_treatment_overrides_and_is_undoa
     assert_eq!(h.app.doc.model, customized);
 }
 
-
 #[test]
 fn system_information_opens_from_help_and_copies_the_report() {
     let mut h = Harness::new();
@@ -5421,11 +5484,78 @@ fn system_information_opens_from_help_and_copies_the_report() {
     let output = h.frame(vec![], egui::Modifiers::NONE);
     let copy = text_position(&output, "Copy to clipboard");
     let copied = h.click(copy);
-    let report = copied.platform_output.commands.iter().find_map(|command| {
-        match command { egui::OutputCommand::CopyText(text) => Some(text), _ => None }
-    }).expect("copy button sends report to clipboard");
+    let report = copied
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            egui::OutputCommand::CopyText(text) => Some(text),
+            _ => None,
+        })
+        .expect("copy button sends report to clipboard");
     assert!(report.contains(concat!("KetchUp ", env!("CARGO_PKG_VERSION"))));
     assert!(report.contains("Architecture:"));
     assert!(report.contains("Window:"));
-    assert!(!report.contains(&h.app.doc.name), "diagnostics omit document names");
+    assert!(
+        !report.contains(&h.app.doc.name),
+        "diagnostics omit document names"
+    );
+}
+
+#[test]
+fn history_navigation_updates_model_and_clears_transient_selection() {
+    let ctx = egui::Context::default();
+    let mut app = KetchupApp::with_document(Document::default(), None, true);
+    let initial = app.doc.model.clone();
+    for y in [0., 1., 2.] {
+        let before = app.doc.model.clone();
+        app.doc
+            .model
+            .add_edge(DVec3::Y * y, DVec3::Y * y + DVec3::X)
+            .unwrap();
+        app.finish_edit("Draw line", before, &ctx);
+    }
+    let latest = app.doc.model.clone();
+    app.selected
+        .insert(*app.doc.model.edges.keys().next().unwrap());
+    app.navigate_history(&ctx, 0);
+    assert_eq!(app.doc.model, initial);
+    assert!(app.selected.is_empty());
+    assert!(app.project.modified);
+    assert_eq!(app.doc.history.position(), 0);
+    app.navigate_history(&ctx, 3);
+    assert_eq!(app.doc.model, latest);
+    app.undo(&ctx, false);
+    assert_eq!(app.doc.history.position(), 2);
+    app.undo(&ctx, true);
+    assert_eq!(app.doc.model, latest);
+}
+
+#[test]
+fn history_hover_preview_leaves_document_history_and_dirty_state_unchanged() {
+    let ctx = egui::Context::default();
+    let mut app = KetchupApp::with_document(Document::default(), None, true);
+    let initial = app.doc.model.clone();
+    for y in [0., 1.] {
+        let before = app.doc.model.clone();
+        app.doc.model.add_edge(DVec3::Y * y, DVec3::Y * y + DVec3::X).unwrap();
+        app.finish_edit("Draw line", before, &ctx);
+    }
+    app.project.modified = false;
+    let document = serde_json::to_string(&app.doc).unwrap();
+    let dirty_since = app.dirty_since;
+    app.preview_history(0);
+    assert_eq!(app.history_preview.as_ref(), Some(&initial));
+    assert_eq!(serde_json::to_string(&app.doc).unwrap(), document);
+    assert_eq!(app.dirty_since, dirty_since);
+    assert!(!app.project.modified);
+    // Hovering the current state cancels the preview.
+    app.preview_history(2);
+    assert!(app.history_preview.is_none());
+    app.preview_history(0);
+    app.navigate_history(&ctx, 0);
+    assert!(app.history_preview.is_none());
+    assert_eq!(app.doc.model, initial);
+    assert_eq!(app.doc.history.position(), 0);
+    assert!(app.project.modified);
 }

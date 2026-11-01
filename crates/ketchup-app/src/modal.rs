@@ -5,6 +5,41 @@ use eframe::egui::{self, Color32, Margin, Stroke};
 
 const RESIZE_OUTSET: f32 = 6.;
 
+// Position belongs only to the current opening, never to saved preferences.
+// A missing frame means the dialog closed; a later opening starts centered.
+#[derive(Clone, Copy, Default)]
+struct OpenModalPosition {
+    last_frame: u64,
+    position: Option<egui::Pos2>,
+}
+
+fn modal_position(ctx: &egui::Context, id: egui::Id) -> Option<egui::Pos2> {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|data| {
+        let state = data.get_temp_mut_or_default::<OpenModalPosition>(id.with("open_position"));
+        if frame > state.last_frame.saturating_add(1) {
+            state.position = None;
+        }
+        state.last_frame = frame;
+        state.position
+    })
+}
+
+fn remember_modal_position(ctx: &egui::Context, id: egui::Id, position: egui::Pos2) {
+    if position.is_finite() {
+        let frame = ctx.cumulative_frame_nr();
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                id.with("open_position"),
+                OpenModalPosition {
+                    last_frame: frame,
+                    position: Some(position),
+                },
+            );
+        });
+    }
+}
+
 /// The shared shell for app dialogs. Slots are rendered sequentially so their
 /// closures can edit the same state without holding overlapping borrows.
 pub(crate) struct Modal {
@@ -57,7 +92,7 @@ impl Modal {
                 ctx.data_mut(|data| data.remove::<f64>(shake_id));
             }
         }
-        let position = crate::app::modal_position(ctx, self.key);
+        let position = modal_position(ctx, self.id);
         let area = if let Some(position) = position {
             // Construct an unanchored area: default_area has a center anchor.
             egui::Area::new(self.id)
@@ -104,7 +139,6 @@ impl Modal {
                             let inner = content(&mut ModalSlots {
                                 ui,
                                 id: self.id,
-                                key: self.key,
                                 dismissible: self.dismissible,
                                 resizable: true,
                             });
@@ -121,7 +155,6 @@ impl Modal {
                     content(&mut ModalSlots {
                         ui,
                         id: self.id,
-                        key: self.key,
                         dismissible: self.dismissible,
                         resizable: false,
                     })
@@ -142,7 +175,11 @@ impl Modal {
                         input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                     })));
         if close_requested {
-            ctx.data_mut(|data| data.remove::<f64>(shake_id));
+            ctx.data_mut(|data| {
+                data.remove::<f64>(shake_id);
+                data.remove::<OpenModalPosition>(self.id.with("open_position"));
+                data.remove::<egui::Pos2>(self.id.with("header_drag_origin"));
+            });
         }
         ModalResponse {
             inner: response.inner,
@@ -186,7 +223,7 @@ impl Modal {
                     min + egui::vec2(2., 2.),
                     max + egui::vec2(2., 2.),
                 );
-                crate::app::remember_modal_position(ui.ctx(), self.key, rect.min);
+                remember_modal_position(ui.ctx(), self.id, rect.min);
                 crate::app::remember_modal_size(
                     ui.ctx(),
                     self.key,
@@ -320,7 +357,6 @@ pub(crate) struct ModalSlots<'a> {
     resizable: bool,
     ui: &'a mut egui::Ui,
     id: egui::Id,
-    key: &'static str,
     dismissible: bool,
 }
 
@@ -337,16 +373,18 @@ impl ModalSlots<'_> {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                             if self.dismissible {
                                 let colors = Palette::for_ui(ui);
-                                let response = ui.scope(|ui| {
-                                    // Match the Material header menu: a 32px target
-                                    // with the painted button frame inset by 4px.
-                                    let widgets = &mut ui.visuals_mut().widgets;
-                                    widgets.inactive.expansion = -4.;
-                                    widgets.hovered.expansion = -4.;
-                                    widgets.active.expansion = -4.;
-                                    widgets.open.expansion = -4.;
-                                    ui.add(egui::Button::new("").min_size(egui::vec2(32., 32.)))
-                                }).inner;
+                                let response = ui
+                                    .scope(|ui| {
+                                        // Match the Material header menu: a 32px target
+                                        // with the painted button frame inset by 4px.
+                                        let widgets = &mut ui.visuals_mut().widgets;
+                                        widgets.inactive.expansion = -4.;
+                                        widgets.hovered.expansion = -4.;
+                                        widgets.active.expansion = -4.;
+                                        widgets.open.expansion = -4.;
+                                        ui.add(egui::Button::new("").min_size(egui::vec2(32., 32.)))
+                                    })
+                                    .inner;
                                 response.widget_info(|| {
                                     egui::WidgetInfo::labeled(
                                         egui::Role::Button,
@@ -384,17 +422,21 @@ impl ModalSlots<'_> {
             self.ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
         let origin_id = self.id.with("header_drag_origin");
-        if response.dragged() {
+        // A drag-sensing parent is active on the initial press, including
+        // clicks on child buttons. Only an actual movement should pin a dialog
+        // that was centered; retain the origin when dragging back to zero.
+        let delta = response.total_drag_delta().unwrap_or_default();
+        let drag_started = self
+            .ui
+            .ctx()
+            .data(|data| data.get_temp::<egui::Pos2>(origin_id).is_some());
+        if response.dragged() && (delta != egui::Vec2::ZERO || drag_started) {
             let ctx = self.ui.ctx();
             let current = egui::AreaState::load(ctx, self.id)
                 .map(|state| state.left_top_pos())
                 .unwrap_or(response.rect.min);
             let origin = ctx.data_mut(|data| *data.get_temp_mut_or(origin_id, current));
-            crate::app::remember_modal_position(
-                ctx,
-                self.key,
-                origin + response.total_drag_delta().unwrap_or_default(),
-            );
+            remember_modal_position(ctx, self.id, origin + delta);
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
             ctx.request_repaint();
         } else {
@@ -537,6 +579,42 @@ pub(crate) fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> e
 mod tests {
     use super::*;
     use crate::natural_text::TextUi as _;
+
+    #[test]
+    fn positions_only_last_for_the_current_opening() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::unique("position_lifetime_test");
+        let moved = egui::pos2(120., 80.);
+        let frame = |show: bool| {
+            let mut position = None;
+            let _ = ctx.run_test_ui(egui::RawInput::default(), |_| {
+                if show {
+                    position = modal_position(&ctx, id);
+                }
+            });
+            position
+        };
+        assert_eq!(frame(true), None);
+        remember_modal_position(&ctx, id, moved);
+        assert_eq!(frame(true), Some(moved));
+        assert_eq!(frame(true), Some(moved));
+        frame(false);
+        assert_eq!(frame(true), None);
+    }
+
+    #[test]
+    fn closing_resets_position_before_an_immediate_reopen() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::unique("immediate_reopen_test");
+        let _ = ctx.run_test_ui(egui::RawInput::default(), |_| {
+            remember_modal_position(&ctx, id, egui::pos2(120., 80.));
+            let response = Modal::new("immediate_reopen_test", 400.).show(&ctx, |modal| {
+                modal.body(|ui| ui.close());
+            });
+            assert!(response.should_close());
+            assert_eq!(modal_position(&ctx, id), None);
+        });
+    }
 
     #[test]
     fn resizing_is_opt_in() {

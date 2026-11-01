@@ -234,6 +234,7 @@ impl KetchupApp {
         if self.tool == Tool::Flip {
             ui.add_space(8.);
             ui.text_label("Mirror around the selection center:");
+            let button_width = (ui.available_width() - ui.spacing().item_spacing.x * 2.) / 3.;
             ui.horizontal(|ui| {
                 for (axis, label) in [
                     (Axis::X, "X / red"),
@@ -243,7 +244,8 @@ impl KetchupApp {
                     if ui
                         .add_enabled(
                             !self.selected.is_empty(),
-                            egui::Button::new(RichText::new(label).color(self.axis_color(axis))),
+                            egui::Button::new(RichText::new(label).color(self.axis_color(axis)))
+                                .min_size(egui::vec2(button_width, ui.spacing().interact_size.y)),
                         )
                         .clicked()
                     {
@@ -264,7 +266,13 @@ impl KetchupApp {
             if let Ok(volume) = self.solid_volume_cache.volume(&self.doc.model, first) {
                 Self::property(ui, "Volume", &self.doc.display.units.format_volume(volume));
             }
-            if ui.button("Choose first body again").clicked() {
+            if ui
+                .add_sized(
+                    egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                    egui::Button::new("Choose first body again"),
+                )
+                .clicked()
+            {
                 self.solid_first = None;
                 self.selected.clear();
             }

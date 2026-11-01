@@ -350,6 +350,10 @@ impl InspectorLayout {
         saved: Option<&DockLayout>,
         order: &[InspectorSection; InspectorSection::COUNT],
     ) -> Self {
+        // Drop the retired fastener sidebar while preserving every other pane.
+        let mut migrated=saved.cloned();
+        if let Some(dock)=&mut migrated {dock.remove(InspectorSection::Fasteners);}
+        let saved=migrated.as_ref();
         let mut seen = Vec::new();
         let mut dock = match saved.filter(|dock| dock.valid(0, &mut BTreeSet::new(), &mut seen)) {
             Some(saved) => saved.clone(),
@@ -423,9 +427,7 @@ impl KetchupApp {
         }
         let rect = ui.available_rect_before_wrap();
         let mut panes = Vec::new();
-        // Retain legacy docking preferences, but display Tags only in its toolbar menu.
         let mut visible_dock = layout.dock.get_or_insert_with(|| DockLayout::stack(&self.inspector_order)).clone();
-        visible_dock.remove(InspectorSection::Tags);
         visible_dock.panes(ui, rect, &mut panes, layout.drag.is_some());
         layout.dock.as_mut().unwrap().remember_visible_ratios(&visible_dock);
         let pointer = ctx.pointer_interact_pos();
@@ -633,6 +635,8 @@ impl KetchupApp {
                     InspectorSection::Units => self.units_contents(ui),
                     InspectorSection::TimeCostEstimates => self.time_estimates_contents(ui),
                     InspectorSection::Materials => self.materials_contents(ui),
+                    InspectorSection::History => self.history_contents(ui),
+                    InspectorSection::Fasteners => {},
                 },
             );
             let mut header = panel.inner;
@@ -729,6 +733,15 @@ impl KetchupApp {
 mod tests {
     use super::*;
 
+    #[test]
+    fn retired_fastener_pane_is_removed_while_other_docking_survives() {
+        let saved=DockLayout::Split {id:90,horizontal:true,ratio:0.5,
+            first:Box::new(DockLayout::Stack {id:91,sections:vec![InspectorSection::Fasteners]}),
+            second:Box::new(DockLayout::Stack {id:92,sections:InspectorSection::ALL.to_vec()})};
+        let restored=InspectorLayout::restore(Some(&saved),&InspectorSection::ALL);
+        assert_eq!(restored.order(),InspectorSection::ALL);
+        assert!(matches!(restored.dock,Some(DockLayout::Stack {id:92,..})));
+    }
     #[test]
     fn reordering_waits_for_the_hovered_sections_midpoint_in_both_directions() {
         use InspectorSection::{Components, Outliner, Tags};
@@ -1258,6 +1271,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tags_render_in_sidebar_and_disclosure_saves_without_model_edits() {
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.);
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.doc.model.add_tag("Sample").unwrap();
+        let model = app.doc.model.clone();
+        for section in InspectorSection::ALL {
+            set_section_open(&ctx, section.id(), section == InspectorSection::Tags);
+        }
+        ui_frame(&ctx, &mut app, vec![]);
+        let (output, _) = ui_frame(&ctx, &mut app, vec![]);
+        let header = header_position(&output, "Tags");
+        assert!(header_position(&output, "Sample").y > header.y);
+        let order = app.inspector_order;
+        for pressed in [true, false] {
+            ui_frame(
+                &ctx,
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(header),
+                    egui::Event::PointerButton {
+                        pos: header,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let mut storage = Storage::default();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushes > 0);
+        assert!(!app.project.modified);
+        assert_eq!(app.doc.model, model);
+        let restored_ctx = egui::Context::default();
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+        assert_eq!(restored.inspector_order, order);
+        assert_eq!(restored.inspector_layout.dock, app.inspector_layout.dock);
+        ui_frame(&restored_ctx, &mut restored, vec![]);
+        let (output, _) = ui_frame(&restored_ctx, &mut restored, vec![]);
+        header_position(&output, "Tags");
+        let _ = restored_ctx.run_test_ui(egui::RawInput::default(), |ui| {
+            ui.push_id("different_docked_or_floating_scope", |ui| {
+                assert_eq!(restored_header_open(ui, "tags", true), Some(false));
+            });
+        });
+    }
     #[test]
     fn docking_ratios_and_disclosures_save_immediately_without_model_edits() {
         let ctx = egui::Context::default();

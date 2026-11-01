@@ -1185,6 +1185,13 @@ fn paint_line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
             p.line_segment([c + egui::vec2(-5., -5.), c + egui::vec2(5., 5.)], s);
             p.line_segment([c + egui::vec2(-5., 5.), c + egui::vec2(5., -5.)], s);
         }
+        "history" => {
+            p.circle_stroke(c, 8., s);
+            p.line_segment([c, c + egui::vec2(0., -5.)], s);
+            p.line_segment([c, c + egui::vec2(4., 2.)], s);
+            p.line_segment([c + egui::vec2(-9., -7.), c + egui::vec2(-9., -2.)], s);
+            p.line_segment([c + egui::vec2(-9., -2.), c + egui::vec2(-4., -2.)], s);
+        }
         "undo" | "redo" => {
             // The arrow spans -8..5 vertically; center its visible bounds.
             let c = c + egui::vec2(0., 1.5);

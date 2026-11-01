@@ -240,7 +240,10 @@ impl KetchupApp {
             if ui
                 .add_enabled(
                     !self.doc.model.is_locked(id),
-                    egui::Button::new("Edit Text…"),
+                    egui::Button::new("Edit Text…").min_size(egui::vec2(
+                        ui.available_width(),
+                        ui.spacing().interact_size.y,
+                    )),
                 )
                 .clicked()
             {

@@ -1,8 +1,8 @@
 //! Reusable purchasing catalog. Geometry and project assignments remain in documents.
-#[cfg(test)]
-use crate::test_ui::ContextExt as _;
 use super::*;
 use crate::inspector_table::{Column, InspectorTable};
+#[cfg(test)]
+use crate::test_ui::ContextExt as _;
 use ketchup_core::LengthUnit;
 
 /// Purchasing categories; existing stock remains unspecified until classified.
@@ -370,6 +370,7 @@ impl KetchupApp {
             .map(|stock| (stock.id, stock.definition()))
             .collect();
         let mut document_changed = self.doc.model.sync_stock_materials(&catalog);
+        self.doc.history.sync_stock_materials(&catalog);
         let mut materials = std::collections::BTreeMap::new();
         for object in self.doc.model.objects.values() {
             if let Some(id) = object.stock_material_id {

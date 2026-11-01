@@ -1,5 +1,53 @@
 use super::*;
 
+#[test]
+fn compass_shift_matches_orbit_pan_and_can_toggle_during_drag() {
+    for projection in [Projection::Perspective, Projection::Parallel] {
+        for button in [egui::PointerButton::Primary, egui::PointerButton::Middle] {
+            let mut compass = Harness::new();
+            let mut orbit = Harness::new();
+            for h in [&mut compass, &mut orbit] {
+                h.app.doc.camera.projection = projection;
+                h.app.general_settings.pan_speed = 2.3;
+                h.app.general_settings.orbit_speed = 1.7;
+            }
+            orbit.app.set_tool(Tool::Orbit);
+            let start = KetchupApp::compass_center(compass.app.viewport).unwrap();
+            let orbit_start = orbit.app.viewport.center();
+            compass.pointer(start, button, true, true);
+            orbit.pointer(orbit_start, button, true, true);
+            let shift = egui::Modifiers { shift: true, ..Default::default() };
+            let delta = egui::vec2(-28., -16.);
+            compass.frame(vec![egui::Event::PointerMoved(start + delta)], shift);
+            orbit.frame(vec![egui::Event::PointerMoved(orbit_start + delta)], shift);
+            assert_eq!(compass.app.doc.camera, orbit.app.doc.camera);
+
+            // Release Shift: retain the gizmo's original rotation sensitivity.
+            let mut expected = compass.app.doc.camera.clone();
+            expected.orbit_around(dv(delta), compass.app.orbit_center());
+            compass.frame(
+                vec![egui::Event::PointerMoved(start + delta * 2.)],
+                egui::Modifiers::NONE,
+            );
+            assert_eq!(compass.app.doc.camera, expected);
+
+            // Press Shift again: pan, clear the old orbit pivot, then release.
+            expected.pan(
+                dv(delta) * compass.app.general_settings.pan_speed,
+                compass.app.viewport.height() as f64,
+            );
+            compass.frame(vec![egui::Event::PointerMoved(start + delta * 3.)], shift);
+            assert_eq!(compass.app.doc.camera, expected);
+            assert!(matches!(
+                compass.app.gesture.as_ref().map(|g| &g.kind),
+                Some(GestureKind::Compass { pivot: None, dragged: true, .. })
+            ));
+            compass.pointer(start + delta * 3., button, false, true);
+            assert!(compass.app.gesture.is_none());
+        }
+    }
+}
+
 fn axis_position(output: &egui::FullOutput, center: Pos2, label: &str) -> Pos2 {
     // Negative buttons sit opposite the always-visible positive labels.
     if let Some(positive) = label.strip_prefix('−') {

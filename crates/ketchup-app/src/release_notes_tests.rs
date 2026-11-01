@@ -32,7 +32,15 @@ fn navigating_release_notes_resizes_the_modal_in_both_directions() {
         output = h.frame(vec![], egui::Modifiers::NONE);
         text_position(&output, release["title"].as_str().unwrap());
         let rect = bounds(&h);
-        assert!(rect.center().distance((h.size * 0.5).to_pos2()) < 2.);
+        assert!(
+            modal_position(&h.ctx, "release_notes").is_none(),
+            "Navigation must not count as dragging the dialog"
+        );
+        assert!(
+            rect.center().distance((h.size * 0.5).to_pos2()) < 2.,
+            "bounds {rect:?}, window {:?}",
+            h.size
+        );
         heights.push(rect.height());
     }
     let shortest = heights.iter().copied().fold(f32::INFINITY, f32::min);

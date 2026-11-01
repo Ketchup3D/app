@@ -1,6 +1,3 @@
-#[cfg(test)]
-use crate::test_ui::ContextExt as _;
-use crate::natural_text::TextUi as _;
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -367,12 +364,12 @@ impl Outliner<'_> {
                         .max(0.);
                     let response = ui.add_sized(egui::vec2(width, height), button);
                     let material = self.materials.get(&id).copied().unwrap_or(OutlinerMaterial::None);
-                    let (rect, indicator) = ui.allocate_exact_size(egui::vec2(height, height), Sense::hover());
+                    let (rect, indicator) = ui.allocate_exact_size(egui::vec2(height, height), Sense::focusable_noninteractive());
                     let color = material.color(ui);
                     icons::line_icon(ui.painter(), rect.center(), material.icon(), color);
                     let material_label = format!("{} — {kind}: {label}", material.label());
                     indicator.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), &material_label));
-                    indicator.on_hover_text(material_label);
+                    indicator.accessible_name(material_label.clone()).on_hover_text(material_label);
                     let hidden = self.model.hidden.contains(&id);
                     let eye_hidden = state.hidden;
                     let eye = egui::Atom::paint(egui::vec2(18., 18.), move |ui, args| {
@@ -854,7 +851,12 @@ mod tests {
                     assert_ne!(colors[0], colors[1]);
                     assert_ne!(colors[1], colors[2]);
                     assert_ne!(colors[0], colors[2]);
-                    icons::line_icon_vectors(ui.painter(), Pos2::new(30., 30.), status.icon(), color);
+                    icons::line_icon_vectors(
+                        ui.painter(),
+                        Pos2::new(30., 30.),
+                        status.icon(),
+                        color,
+                    );
                 });
                 assert_eq!(output.shapes.iter().filter(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == color)).count(), filled_boards);
             }
@@ -1266,8 +1268,15 @@ mod tests {
             // AccessKit sends node deltas; retain a tree for bounds queries.
             if let Some(update) = output.platform_output.accesskit_update.as_mut() {
                 ctx.data_mut(|data| {
-                    let nodes = data.get_temp_mut_or_default::<std::collections::BTreeMap<egui::accesskit::NodeId, egui::accesskit::Node>>(egui::Id::unique("outliner_test_accesskit_tree"));
-                    for (id, node) in &update.nodes { nodes.insert(*id, node.clone()); }
+                    let nodes = data.get_temp_mut_or_default::<std::collections::BTreeMap<
+                        egui::accesskit::NodeId,
+                        egui::accesskit::Node,
+                    >>(egui::Id::unique(
+                        "outliner_test_accesskit_tree",
+                    ));
+                    for (id, node) in &update.nodes {
+                        nodes.insert(*id, node.clone());
+                    }
                     update.nodes = nodes.iter().map(|(id, node)| (*id, node.clone())).collect();
                 });
             }
@@ -1282,7 +1291,20 @@ mod tests {
                 .nodes
                 .iter()
                 .find(|(_, node)| node.label() == Some(name))
-                .unwrap();
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Missing {name}; labels: {:?}",
+                        output
+                            .platform_output
+                            .accesskit_update
+                            .as_ref()
+                            .unwrap()
+                            .nodes
+                            .iter()
+                            .filter_map(|(_, n)| n.label())
+                            .collect::<Vec<_>>()
+                    )
+                });
             let rect = node.1.bounds().unwrap();
             Rect::from_min_max(
                 Pos2::new(rect.x0 as f32, rect.y0 as f32),

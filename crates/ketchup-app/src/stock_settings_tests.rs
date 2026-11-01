@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::test_ui::ContextExt as _;
 use super::*;
 
 fn catalog() -> Vec<Stock> {
@@ -218,7 +216,10 @@ fn clear_keeps_picker_open_and_unassigned_remains_available_with_no_matches() {
             frame(&ctx, &wood, &mut selected, &mut filter, vec![]);
             let (_, _, labels) = frame(&ctx, &wood, &mut selected, &mut filter, vec![]);
             assert!(
-                labels.iter().any(|(text, _)| text.starts_with("Pine sheet")), "{labels:?}"
+                labels
+                    .iter()
+                    .any(|(text, _)| text.starts_with("Red oak board")),
+                "{labels:?}"
             );
             assert!(ctx.memory(|memory| memory.focused()).is_some());
         } else {

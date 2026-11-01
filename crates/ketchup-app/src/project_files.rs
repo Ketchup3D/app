@@ -21,6 +21,9 @@ pub fn file_name(name: &str) -> String {
 }
 
 pub fn set_document_name(doc: &mut Document, path: &std::path::Path) {
+    if doc.shared_project.is_some() {
+        return;
+    }
     if let Some(name) = path.file_stem() {
         doc.name = name.to_string_lossy().into_owned();
     }
@@ -84,7 +87,17 @@ pub fn open(ctx: &eframe::egui::Context) -> Pending {
             return Ok(Outcome::Cancelled);
         };
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-        decode(&bytes).map(|doc| Outcome::Opened(Box::new(doc), Some(path)))
+        decode(&bytes).map(|mut doc| {
+            if let Some(link) = &mut doc.shared_project {
+                if let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+                    link.file_updated_at = modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                }
+            }
+            Outcome::Opened(Box::new(doc), Some(path))
+        })
     })
 }
 
@@ -168,6 +181,9 @@ pub fn open(ctx: &eframe::egui::Context) -> Pending {
         {
             match wasm_bindgen_futures::JsFuture::from(file.inner().array_buffer()).await {
                 Ok(buffer) => decode(&js_sys::Uint8Array::new(&buffer).to_vec()).map(|mut doc| {
+                    if let Some(link) = &mut doc.shared_project {
+                        link.file_updated_at = (file.inner().last_modified() / 1000.) as u64;
+                    }
                     set_document_name(&mut doc, std::path::Path::new(&file.file_name()));
                     Outcome::Opened(Box::new(doc), None)
                 }),

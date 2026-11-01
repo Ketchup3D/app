@@ -62,6 +62,13 @@ mod move_tool;
 mod precision;
 #[path = "projects.rs"]
 mod projects;
+#[path = "joinery.rs"]
+mod joinery;
+
+#[path = "fasteners.rs"]
+mod fasteners;
+#[path = "sharing.rs"]
+mod sharing;
 #[path = "screenshot_dialog.rs"]
 mod screenshot_dialog;
 #[path = "searchable_selector.rs"]
@@ -74,9 +81,7 @@ mod shortcut_input;
 mod shortcuts;
 #[path = "sidebar.rs"]
 mod sidebar;
-pub(crate) use sidebar::{
-    modal_position, modal_size, remember_modal_position, remember_modal_size,
-};
+pub(crate) use sidebar::{modal_size, remember_modal_size};
 #[path = "solid_tools.rs"]
 mod solid_tools;
 #[path = "stock_settings.rs"]
@@ -277,6 +282,13 @@ struct ObjectCreation {
 }
 
 pub struct KetchupApp {
+    account: crate::account::Account,
+    joinery_geometry: joinery::GeometryCache,
+    joinery: joinery::Preferences,
+    joinery_dialog: joinery::Dialog,
+    fasteners: fasteners::Preferences,
+    fastener_dialog: fasteners::Dialog,
+    sharing: sharing::Sharing,
     #[cfg(not(target_arch = "wasm32"))]
     updates: crate::updates::Updater,
     doc: Document,
@@ -295,6 +307,7 @@ pub struct KetchupApp {
     selected: BTreeSet<u64>,
     hover: Option<u64>,
     outliner_hover: BTreeSet<u64>,
+    history_preview: Option<Model>,
     outliner_anchor: Option<u64>,
     outliner_filter: String,
     outliner_cache: sidebar::OutlinerCache,
@@ -382,6 +395,8 @@ impl KetchupApp {
             .map(|state| (state.device.clone(), state.queue.clone()));
         app.restore_inspector_preferences(&cc.egui_ctx, cc.storage);
         app.release_notes.open_if_unread();
+        app.account.start(&cc.egui_ctx);
+        app.open_shared_startup(&cc.egui_ctx);
         #[cfg(not(target_arch = "wasm32"))]
         let app = {
             let mut app = app;
@@ -414,6 +429,13 @@ impl KetchupApp {
         Self {
             #[cfg(not(target_arch = "wasm32"))]
             updates: crate::updates::Updater::default(),
+            account: Default::default(),
+            joinery_geometry: Default::default(),
+            joinery: Default::default(),
+            joinery_dialog: Default::default(),
+            fasteners: Default::default(),
+            fastener_dialog: Default::default(),
+            sharing: Default::default(),
             doc,
             project: projects::Project {
                 modified,
@@ -433,6 +455,7 @@ impl KetchupApp {
             selected,
             hover: None,
             outliner_hover: BTreeSet::new(),
+            history_preview: None,
             outliner_anchor: None,
             outliner_filter: String::new(),
             outliner_cache: Default::default(),
@@ -593,12 +616,18 @@ impl KetchupApp {
         }
     }
     fn finish_edit(&mut self, label: &str, before: Model, ctx: &egui::Context) {
+        if before != self.doc.model && !self.shared_edit_allowed(ctx) {
+            self.doc.model = before;
+            self.say(ctx, "Editing approval and a confirmed selection are required.");
+            return;
+        }
         if before != self.doc.model {
             self.solid_first = None;
             self.last_move_copy = None;
             self.measurement = None;
             self.modeling = None;
-            self.doc.history.record(label, before, &self.doc.model);
+            let author = self.current_history_author();
+            self.doc.history.record_attributed(label, before, &self.doc.model, Some(author), Some(sharing::now_timestamp()));
             self.selected.retain(|id| {
                 self.doc.model.entity_in_context(*id) == Some(*id) && !self.doc.model.is_hidden(*id)
             });
@@ -608,6 +637,28 @@ impl KetchupApp {
         }
     }
     fn undo(&mut self, ctx: &egui::Context, redo: bool) {
+        let current = self.doc.history.position();
+        let target = if redo {
+            current + 1
+        } else {
+            current.saturating_sub(1)
+        };
+        self.navigate_history(ctx, target);
+    }
+    fn preview_history(&mut self, target: usize) {
+        self.history_preview = None;
+        if target == self.doc.history.position() {
+            return;
+        }
+        let mut history = self.doc.history.clone();
+        let mut model = self.doc.model.clone();
+        if history.seek(&mut model, target) {
+            self.history_preview = Some(model);
+        }
+    }
+    fn navigate_history(&mut self, ctx: &egui::Context, target: usize) {
+        if !self.shared_edit_allowed(ctx) { self.say(ctx, "Editing approval is required to undo or redo shared changes."); return; }
+        self.history_preview = None;
         self.drawing_reference = None;
         self.drawing_guide = None;
         self.drawing_axis_guides.clear();
@@ -624,11 +675,8 @@ impl KetchupApp {
         self.snap = None;
         self.length_input.clear();
         let path = self.doc.model.edit_path();
-        let did = if redo {
-            self.doc.history.redo(&mut self.doc.model)
-        } else {
-            self.doc.history.undo(&mut self.doc.model)
-        };
+        let author = self.current_history_author();
+        let did = self.doc.history.seek_attributed(&mut self.doc.model, target, Some(author), Some(sharing::now_timestamp()));
         if did {
             self.outliner_anchor = None;
             self.doc.model.edit_context = path.into_iter().rev().find(|id| {
@@ -637,7 +685,10 @@ impl KetchupApp {
                     && !self.doc.model.is_hidden(*id)
             });
             self.selected.clear();
+            self.hover = None;
             self.changed(ctx);
+            #[cfg(target_arch = "wasm32")]
+            self.persist();
         }
     }
     fn erase_selected(&mut self, ctx: &egui::Context) {
@@ -1451,7 +1502,7 @@ impl KetchupApp {
             return;
         }
 
-        if self.project.blocked() || self.screenshot.open {
+        if self.project.blocked() || self.screenshot.open || self.fasteners.open || self.joinery.open {
             return;
         }
         if self.section_drag.is_some() {
@@ -1915,12 +1966,26 @@ impl KetchupApp {
                     if self.updates.ready() && ui.button("Update ready").clicked() {
                         self.updates.open = true;
                     }
-                    let avatar = ui.add(egui::Button::new("").min_size(egui::vec2(32., 32.))
-                        .corner_radius(16).stroke(Stroke::new(1., foreground.gamma_multiply(0.65))))
-                        .on_hover_text("Account · Not connected");
-                    avatar.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Account"));
-                    icons::line_icon(ui.painter(), avatar.rect.center(), "account", foreground);
-                    ui.add(egui::Separator::default().vertical().spacing(12.));
+                    if self.account.has_server() {
+                        let avatar = ui.add(egui::Button::new("").min_size(egui::vec2(32., 32.))
+                            .corner_radius(16).stroke(Stroke::new(1., foreground.gamma_multiply(0.65))))
+                            .on_hover_text(self.account.user.as_ref().map_or("Account · Not connected", |user| user.name.as_str()));
+                        avatar.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Account"));
+                        if let Some(texture) = &self.account.texture {
+                            egui::Image::new((texture.id(), avatar.rect.size())).corner_radius(16).paint_at(ui, avatar.rect.shrink(1.));
+                        } else if let Some(user) = &self.account.user {
+                            let initial = user.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                            ui.painter().text(avatar.rect.center(), Align2::CENTER_CENTER, initial, FontId::proportional(16.), foreground);
+                        } else {
+                            icons::line_icon(ui.painter(), avatar.rect.center(), "account", foreground);
+                        }
+                        if self.account.user.is_some() {
+                            self.account.avatar_menu(&avatar);
+                        } else if avatar.clicked() {
+                            self.account.open = true;
+                        }
+                        ui.add(egui::Separator::default().vertical().spacing(12.));
+                    }
                     let suggestion_icon = egui::Atom::paint(egui::vec2(18., 18.), |ui, args| {
                         icons::line_icon(ui.painter(), args.rect.center(), "suggest_feature", args.fallback_text_color);
                     });
@@ -2002,6 +2067,7 @@ impl KetchupApp {
                                     ui.close();
                                 }
                             }
+                            if ui.button(self.share_menu_label()).clicked() { self.start_sharing(&ctx); ui.close(); }
                             ui.separator();
                             ui.menu_button("Import", |ui| {
                                 for (extension, label, help) in [
@@ -2061,6 +2127,10 @@ impl KetchupApp {
                             ui.separator();
                             self.context_position = None;
                             self.entity_menu(ui, |_, _| {});
+                        });
+                        Self::app_bar_menu(ui, "View", |ui| {
+                            ui.visuals_mut().override_text_color = Some(colors.ink);
+                            self.view_menu(ui);
                         });
                         Self::app_bar_menu(ui, "Generate", |ui| {
                             ui.visuals_mut().override_text_color = Some(colors.ink);
@@ -2181,7 +2251,10 @@ impl KetchupApp {
                         .gesture
                         .as_ref()
                         .is_some_and(|g| matches!(g.kind, GestureKind::Navigate { .. }));
-                    let message = if drawing_orbit {
+                    let shared_status = self.shared_status(ctx.input(|i|i.time));
+                    let message = if let Some(status) = shared_status.as_deref() {
+                        status
+                    } else if drawing_orbit {
                         "Move the cursor to orbit · Hold Shift to pan · Release Ctrl / ⌘ to resume drawing"
                     } else if navigating {
                         if ctx.input(|i| i.modifiers.shift) {
@@ -2672,47 +2745,53 @@ impl KetchupApp {
         self.solid_inspector(ui);
         self.measurement_inspector(ui);
         self.text_entity_info(ui);
-        sidebar::inspector_section(ui, "Apparence", "entity_appearance", true, |ui| {
-            ui.horizontal(|ui| {
+        if self.tool == Tool::Paint {
+            sidebar::inspector_section(ui, "Apparence", "entity_appearance", true, |ui| {
                 ui.text_label("Paint by");
-                ui.selectable_value(&mut self.paint_target, PaintTarget::Face, "Face");
-                ui.selectable_value(&mut self.paint_target, PaintTarget::Group, "Group");
-            });
-            crate::inspector_table::inspector_field(ui, "paint_color", "Choose paint", |ui| {
-                ui.spacing_mut().interact_size.x = ui.available_width();
-                ui.color_edit_button_srgb(&mut self.paint_color)
-            });
-            ui.horizontal_wrapped(|ui| {
-                for color in [
-                    [195, 96, 67],
-                    [225, 179, 87],
-                    [108, 148, 102],
-                    [95, 143, 177],
-                    [163, 121, 167],
-                    [236, 231, 215],
-                    [78, 84, 81],
-                ] {
-                    let rgb = Color32::from_rgb(color[0], color[1], color[2]);
-                    if ui
-                        .add(
-                            egui::Button::new(" ")
-                                .fill(rgb)
-                                .min_size(egui::vec2(24., 24.)),
-                        )
-                        .on_hover_text(format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2]))
-                        .clicked()
+                let button_width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.;
+                ui.horizontal(|ui| {
+                    for (target, label) in [(PaintTarget::Face, "Face"), (PaintTarget::Group, "Group")]
                     {
-                        self.paint_color = color;
+                        if ui
+                            .add_sized(
+                                [button_width, ui.spacing().interact_size.y],
+                                egui::Button::new(label).selected(self.paint_target == target),
+                            )
+                            .clicked()
+                        {
+                            self.paint_target = target;
+                        }
                     }
-                }
-            });
-            if self.tool == Tool::Paint {
+                });
+                crate::inspector_table::inspector_field(ui, "paint_color", "Choose paint", |ui| {
+                    ui.spacing_mut().interact_size.x = ui.available_width();
+                    ui.color_edit_button_srgb(&mut self.paint_color)
+                });
+                let swatch_width = (ui.available_width() - ui.spacing().item_spacing.x * 6.) / 7.;
+                ui.horizontal(|ui| {
+                    for color in [
+                        [195, 96, 67],
+                        [225, 179, 87],
+                        [108, 148, 102],
+                        [95, 143, 177],
+                        [163, 121, 167],
+                        [236, 231, 215],
+                        [78, 84, 81],
+                    ] {
+                        let rgb = Color32::from_rgb(color[0], color[1], color[2]);
+                        if ui
+                            .add_sized([swatch_width, 24.], egui::Button::new(" ").fill(rgb))
+                            .on_hover_text(format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2]))
+                            .clicked()
+                        {
+                            self.paint_color = color;
+                        }
+                    }
+                });
                 ui.text_label(self.paint_instructions());
-            } else if ui.button("Use Paint tool").clicked() {
-                self.set_tool(Tool::Paint);
-            }
-        });
-        ui.add_space(8.);
+            });
+            ui.add_space(8.);
+        }
         if self.selected.is_empty() {
             ui.text_label(
                 RichText::new("Nothing selected")
@@ -2967,6 +3046,13 @@ impl KetchupApp {
         )
     }
     fn pick_at(&mut self, pixel: DVec2, size: DVec2, include_faces: bool) -> Option<u64> {
+        // Select and move the visible machined boards, retaining their source
+        // object IDs. Opening a board still edits its original stock geometry.
+        if matches!(self.tool,Tool::Select|Tool::Move|Tool::Scale)
+            && self.doc.model.connections.values().any(|c| matches!(c.operation,ketchup_core::connections::ConnectionOperation::Joinery(_)))
+            && !self.doc.model.connections.values().any(|c|c.members.iter().any(|id|Some(*id)==self.doc.model.edit_context)) {
+            return self.joinery_geometry.pick(&self.doc.model,&self.doc.camera,&self.doc.display,size,pixel,include_faces);
+        }
         self.prepare_picking();
         self.picking_cache.pick(
             &self.doc.model,
@@ -3212,14 +3298,21 @@ impl KetchupApp {
         };
         *dragged = true;
         if delta != Vec2::ZERO {
-            let center = *pivot.get_or_insert_with(|| self.orbit_center());
-            self.doc.camera.orbit_around(dv(delta), center);
-            self.changed(ctx);
+            if ctx.input(|i| i.modifiers.shift) {
+                // Share Orbit's pan speed, viewport scale, and pivot reset.
+                // Read Shift on every movement so it can change mid-drag.
+                self.navigate(ctx, dv(delta), pivot);
+            } else {
+                let center = *pivot.get_or_insert_with(|| self.orbit_center());
+                self.doc.camera.orbit_around(dv(delta), center);
+                self.changed(ctx);
+            }
             ctx.request_repaint();
         }
     }
 
     fn viewport_input(&mut self, ctx: &egui::Context, response: &egui::Response) {
+        if self.fastener_handle_under_pointer(ctx,response.rect) { return; }
         #[cfg(not(target_arch = "wasm32"))]
         if self.updates.open {
             return;
@@ -3228,7 +3321,9 @@ impl KetchupApp {
         if self.project.blocked() || self.screenshot.open {
             return;
         }
-        if self.settings_open
+        if self.fasteners.open
+            || self.joinery.open
+            || self.settings_open
             || self.help
             || self.about
             || self.release_notes.open
@@ -3746,12 +3841,28 @@ impl KetchupApp {
     fn paint_scene_with_background(&mut self, ui: &egui::Ui, rect: Rect, background: bool) {
         let colors = Palette::for_ui(ui);
         let faces = FacePalette::for_ui(ui);
-        let model_revision = self.render_model.update(&self.doc.model);
-        let model = self
-            .modeling
-            .as_ref()
-            .and_then(|edit| edit.preview.as_ref())
-            .unwrap_or(&self.doc.model);
+        // History previews affect rendering only; editing, saving and picking
+        // continue to use the committed document.
+        let model = self.history_preview.as_ref().unwrap_or_else(|| {
+            self.modeling
+                .as_ref()
+                .and_then(|edit| edit.preview.as_ref())
+                .unwrap_or(&self.doc.model)
+        });
+        self.joinery_geometry.update(model);
+        let model=&self.joinery_geometry.result.as_ref().unwrap().model;
+        let model_revision = self.render_model.update(model);
+        let empty_selection = BTreeSet::new();
+        let selected = if self.history_preview.is_some() {
+            &empty_selection
+        } else {
+            &self.selected
+        };
+        let hover = if self.history_preview.is_some() {
+            None
+        } else {
+            self.hover
+        };
         self.entity_cache.update(model);
         let entities = &self.entity_cache;
         let emphasize_group = self.doc.display.group_emphasis
@@ -3803,8 +3914,8 @@ impl KetchupApp {
             display: display.clone(),
             dark: ui.visuals().dark_mode,
             tool: self.tool,
-            selected: self.selected.clone(),
-            hover: self.hover,
+            selected: selected.clone(),
+            hover,
             outliner_hover: self.outliner_hover.clone(),
         });
         if !key
@@ -3816,7 +3927,9 @@ impl KetchupApp {
             } else {
                 BTreeSet::new()
             };
-            let selected_entities = if let Some(edit) = self
+            let selected_entities = if self.history_preview.is_some() {
+                BTreeSet::new()
+            } else if let Some(edit) = self
                 .modeling
                 .as_ref()
                 .filter(|_| self.tool == Tool::PushPull)
@@ -3840,7 +3953,7 @@ impl KetchupApp {
                     .collect();
                 model.expand_entities(&copies)
             } else {
-                model.expand_entities(&self.selected)
+                model.expand_entities(selected)
             };
             let mut mesh = renderer::Mesh::cached(camera, size, &mut self.scene_cache);
             mesh.set_pixels_per_point(ui.ctx().pixels_per_point());
@@ -3945,8 +4058,8 @@ impl KetchupApp {
                     material
                 } else if selected_entities.contains(&face.id) {
                     faces.selected
-                } else if self.hover.is_some() && self.hover == entities.get(face.id).context
-                    || self.hover == Some(face.id)
+                } else if hover.is_some() && hover == entities.get(face.id).context
+                    || hover == Some(face.id)
                     || outliner_hover
                 {
                     faces.hovered
@@ -4004,7 +4117,7 @@ impl KetchupApp {
                     let emphasized = emphasized_entities.contains(&e.id);
                     let root = entities.get(e.id).context;
                     let outliner_hover = self.outliner_hover.contains(&e.id);
-                    let hover = outliner_hover || self.hover.is_some() && self.hover == root;
+                    let hover = outliner_hover || hover.is_some() && hover == root;
                     let pending =
                         erasing.is_some_and(|ids| root.is_some_and(|id| ids.contains(&id)));
                     let color = if emphasize_group && !emphasized {
@@ -4137,6 +4250,8 @@ impl KetchupApp {
             p.extend(texts);
             self.scene_cache.key = key;
         }
+        self.paint_fasteners(&p,rect,model);
+        self.paint_joinery(&p, rect);
         let screen = |point: DVec3| view.project(point).map(|v| rect.min + pv(v));
         if let Some((lo, hi)) = self.face_cache.context_bounds(model, entities) {
             let padding = ((hi - lo).max_element() * 0.04).max(0.05);
@@ -4180,7 +4295,7 @@ impl KetchupApp {
                 }
             }
         }
-        for id in &self.selected {
+        for id in selected {
             if let Some(e) = model.edges.get(id) {
                 let (a, b) = model.points(e);
                 for pt in [a, b] {
@@ -4190,6 +4305,9 @@ impl KetchupApp {
                     }
                 }
             }
+        }
+        if self.history_preview.is_some() {
+            return;
         }
         let guide = self
             .active_drawing_guide()
@@ -4860,7 +4978,6 @@ impl KetchupApp {
                                     // This row flows right to left: Sections sits left of this separator.
                                     ui.separator();
                                     self.sections_menu(ui);
-                                    self.tags_menu(ui);
                                     ui.allocate_ui_with_layout(
                                         ui.available_size(),
                                         egui::Layout::left_to_right(egui::Align::Center),
@@ -4928,13 +5045,13 @@ impl KetchupApp {
 
     /// Keep project-specific selection out of the reusable inspector preferences.
     fn sync_selection(&mut self) -> bool {
-        if self.doc.selection == self.selected
+        let desired = self.shared_selection_to_remember().unwrap_or(&self.selected);
+        if self.doc.selection == *desired
             && self.doc.selection_context == self.doc.model.edit_context
         {
             return false;
         }
-        let selection: BTreeSet<_> = self
-            .selected
+        let selection: BTreeSet<_> = desired
             .iter()
             .copied()
             .filter(|id| {
@@ -4969,7 +5086,11 @@ impl eframe::App for KetchupApp {
         let ctx = ui.ctx().clone();
         // Rebuilt by visible Outliner rows; closing the inspector clears the highlight too.
         self.outliner_hover.clear();
+        self.history_preview = None;
+        self.account.poll(&ctx);
         self.poll_project(&ctx);
+        self.poll_sharing(&ctx);
+        self.sharing_before_frame(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.updates.poll(&ctx);
@@ -4999,6 +5120,8 @@ impl eframe::App for KetchupApp {
         }
         self.object_creation_window(&ctx);
         self.rename_object_window(&ctx);
+        self.automatic_fasteners_window(&ctx);
+        self.wood_joinery_window(&ctx);
         self.rename_viewport_window(&ctx);
         self.text_editor_window(&ctx);
         if self.help {
@@ -5007,6 +5130,8 @@ impl eframe::App for KetchupApp {
         if self.settings_open {
             self.settings_window(&ctx);
         }
+        self.account.show(&ctx);
+        self.share_dialog(&ctx);
         self.material_removal_window(&ctx);
         if self.about {
             self.about_window(&ctx);
@@ -5020,6 +5145,7 @@ impl eframe::App for KetchupApp {
         self.screenshot_dialog(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
         Self::window_resize_handles(ui);
+        self.sharing_after_frame(&ctx);
         self.persist_inspector_changes(
             &ctx,
             frame.storage_mut(),
@@ -5052,6 +5178,8 @@ impl eframe::App for KetchupApp {
         if self.sync_selection() || self.dirty_since.is_some() {
             self.persist();
         }
+        let ctx = egui::Context::default();
+        self.release_shared_selection(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
         if self.updates.ready()
             && !self.updates.restarting

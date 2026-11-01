@@ -6,18 +6,24 @@ impl KetchupApp {
         let before = self.doc.camera.clone();
         inspector_section(ui, "Camera", "view_camera", false, |ui| {
             ui.text_label("Projection");
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(
-                    &mut self.doc.camera.projection,
-                    Projection::Perspective,
-                    "Perspective",
-                );
-                ui.selectable_value(
-                    &mut self.doc.camera.projection,
-                    Projection::Parallel,
-                    "Parallel",
-                )
-                .on_hover_text("Orthographic projection: parallel lines stay parallel");
+            let button_width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.;
+            ui.horizontal(|ui| {
+                for (projection, label) in [
+                    (Projection::Perspective, "Perspective"),
+                    (Projection::Parallel, "Parallel"),
+                ] {
+                    let response = ui.add_sized(
+                        [button_width, ui.spacing().interact_size.y],
+                        egui::Button::new(label).selected(self.doc.camera.projection == projection),
+                    );
+                    if response.clicked() {
+                        self.doc.camera.projection = projection;
+                    }
+                    if projection == Projection::Parallel {
+                        response
+                            .on_hover_text("Orthographic projection: parallel lines stay parallel");
+                    }
+                }
             });
             ui.add_enabled_ui(
                 self.doc.camera.projection == Projection::Perspective,
@@ -32,14 +38,27 @@ impl KetchupApp {
                     }
                 },
             );
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Fit model").clicked() {
+            let button_width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.;
+            ui.horizontal(|ui| {
+                if ui
+                    .add_sized(
+                        [button_width, ui.spacing().interact_size.y],
+                        egui::Button::new("Fit model"),
+                    )
+                    .clicked()
+                {
                     self.doc.camera.fit(
                         self.doc.model.bounds(),
                         dv(self.viewport.size().max(Vec2::splat(1.))),
                     );
                 }
-                if ui.button("Reset camera").clicked() {
+                if ui
+                    .add_sized(
+                        [button_width, ui.spacing().interact_size.y],
+                        egui::Button::new("Reset camera"),
+                    )
+                    .clicked()
+                {
                     self.doc.camera = Camera::default();
                     self.doc.camera.fit(
                         self.doc.model.bounds(),
@@ -66,9 +85,10 @@ fn standard_view_picker(ui: &mut egui::Ui, camera: &mut Camera) {
     let columns = ((ui.available_width() + spacing) / (96. + spacing))
         .floor()
         .clamp(1., StandardView::ALL.len() as f32) as usize;
-    let width = (ui.available_width() - spacing * (columns - 1) as f32) / columns as f32;
     ui.push_id("standard_views", |ui| {
         for row in StandardView::ALL.chunks(columns) {
+            let width =
+                (ui.available_width() - spacing * (row.len() - 1) as f32) / row.len() as f32;
             ui.horizontal(|ui| {
                 for &view in row {
                     let selected = camera.standard_view() == Some(view);

@@ -1,4 +1,3 @@
-use crate::natural_text::TextUi as _;
 use super::*;
 use crate::project_files::{self, Outcome};
 use std::{path::PathBuf, sync::mpsc::TryRecvError};
@@ -73,9 +72,14 @@ impl KetchupApp {
         path: Option<PathBuf>,
         ctx: &egui::Context,
     ) {
+        self.fasteners.open=false;
+        self.fastener_dialog=Default::default();
+        self.release_shared_selection(ctx);
         self.sync_stock_materials(ctx);
-        if let Some(path) = &path {
-            project_files::set_document_name(&mut doc, path);
+        if doc.shared_project.is_none() {
+            if let Some(path) = &path {
+                project_files::set_document_name(&mut doc, path);
+            }
         }
         doc.display.group_emphasis = self.doc.display.group_emphasis;
         self.set_tool(Tool::Select);
@@ -156,10 +160,15 @@ impl KetchupApp {
         if self.project.blocked() {
             return;
         }
+        let geometry=self.doc.model.evaluate_joinery();
+        if !geometry.errors.is_empty() {
+            self.project.error=Some(geometry.errors.into_iter().map(|(id,error)|format!("Wood joint #{id}: {error}")).collect::<Vec<_>>().join(" · "));
+            return;
+        }
         match if self.project.export_stl {
-            crate::mesh_exchange::export_stl(&self.doc.model)
+            crate::mesh_exchange::export_stl(&geometry.model)
         } else {
-            crate::interchange::export_obj(&self.doc.model).map(String::into_bytes)
+            crate::interchange::export_obj(&geometry.model).map(String::into_bytes)
         } {
             Ok(contents) => {
                 self.project.operation = Operation::Export;
@@ -208,12 +217,22 @@ impl KetchupApp {
     }
 
     pub(super) fn save_project(&mut self, ctx: &egui::Context, save_as: bool) {
+        if self.shared_save_check(ctx, save_as) {
+            return;
+        }
+        self.save_project_checked(ctx, save_as);
+    }
+
+    pub(super) fn save_project_checked(&mut self, ctx: &egui::Context, save_as: bool) {
         if self.project.blocked() {
             return;
         }
         self.sync_stock_materials(ctx);
         self.sync_viewport_cameras();
         self.sync_selection();
+        if let Some(link) = &mut self.doc.shared_project {
+            link.file_updated_at = sharing::now_timestamp();
+        }
         let contents = match serde_json::to_string(&self.doc) {
             Ok(contents) => contents,
             Err(error) => {
@@ -259,7 +278,9 @@ impl KetchupApp {
                 let downloaded = cfg!(target_arch = "wasm32") && path.is_none();
                 let modified = serde_json::to_string(&self.doc).ok() != snapshot;
                 if let Some(path) = &path {
-                    project_files::set_document_name(&mut self.doc, path);
+                    if self.doc.shared_project.is_none() {
+                        project_files::set_document_name(&mut self.doc, path);
+                    }
                     self.changed(ctx);
                 }
                 self.project.path = path;

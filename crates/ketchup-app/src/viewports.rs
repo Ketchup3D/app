@@ -690,6 +690,8 @@ impl KetchupApp {
                     ACCENT,
                 );
             }
+            if *id == self.viewports.active { self.fastener_face_handles(ui,*rect); }
+            self.paint_shared_presence(ui, *rect);
             self.paint_compass(ui, response);
             self.paint_section_handles(ui, response, *id == self.viewports.active);
             crate::environment::paint_sun_hint(ui.painter(), *rect, &self.doc.camera, &self.doc.display);

@@ -283,7 +283,22 @@ fn check_option(key: &str, label: &str) {
         .unwrap();
     for expected in [!before, before] {
         let output = h.frame(vec![], egui::Modifiers::NONE);
-        let position = if key.starts_with("section_") {
+        let view_option = matches!(
+            key,
+            "axes"
+                | "guides"
+                | "grid"
+                | "dimensions"
+                | "hidden_geometry"
+                | "hidden_objects"
+                | "x_ray"
+                | "color_by_tag"
+        );
+        let position = if view_option {
+            h.click(text_position(&output, "View"));
+            let output = h.frame(vec![], egui::Modifiers::NONE);
+            menu_text_position(&output, label)
+        } else if key.starts_with("section_") {
             h.click(text_position(&output, "Sections"));
             let output = h.frame(vec![], egui::Modifiers::NONE);
             text_position(&output, label)
@@ -303,7 +318,7 @@ fn check_option(key: &str, label: &str) {
         assert_eq!(h.app.doc.model, model, "{label} changed model geometry");
         let saved = Document::from_json(&serde_json::to_string(&h.app.doc).unwrap()).unwrap();
         assert_eq!(serde_json::to_value(saved.display).unwrap()[key], expected);
-        if key.starts_with("section_") {
+        if key.starts_with("section_") || view_option {
             h.key(Key::Escape);
         }
     }
@@ -564,13 +579,33 @@ fn all_keyboard_tool_shortcuts_select_the_expected_tool() {
     assert!(!h.app.help);
 }
 
+fn tag_control_position(h: &mut Harness, label: &str) -> Pos2 {
+    let mut nodes = std::collections::BTreeMap::new();
+    for _ in 0..2 {
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        if let Some(update) = output.platform_output.accesskit_update {
+            nodes.extend(update.nodes);
+        }
+    }
+    let bounds = nodes
+        .values()
+        .find(|node| node.label() == Some(label))
+        .unwrap_or_else(|| panic!("Missing tag control: {label}"))
+        .bounds()
+        .unwrap();
+    Pos2::new(
+        ((bounds.x0 + bounds.x1) * 0.5) as f32,
+        ((bounds.y0 + bounds.y1) * 0.5) as f32,
+    )
+}
+
 #[test]
 fn tag_ui_add_rename_cancel_delete_and_undo_preserve_geometry() {
     let mut h = options_workspace();
     let edge = h.app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
     h.app.new_tag_name = "Structure".into();
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(sidebar_position(&h, &output, "+"));
+    h.click(sidebar_position(&h, &output, "Add"));
     assert_eq!(h.app.doc.model.tags.len(), 1);
     let tag = *h.app.doc.model.tags.keys().next().unwrap();
     h.app
@@ -580,12 +615,13 @@ fn tag_ui_add_rename_cancel_delete_and_undo_preserve_geometry() {
         .unwrap();
     h.app.tag_rename = Some((tag, "Renamed".into()));
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(sidebar_position(&h, &output, "Save"));
+    h.click(sidebar_position(&h, &output, "✓"));
     assert_eq!(h.app.doc.model.tags[&tag].name, "Renamed");
     h.app.tag_rename = Some((tag, "Cancelled".into()));
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(sidebar_position(&h, &output, "Cancel"));
+    h.click(sidebar_position(&h, &output, "×"));
     assert_eq!(h.app.doc.model.tags[&tag].name, "Renamed");
+    assert!(h.app.tag_rename.is_none());
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(sidebar_position(&h, &output, "×"));
     assert!(h.app.doc.model.tags.is_empty());
@@ -741,7 +777,7 @@ fn color_button_position(h: &Harness, output: &egui::FullOutput, rgb: [u8; 3], b
                 if r.fill == color
                     && r.rect.left() > left
                     && r.rect.top() > below
-                    && (20. ..=40.).contains(&r.rect.width())
+                    && (20. ..=180.).contains(&r.rect.width())
                     && (20. ..=40.).contains(&r.rect.height()) =>
             {
                 Some(r.rect.center())
@@ -761,10 +797,13 @@ fn color_button_position(h: &Harness, output: &egui::FullOutput, rgb: [u8; 3], b
 fn edit_environment_color(key: &str) {
     let mut h = options_workspace();
     let before = serde_json::to_value(&h.app.doc.display).unwrap()[key].clone();
+    let actual =
+        crate::environment::for_theme(&h.app.doc.display, h.ctx.global_style().visuals.dark_mode);
+    let actual = serde_json::to_value(actual).unwrap()[key].clone();
     let rgb = [
-        before[0].as_u64().unwrap() as u8,
-        before[1].as_u64().unwrap() as u8,
-        before[2].as_u64().unwrap() as u8,
+        actual[0].as_u64().unwrap() as u8,
+        actual[1].as_u64().unwrap() as u8,
+        actual[2].as_u64().unwrap() as u8,
     ];
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(color_button_position(&h, &output, rgb, 0.));
@@ -929,21 +968,20 @@ fn move_copy_array_maximum_count_stays_reloadable_and_undoes_once() {
 }
 
 #[test]
-fn tag_assignment_and_untagged_choices_work_through_the_dropdown() {
+fn tag_assignment_and_removal_work_through_the_membership_checkbox() {
     let mut h = options_workspace();
+    h.ctx.enable_accesskit();
     let edge = h.app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
     let tag = h.app.doc.model.add_tag("Structure").unwrap();
     h.app.selected.insert(edge);
-    let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(sidebar_position(&h, &output, "Untagged"));
-    let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(sidebar_position(&h, &output, "Structure"));
+    let position = tag_control_position(&mut h, "Assign: Structure");
+    h.click(position);
     assert_eq!(h.app.doc.model.entity_tags[&edge], tag);
-    let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(sidebar_position(&h, &output, "Structure"));
-    let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(sidebar_position(&h, &output, "Untagged"));
+    assert!(h.app.doc.model.tags[&tag].visible);
+    h.click(position);
     assert!(!h.app.doc.model.entity_tags.contains_key(&edge));
+    assert!(h.app.doc.model.tags[&tag].visible);
+    assert!(h.app.doc.model.hidden.is_empty());
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model.entity_tags[&edge], tag);
     h.app.doc.model.validate().unwrap();

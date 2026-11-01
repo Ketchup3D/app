@@ -5,6 +5,8 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(super) enum ContextAction {
     Rename,
+    AutomaticFasteners,
+    WoodJoinery,
     EditText,
     EditObject,
     CloseContext,
@@ -34,6 +36,7 @@ impl KetchupApp {
 
     pub(super) fn context_action(&mut self, ctx: &egui::Context, action: ContextAction) {
         use ContextAction::*;
+        if (self.fasteners.open || self.joinery.open) && !matches!(action,AutomaticFasteners | WoodJoinery) {return;}
         let locked = self.doc.model.selection_protected(&self.selected);
         if !matches!(action, ContextAction::Copy) {
             self.last_move_copy = None;
@@ -46,6 +49,8 @@ impl KetchupApp {
             self.snap = None;
         }
         match action {
+            AutomaticFasteners => self.open_fasteners(ctx),
+            WoodJoinery => self.open_joinery(ctx),
             Rename if !locked && self.selected.len() == 1 => {
                 let id = *self.selected.first().unwrap();
                 if let Some(object) = self.doc.model.objects.get(&id) {
@@ -181,7 +186,7 @@ impl KetchupApp {
         response.context_menu(|ui| self.entity_menu(ui, extra));
     }
 
-    pub(super) fn menu_style(style: &mut egui::Style) {
+    pub(crate) fn menu_style(style: &mut egui::Style) {
         egui::menu::menu_style(style);
         style.spacing.item_spacing.y = 2.;
         style.spacing.interact_size.y = 24.;
@@ -313,6 +318,8 @@ impl KetchupApp {
             );
             ui.separator();
         }
+        item(ui, "Wood Joinery…", self.selected_fastener_pair(ui.ctx()).is_some(), ContextAction::WoodJoinery);
+        item(ui, "Automatic Fasteners…", self.selected_fastener_pair(ui.ctx()).is_some(), ContextAction::AutomaticFasteners);
         item(ui, "Make Group…", editable, ContextAction::Group);
         item(ui, "Create Component…", editable, ContextAction::Component);
         item(ui, "Ungroup", editable && groups, ContextAction::Ungroup);
