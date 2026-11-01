@@ -363,6 +363,22 @@ Local autosave failures show an Unsaved indicator with the error in its tooltip.
 
 ## Development and verification
 
+Refresh the README screenshot from an existing Web build (no compilation is started):
+
+```sh
+node scripts/capture_readme.mjs
+```
+
+Requires Node.js 22+ and Chromium/Chrome. Set `CHROME_BIN` or pass
+`--browser /path/to/chrome` if it is not detected; `--dist path/to/web-build`
+selects a different Trunk output directory. The script serves the app locally,
+launches an isolated headless browser at 1920 × 1080, waits for the loading
+screen to disappear and the rendered frame to stabilize, then saves a JPEG to
+`assets/screenshots/ketchup.jpg` and adds or updates its README image link.
+The temporary profile starts with an empty model and does not use personal
+preferences. The image reflects the supplied Web build; rebuild it separately
+when needed to capture newer application changes.
+
 ```sh
 cargo check --workspace --locked
 cargo check --workspace --target wasm32-unknown-unknown --locked
