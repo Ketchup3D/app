@@ -51,6 +51,7 @@ pub(super) struct InspectorPreferences {
     sections: std::collections::BTreeMap<String, bool>,
     scroll_positions: std::collections::BTreeMap<String, [f32; 2]>,
     modal_sizes: std::collections::BTreeMap<String, [f32; 2]>,
+    modal_positions: std::collections::BTreeMap<String, [f32; 2]>,
 }
 
 impl Default for InspectorPreferences {
@@ -82,6 +83,7 @@ impl Default for InspectorPreferences {
             sections: Default::default(),
             scroll_positions: Default::default(),
             modal_sizes: Default::default(),
+            modal_positions: Default::default(),
         }
     }
 }
@@ -272,6 +274,34 @@ pub(crate) fn remember_modal_size(ctx: &egui::Context, key: &str, size: Vec2) {
     }
 }
 
+#[derive(Clone, Default)]
+struct ModalPositions(std::collections::BTreeMap<String, [f32; 2]>);
+
+fn modal_positions_id() -> egui::Id {
+    egui::Id::unique((PREFERENCE_KEY, "modal_positions"))
+}
+
+pub(crate) fn modal_position(ctx: &egui::Context, key: &str) -> Option<egui::Pos2> {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<ModalPositions>(modal_positions_id())
+            .0
+            .get(key)
+            .copied()
+    })
+    .filter(|position| position.iter().all(|value| value.is_finite()))
+    .map(|[x, y]| egui::pos2(x, y))
+}
+
+pub(crate) fn remember_modal_position(ctx: &egui::Context, key: &str, position: egui::Pos2) {
+    if position.is_finite() {
+        ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<ModalPositions>(modal_positions_id())
+                .0
+                .insert(key.to_owned(), [position.x, position.y]);
+        });
+    }
+}
+
 fn scroll_memory_id() -> egui::Id {
     egui::Id::unique((PREFERENCE_KEY, "scroll_positions"))
 }
@@ -443,6 +473,10 @@ impl KetchupApp {
         );
         ctx.data_mut(|data| {
             data.insert_temp(
+                modal_positions_id(),
+                ModalPositions(preferences.modal_positions.clone()),
+            );
+            data.insert_temp(
                 modal_sizes_id(),
                 ModalSizes(preferences.modal_sizes.clone()),
             );
@@ -503,6 +537,11 @@ impl KetchupApp {
             export_stl: self.project.export_stl,
             sections: ctx.data_mut(|data| {
                 data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
+                    .0
+                    .clone()
+            }),
+            modal_positions: ctx.data_mut(|data| {
+                data.get_temp_mut_or_default::<ModalPositions>(modal_positions_id())
                     .0
                     .clone()
             }),
@@ -740,6 +779,7 @@ mod preference_tests {
         app.persist_inspector_changes(&ctx, Some(&mut storage), false);
         remember_modal_size(&ctx, "general_settings", egui::vec2(820., 560.));
         remember_modal_size(&ctx, "another_dialog", egui::vec2(480., 320.));
+        remember_modal_position(&ctx, "general_settings", egui::pos2(120., 80.));
         storage.flushed = false;
         app.persist_inspector_changes(&ctx, Some(&mut storage), false);
         assert!(storage.flushed);
@@ -757,8 +797,14 @@ mod preference_tests {
             Some(egui::vec2(480., 320.))
         );
         assert_eq!(modal_size(&restored_ctx, "unknown"), None);
+        assert_eq!(
+            modal_position(&restored_ctx, "general_settings"),
+            Some(egui::pos2(120., 80.))
+        );
+        assert_eq!(modal_position(&restored_ctx, "another_dialog"), None);
         let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
         assert!(old.modal_sizes.is_empty());
+        assert!(old.modal_positions.is_empty());
     }
 
     #[test]

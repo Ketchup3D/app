@@ -53,11 +53,21 @@ impl Modal {
                 ctx.data_mut(|data| data.remove::<f64>(shake_id));
             }
         }
+        let position = crate::app::modal_position(ctx, self.key);
+        let area = if let Some(position) = position {
+            // Construct an unanchored area: default_area has a center anchor.
+            egui::Area::new(self.id)
+                .kind(egui::UiKind::Modal)
+                .sense(egui::Sense::hover())
+                .order(egui::Order::Foreground)
+                .interactable(true)
+                .fixed_pos(position + egui::vec2(shake_offset, 0.))
+        } else {
+            egui::Modal::default_area(self.id)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(shake_offset, 0.))
+        };
         let response = egui::Modal::new(self.id)
-            .area(
-                egui::Modal::default_area(self.id)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(shake_offset, 0.)),
-            )
+            .area(area)
             .backdrop_color(Color32::from_black_alpha(80))
             .frame(
                 egui::Frame::popup(&ctx.global_style())
@@ -77,33 +87,37 @@ impl Modal {
                 if self.resizable {
                     let max_size = (ctx.content_rect().size() - egui::vec2(32., 32.))
                         .max(egui::vec2(80., 80.));
+                    let min_size = egui::vec2(400., 280.).min(max_size);
                     let size = crate::app::modal_size(ctx, self.key)
                         .unwrap_or(egui::vec2(self.width, 790.))
+                        .max(min_size)
                         .min(max_size);
-                    egui::Resize::default()
-                        .id(self.id.with("resize"))
-                        .default_size(size)
-                        .min_size(egui::vec2(400., 280.).min(max_size))
-                        .max_size(max_size)
-                        .with_stroke(false)
-                        .show(ui, |ui| {
-                            let size = ui.available_size();
-                            if !ui.is_sizing_pass() {
-                                crate::app::remember_modal_size(ctx, self.key, size);
-                            }
+                    ui.allocate_ui_with_layout(
+                        size,
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
                             ui.set_min_size(size);
-                            content(&mut ModalSlots {
+                            let inner = content(&mut ModalSlots {
                                 ui,
                                 id: self.id,
+                                key: self.key,
                                 dismissible: self.dismissible,
                                 resizable: true,
-                            })
-                        })
+                            });
+                            if !ui.is_sizing_pass() {
+                                crate::app::remember_modal_size(ctx, self.key, size);
+                                self.resize_borders(ui, size, min_size, max_size);
+                            }
+                            inner
+                        },
+                    )
+                    .inner
                 } else {
                     ui.set_width(self.width.min((ctx.content_rect().width() - 32.).max(80.)));
                     content(&mut ModalSlots {
                         ui,
                         id: self.id,
+                        key: self.key,
                         dismissible: self.dismissible,
                         resizable: false,
                     })
@@ -131,6 +145,152 @@ impl Modal {
             close_requested,
         }
     }
+
+    fn resize_borders(
+        &self,
+        ui: &mut egui::Ui,
+        size: egui::Vec2,
+        min: egui::Vec2,
+        max: egui::Vec2,
+    ) {
+        // The shell's one-point stroke surrounds the content rectangle.
+        let frame = ui.min_rect().expand(1.);
+        for border in ResizeBorder::ALL {
+            let id = self.id.with(("resize_border", border as u8));
+            let hitbox = border.hitbox(frame);
+            let response = ui
+                .interact(hitbox, id, egui::Sense::drag())
+                .on_hover_cursor(border.cursor());
+            let origin_id = id.with("origin");
+            if response.dragged() {
+                let origin = ui.ctx().data_mut(|data| {
+                    *data.get_temp_mut_or(
+                        origin_id,
+                        egui::Rect::from_min_size(frame.min, size + egui::vec2(2., 2.)),
+                    )
+                });
+                let rect = border.resize(
+                    origin,
+                    response.total_drag_delta().unwrap_or_default(),
+                    min + egui::vec2(2., 2.),
+                    max + egui::vec2(2., 2.),
+                );
+                crate::app::remember_modal_position(ui.ctx(), self.key, rect.min);
+                crate::app::remember_modal_size(
+                    ui.ctx(),
+                    self.key,
+                    rect.size() - egui::vec2(2., 2.),
+                );
+                ui.ctx().set_cursor_icon(border.cursor());
+                ui.ctx().request_repaint();
+            } else {
+                ui.ctx()
+                    .data_mut(|data| data.remove::<egui::Rect>(origin_id));
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ResizeBorder {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl ResizeBorder {
+    const ALL: [Self; 8] = [
+        Self::TopLeft,
+        Self::TopRight,
+        Self::BottomLeft,
+        Self::BottomRight,
+        Self::Left,
+        Self::Right,
+        Self::Top,
+        Self::Bottom,
+    ];
+
+    fn inward(self) -> egui::Vec2 {
+        match self {
+            Self::TopLeft => egui::vec2(1., 1.),
+            Self::TopRight => egui::vec2(-1., 1.),
+            Self::BottomLeft => egui::vec2(1., -1.),
+            Self::BottomRight => egui::vec2(-1., -1.),
+            Self::Left => egui::vec2(1., 0.),
+            Self::Right => egui::vec2(-1., 0.),
+            Self::Top => egui::vec2(0., 1.),
+            Self::Bottom => egui::vec2(0., -1.),
+        }
+    }
+
+    fn point(self, rect: egui::Rect) -> egui::Pos2 {
+        rect.center() - rect.size() * self.inward() * 0.5
+    }
+
+    fn hitbox(self, rect: egui::Rect) -> egui::Rect {
+        // Edge strips stop at the corner zones, so diagonal resizing wins there.
+        match self {
+            Self::Left => egui::Rect::from_min_max(
+                egui::pos2(rect.left() - 2., rect.top() + 12.),
+                egui::pos2(rect.left() + 6., rect.bottom() - 12.),
+            ),
+            Self::Right => egui::Rect::from_min_max(
+                egui::pos2(rect.right() - 6., rect.top() + 12.),
+                egui::pos2(rect.right() + 2., rect.bottom() - 12.),
+            ),
+            Self::Top => egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 12., rect.top() - 2.),
+                egui::pos2(rect.right() - 12., rect.top() + 6.),
+            ),
+            Self::Bottom => egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 12., rect.bottom() - 6.),
+                egui::pos2(rect.right() - 12., rect.bottom() + 2.),
+            ),
+            _ => egui::Rect::from_center_size(
+                self.point(rect) + self.inward() * 5.,
+                egui::vec2(14., 14.),
+            ),
+        }
+    }
+
+    fn cursor(self) -> egui::CursorIcon {
+        match self {
+            Self::TopLeft | Self::BottomRight => egui::CursorIcon::ResizeNwSe,
+            Self::TopRight | Self::BottomLeft => egui::CursorIcon::ResizeNeSw,
+            Self::Left | Self::Right => egui::CursorIcon::ResizeHorizontal,
+            Self::Top | Self::Bottom => egui::CursorIcon::ResizeVertical,
+        }
+    }
+
+    fn resize(
+        self,
+        origin: egui::Rect,
+        delta: egui::Vec2,
+        min: egui::Vec2,
+        max: egui::Vec2,
+    ) -> egui::Rect {
+        let inward = self.inward();
+        let size = (origin.size() - delta * inward).max(min).min(max);
+        let position = origin.min
+            + egui::vec2(
+                if inward.x > 0. {
+                    origin.width() - size.x
+                } else {
+                    0.
+                },
+                if inward.y > 0. {
+                    origin.height() - size.y
+                } else {
+                    0.
+                },
+            );
+        egui::Rect::from_min_size(position, size)
+    }
 }
 
 pub(crate) struct ModalResponse<R> {
@@ -148,45 +308,80 @@ pub(crate) struct ModalSlots<'a> {
     resizable: bool,
     ui: &'a mut egui::Ui,
     id: egui::Id,
+    key: &'static str,
     dismissible: bool,
 }
 
 impl ModalSlots<'_> {
     pub(crate) fn header(&mut self, content: impl FnOnce(&mut egui::Ui)) {
-        egui::Frame::new().inner_margin(20).show(self.ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.spacing_mut().item_spacing = egui::vec2(8., 6.);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                if self.dismissible {
-                    let colors = Palette::for_ui(ui);
-                    let response = ui.add(
-                        egui::Button::new("")
-                            .frame(false)
-                            .min_size(egui::vec2(28., 28.)),
-                    );
-                    response.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::Button, true, "Close dialog")
+        // A drag-sensing parent lets buttons in the header keep priority.
+        let header =
+            self.ui
+                .scope_builder(egui::UiBuilder::new().sense(egui::Sense::drag()), |ui| {
+                    egui::Frame::new().inner_margin(20).show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.spacing_mut().item_spacing = egui::vec2(8., 6.);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            if self.dismissible {
+                                let colors = Palette::for_ui(ui);
+                                let response = ui.add(
+                                    egui::Button::new("")
+                                        .frame(false)
+                                        .min_size(egui::vec2(28., 28.)),
+                                );
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::Role::Button,
+                                        true,
+                                        "Close dialog",
+                                    )
+                                });
+                                if response.hovered() {
+                                    ui.painter().rect_stroke(
+                                        response.rect,
+                                        7,
+                                        ui.visuals().widgets.hovered.bg_stroke,
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                icons::line_icon(
+                                    ui.painter(),
+                                    response.rect.center(),
+                                    "close",
+                                    colors.muted,
+                                );
+                                if response.on_hover_text("Close (Esc)").clicked() {
+                                    ui.close();
+                                }
+                            }
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(ui.available_width(), 0.),
+                                egui::Layout::top_down(egui::Align::Min),
+                                content,
+                            );
+                        });
                     });
-                    if response.hovered() {
-                        ui.painter().rect_stroke(
-                            response.rect,
-                            7,
-                            ui.visuals().widgets.hovered.bg_stroke,
-                            egui::StrokeKind::Inside,
-                        );
-                    }
-                    icons::line_icon(ui.painter(), response.rect.center(), "close", colors.muted);
-                    if response.on_hover_text("Close (Esc)").clicked() {
-                        ui.close();
-                    }
-                }
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), 0.),
-                    egui::Layout::top_down(egui::Align::Min),
-                    content,
-                );
-            });
-        });
+                });
+        let response = header.response.on_hover_cursor(egui::CursorIcon::Grab);
+        let origin_id = self.id.with("header_drag_origin");
+        if response.dragged() {
+            let ctx = self.ui.ctx();
+            let current = egui::AreaState::load(ctx, self.id)
+                .map(|state| state.left_top_pos())
+                .unwrap_or(response.rect.min);
+            let origin = ctx.data_mut(|data| *data.get_temp_mut_or(origin_id, current));
+            crate::app::remember_modal_position(
+                ctx,
+                self.key,
+                origin + response.total_drag_delta().unwrap_or_default(),
+            );
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+            ctx.request_repaint();
+        } else {
+            self.ui
+                .ctx()
+                .data_mut(|data| data.remove::<egui::Pos2>(origin_id));
+        }
         self.divider();
     }
 
@@ -281,7 +476,8 @@ impl ModalSlots<'_> {
             .show(self.ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.spacing_mut().item_spacing = egui::vec2(8., 8.);
-                // Fit the footer to its actions so shorter bodies can shrink.
+                // A centered horizontal layout otherwise consumes the area's
+                // previous remaining height, preventing short bodies shrinking.
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                     egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true),
@@ -330,6 +526,160 @@ mod tests {
                 .resizable(true)
                 .resizable
         );
+    }
+
+    #[test]
+    fn each_border_keeps_the_opposite_side_fixed_and_obeys_size_limits() {
+        let origin = egui::Rect::from_min_size(egui::pos2(200., 150.), egui::vec2(600., 400.));
+        let min = egui::vec2(400., 280.);
+        let max = egui::vec2(1000., 800.);
+        for border in ResizeBorder::ALL {
+            for delta in [
+                egui::vec2(80., 60.),
+                egui::Vec2::splat(-2000.),
+                egui::Vec2::splat(2000.),
+            ] {
+                let resized = border.resize(origin, delta, min, max);
+                let opposite_before = border.point(origin) + origin.size() * border.inward();
+                let opposite_after = border.point(resized) + resized.size() * border.inward();
+                assert_eq!(opposite_before, opposite_after);
+                if border.inward().x == 0. {
+                    assert_eq!(resized.width(), origin.width());
+                }
+                if border.inward().y == 0. {
+                    assert_eq!(resized.height(), origin.height());
+                }
+                assert!(resized.width() >= min.x && resized.width() <= max.x);
+                assert!(resized.height() >= min.y && resized.height() <= max.y);
+            }
+        }
+    }
+
+    #[test]
+    fn all_edges_and_corners_resize_the_modal() {
+        for border in ResizeBorder::ALL {
+            let ctx = egui::Context::default();
+            let key = "border_resize_test";
+            let id = egui::Id::unique(key);
+            crate::app::remember_modal_size(&ctx, key, egui::vec2(600., 400.));
+            let frame = |events| {
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1400., 1100.),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |_| {
+                        Modal::new(key, 600.).resizable(true).show(&ctx, |modal| {
+                            modal.header(|ui| {
+                                ui.text_heading("Resize");
+                            });
+                            modal.body_unpadded(300., |_| {});
+                            modal.footer(|ui| {
+                                let _ = ui.button("Close");
+                            });
+                        });
+                    },
+                );
+                egui::AreaState::load(&ctx, id).unwrap().rect()
+            };
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                pressed,
+                button: egui::PointerButton::Primary,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(vec![]);
+            frame(vec![]);
+            let before = frame(vec![]);
+            let start = border.point(before) + border.inward() * 5.;
+            frame(vec![egui::Event::PointerMoved(start)]);
+            frame(vec![button(start, true)]);
+            let end = start - border.inward() * egui::vec2(80., 60.);
+            frame(vec![egui::Event::PointerMoved(end)]);
+            frame(vec![button(end, false)]);
+            let after = frame(vec![]);
+            let fixed_before = border.point(before) + before.size() * border.inward();
+            let fixed_after = border.point(after) + after.size() * border.inward();
+            assert!((fixed_after - fixed_before).length() < 3.);
+            let direction = border.inward();
+            let expected_growth = egui::vec2(direction.x.abs() * 80., direction.y.abs() * 60.);
+            assert!((after.size() - before.size() - expected_growth).length() < 3.);
+        }
+    }
+
+    #[test]
+    fn header_drag_moves_modal_and_resize_keeps_top_left() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::unique("modal_geometry_test");
+        crate::app::remember_modal_size(&ctx, "modal_geometry_test", egui::vec2(600., 400.));
+        let frame = |events| {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200., 1000.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |_| {
+                    Modal::new("modal_geometry_test", 600.)
+                        .resizable(true)
+                        .show(&ctx, |modal| {
+                            modal.header(|ui| {
+                                ui.text_heading("Drag me");
+                            });
+                            modal.body_unpadded(300., |_| {});
+                            modal.footer(|ui| {
+                                let _ = ui.button("Close");
+                            });
+                        });
+                },
+            );
+            egui::AreaState::load(&ctx, id).unwrap().rect()
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            pressed,
+            button: egui::PointerButton::Primary,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![]);
+        frame(vec![]);
+        let centered = frame(vec![]);
+        let corner = centered.max - egui::vec2(5., 5.);
+        frame(vec![egui::Event::PointerMoved(corner)]);
+        frame(vec![button(corner, true)]);
+        let end = corner + egui::vec2(40., 30.);
+        frame(vec![egui::Event::PointerMoved(end)]);
+        frame(vec![]);
+        frame(vec![button(end, false)]);
+        let initial = frame(vec![]);
+        assert!((initial.min - centered.min).length() < 3.);
+        assert!(initial.width() > centered.width() + 20.);
+        let start = initial.min + egui::vec2(50., 15.);
+        frame(vec![egui::Event::PointerMoved(start)]);
+        frame(vec![button(start, true)]);
+        let end = start + egui::vec2(100., 50.);
+        frame(vec![egui::Event::PointerMoved(end)]);
+        frame(vec![button(end, false)]);
+        let moved = frame(vec![]);
+        assert!((moved.min - initial.min - egui::vec2(100., 50.)).length() < 3.);
+        let corner = moved.max - egui::vec2(5., 5.);
+        frame(vec![egui::Event::PointerMoved(corner)]);
+        frame(vec![button(corner, true)]);
+        let end = corner + egui::vec2(80., 60.);
+        frame(vec![egui::Event::PointerMoved(end)]);
+        frame(vec![]);
+        frame(vec![button(end, false)]);
+        let resized = frame(vec![]);
+        assert!((resized.min - moved.min).length() < 3.);
+        assert!(resized.width() > moved.width() + 50.);
+        assert!(resized.height() > moved.height() + 30.);
     }
 
     #[test]
