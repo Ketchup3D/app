@@ -29,5 +29,7 @@ pub use app::KetchupApp;
 #[cfg(target_arch = "wasm32")]
 mod tool_cursor;
 
+mod frame_rate;
+
 #[cfg(test)]
 mod test_ui;

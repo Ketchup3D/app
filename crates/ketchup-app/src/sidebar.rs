@@ -1420,6 +1420,48 @@ mod preference_tests {
     }
 
     #[test]
+    fn frame_rate_diagnostics_save_immediately_and_default_off() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        for enabled in [true, false] {
+            app.general_settings.show_fps = enabled;
+            app.general_settings.section = settings::Section::Diagnostics;
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.general_settings.show_fps, enabled);
+            assert_eq!(restored.general_settings.section, settings::Section::Diagnostics);
+        }
+        let old: settings::GeneralSettings = serde_json::from_str("{}").unwrap();
+        assert!(!old.show_fps);
+    }
+
+    #[test]
+    fn shadows_and_sun_save_together_and_default_off_for_older_preferences() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        for visible in [true, false] {
+            app.doc.display.shadows = visible;
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.doc.display.shadows, visible);
+            restored.new_model(&ctx);
+            assert_eq!(restored.doc.display.shadows, visible);
+        }
+        let old: DisplaySettings = serde_json::from_str("{}").unwrap();
+        assert!(!old.shadows);
+    }
+
+    #[test]
     fn each_additional_option_saves_independently_without_a_model_edit() {
         let options: [(&str, fn(&mut KetchupApp)); 14] = [
             ("object snapping", |app| app.doc.snap_to_geometry = false),

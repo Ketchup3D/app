@@ -690,6 +690,11 @@ impl KetchupApp {
                 );
             }
             self.paint_compass(ui, response);
+            if self.general_settings.show_fps {
+                crate::frame_rate::paint(ui, *rect);
+            } else {
+                crate::frame_rate::reset(&ctx);
+            }
             if show_names {
                 // Paint a passive label so clicks still reach the viewport.
                 let colors = Palette::for_ui(ui);

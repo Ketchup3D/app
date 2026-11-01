@@ -16,19 +16,21 @@ pub(super) enum Section {
     Grid,
     StockPricing,
     SurfaceTreatment,
+    Diagnostics,
 }
 
 impl Section {
-    const GROUPS: [(&'static str, &'static [Self]); 3] = [
+    const GROUPS: [(&'static str, &'static [Self]); 4] = [
         ("Workspace", &[Self::Units, Self::Grid, Self::Colors]),
         ("Controls", &[Self::Navigation, Self::Shortcuts]),
         (
             "Materials & estimates",
             &[Self::StockPricing, Self::SurfaceTreatment],
         ),
+        ("System", &[Self::Diagnostics]),
     ];
     #[cfg(test)]
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Units,
         Self::Navigation,
         Self::Shortcuts,
@@ -36,6 +38,7 @@ impl Section {
         Self::Colors,
         Self::StockPricing,
         Self::SurfaceTreatment,
+        Self::Diagnostics,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -46,6 +49,7 @@ impl Section {
             Self::Grid => "Grid",
             Self::StockPricing => "Material",
             Self::SurfaceTreatment => "Sanding & Finishing",
+            Self::Diagnostics => "Diagnostics",
         }
     }
 
@@ -58,6 +62,7 @@ impl Section {
             Self::Grid => "settings_grid",
             Self::StockPricing => "settings_stock",
             Self::SurfaceTreatment => "time_estimates_sanding",
+            Self::Diagnostics => "diagnostics",
         }
     }
 
@@ -128,6 +133,7 @@ pub(super) struct GeneralSettings {
     pub pan_speed: f64,
     pub zoom_speed: f64,
     pub reverse_zoom: bool,
+    pub show_fps: bool,
     pub default_units: ketchup_core::UnitSettings,
     pub tool_keys: Vec<String>,
     pub stock: stock_settings::Settings,
@@ -141,6 +147,7 @@ impl Default for GeneralSettings {
             pan_speed: 1.,
             zoom_speed: 1.,
             reverse_zoom: false,
+            show_fps: false,
             default_units: Default::default(),
             stock: Default::default(),
             tool_keys: TOOLS.iter().map(|(_, key)| key.to_string()).collect(),
@@ -278,6 +285,7 @@ impl KetchupApp {
                                     Section::Grid => "settings/grid",
                                     Section::StockPricing => "settings/stock",
                                     Section::SurfaceTreatment => "settings/treatment",
+                                    Section::Diagnostics => "settings/diagnostics",
                                 };
                                 let scroll = sidebar::restored_scroll_area(
                                     ui,
@@ -331,6 +339,11 @@ impl KetchupApp {
 
     fn settings_contents(&mut self, ui: &mut egui::Ui) {
         match self.general_settings.section {
+            Section::Diagnostics => {
+                ui.text_weak("Tools for checking performance and troubleshooting.");
+                ui.checkbox(&mut self.general_settings.show_fps, "Show frames per second")
+                    .on_hover_text("Display the rendering frame rate in the lower-left corner of each viewport. Enables continuous rendering while visible.");
+            }
             Section::SurfaceTreatment => {
                 ui.text_weak("Defaults for objects in all projects. Objects use these values until customized in Entity Info.");
                 time_estimates::treatment_controls(
