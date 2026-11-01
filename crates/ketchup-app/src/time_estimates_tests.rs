@@ -939,6 +939,32 @@ fn bulk_treatment_edits_preserve_unedited_object_choices() {
 }
 
 #[test]
+fn custom_grit_edits_match_values_across_mixed_object_lists() {
+    let mut before = Settings::default();
+    before.sanding_grits = vec![80, 400];
+    before.sanding = vec![Step::default(); 2];
+    before.sanding_after_varnish = vec![false; 2];
+    let mut after = before.clone();
+    after.sanding_grits = vec![400, 1000];
+    after.sanding[0].enabled = true;
+    after.sanding[0].minutes_per_m2 = 3.;
+    after.sanding[1].enabled = true;
+    after.sanding[1].minutes_per_m2 = 5.;
+    let mut target = before.clone();
+    target.sanding_grits = vec![600, 80, 400];
+    target.sanding = vec![Step::default(); 3];
+    target.sanding_after_varnish = vec![false; 3];
+    target.sanding[0].enabled = true;
+    target.sanding[0].minutes_per_m2 = 7.;
+    apply_treatment_changes(&mut target, &before, &after);
+    assert_eq!(target.sanding_grits, vec![600, 400, 1000]);
+    assert_eq!(target.sanding[0].minutes_per_m2, 7.);
+    assert_eq!(target.sanding[1].minutes_per_m2, 3.);
+    assert_eq!(target.sanding[2].minutes_per_m2, 5.);
+    assert_eq!(target.estimate(1.).work, 15.);
+}
+
+#[test]
 fn task_groups_sum_work_and_share_the_longest_wait_per_coat() {
     let mut model = Model::default();
     let face = rectangle(&mut model, DVec3::ZERO);

@@ -1,5 +1,35 @@
 //! Per-object sanding and finishing configuration, saved with project geometry.
 const GRITS: [u16; 6] = [80, 120, 150, 180, 220, 320];
+
+// Older preferences use RON tuples for fixed arrays; editable lists use RON
+// sequences. Accept both so one migrated field cannot reset all preferences.
+fn deserialize_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    struct List<T>(std::marker::PhantomData<T>);
+    impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for List<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a list or legacy tuple of sanding settings")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut values = Vec::new();
+            while let Some(value) = sequence.next_element()? {
+                values.push(value);
+            }
+            Ok(values)
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+    }
+    deserializer.deserialize_any(List(std::marker::PhantomData))
+}
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Step {
@@ -80,8 +110,11 @@ impl Step {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub sanding: [Step; 6],
-    pub sanding_after_varnish: [bool; 6],
+    pub sanding_grits: Vec<u32>,
+    #[serde(deserialize_with = "deserialize_list")]
+    pub sanding: Vec<Step>,
+    #[serde(deserialize_with = "deserialize_list")]
+    pub sanding_after_varnish: Vec<bool>,
     pub pre_stain: Step,
     pub stain: Step,
     pub varnish: Step,
@@ -90,8 +123,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            sanding: std::array::from_fn(|_| Step::default()),
-            sanding_after_varnish: [false; 6],
+            sanding_grits: GRITS.iter().map(|&grit| u32::from(grit)).collect(),
+            sanding: vec![Step::default(); GRITS.len()],
+            sanding_after_varnish: vec![false; GRITS.len()],
             pre_stain: Step {
                 minutes_per_m2: 5.,
                 drying_hours: 0.25,
@@ -116,8 +150,15 @@ impl Default for Settings {
 impl Settings {
     pub fn sanitize(&mut self) {
         let defaults = Self::default();
-        for (step, default) in self.sanding.iter_mut().zip(&defaults.sanding) {
-            step.sanitize(default, true);
+        self.sanding
+            .resize(self.sanding_grits.len(), Step::default());
+        self.sanding_after_varnish
+            .resize(self.sanding_grits.len(), false);
+        for grit in &mut self.sanding_grits {
+            *grit = (*grit).max(1);
+        }
+        for step in &mut self.sanding {
+            step.sanitize(&Step::default(), true);
         }
         self.pre_stain.sanitize(&defaults.pre_stain, false);
         self.stain.sanitize(&defaults.stain, false);
@@ -133,10 +174,10 @@ impl Settings {
         for ((step, grit), between_coats) in self
             .sanding
             .iter()
-            .zip(GRITS)
-            .zip(self.sanding_after_varnish)
+            .zip(&self.sanding_grits)
+            .zip(&self.sanding_after_varnish)
         {
-            if step.enabled && !between_coats {
+            if step.enabled && !*between_coats {
                 tasks.push((format!("Sanding · {grit} grit"), step.estimate(area)));
             }
         }
@@ -157,10 +198,10 @@ impl Settings {
                     for ((sanding, grit), between_coats) in self
                         .sanding
                         .iter()
-                        .zip(GRITS)
-                        .zip(self.sanding_after_varnish)
+                        .zip(&self.sanding_grits)
+                        .zip(&self.sanding_after_varnish)
                     {
-                        if sanding.enabled && between_coats {
+                        if sanding.enabled && *between_coats {
                             tasks.push((
                                 format!("Sanding · {grit} grit (after coat {coat})"),
                                 sanding.estimate(area),
@@ -186,4 +227,41 @@ impl Settings {
 pub struct Duration {
     pub work: f64,
     pub wait: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_grits_migrate_and_custom_grits_round_trip_with_estimates() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("sanding_grits");
+        let mut settings: Settings = serde_json::from_value(legacy).unwrap();
+        settings.sanitize();
+        assert_eq!(settings.sanding_grits, vec![80, 120, 150, 180, 220, 320]);
+        settings.sanding_grits = vec![400, 600, 1000];
+        settings.sanding = vec![
+            Step {
+                enabled: true,
+                minutes_per_m2: 2.,
+                ..Step::default()
+            };
+            3
+        ];
+        settings.sanding_after_varnish = vec![false; 3];
+        settings.sanitize();
+        let restored: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored, settings);
+        assert_eq!(restored.estimate(2.).work, 12.);
+        assert_eq!(
+            restored.task_estimates(2.).last().unwrap().0,
+            "Sanding · 1000 grit"
+        );
+        settings.sanding_grits.clear();
+        settings.sanitize();
+        assert!(settings.sanding.is_empty());
+        assert!(!settings.any_enabled());
+    }
 }

@@ -22,7 +22,6 @@ use std::collections::BTreeSet;
 // Oil-based polyurethane: 4–6 hours between coats, 24 hours after the last
 // coat before light use. Light use does not mean fully cured.
 // https://www.minwax.com/en/products/protective-finishes/fast-drying-polyurethane
-const GRITS: [u16; 6] = [80, 120, 150, 180, 220, 320];
 type WoodMaterials =
     std::collections::BTreeMap<ketchup_core::MaterialId, ketchup_core::StockMaterial>;
 
@@ -180,14 +179,46 @@ fn apply_treatment_changes(target: &mut Settings, before: &Settings, after: &Set
             final_drying_hours
         );
     }
-    for i in 0..6 {
-        step(
-            &mut target.sanding[i],
-            &before.sanding[i],
-            &after.sanding[i],
-        );
-        if before.sanding_after_varnish[i] != after.sanding_after_varnish[i] {
-            target.sanding_after_varnish[i] = after.sanding_after_varnish[i];
+    target.sanitize();
+    // Match by grit rather than position: mixed selections may have different
+    // custom lists. Removing a row must not shift edits onto another grit.
+    for i in (0..target.sanding_grits.len()).rev() {
+        let grit = target.sanding_grits[i];
+        if before.sanding_grits.contains(&grit) && !after.sanding_grits.contains(&grit) {
+            target.sanding_grits.remove(i);
+            target.sanding.remove(i);
+            target.sanding_after_varnish.remove(i);
+        }
+    }
+    for (i, grit) in after.sanding_grits.iter().enumerate() {
+        let previous = before.sanding_grits.iter().position(|value| value == grit);
+        let edited = previous.is_none_or(|j| {
+            before.sanding[j] != after.sanding[i]
+                || before.sanding_after_varnish[j] != after.sanding_after_varnish[i]
+        });
+        if !edited {
+            continue;
+        }
+        if let Some(j) = target.sanding_grits.iter().position(|value| value == grit) {
+            if let Some(k) = previous {
+                step(
+                    &mut target.sanding[j],
+                    &before.sanding[k],
+                    &after.sanding[i],
+                );
+                if before.sanding_after_varnish[k] != after.sanding_after_varnish[i] {
+                    target.sanding_after_varnish[j] = after.sanding_after_varnish[i];
+                }
+            } else {
+                target.sanding[j] = after.sanding[i].clone();
+                target.sanding_after_varnish[j] = after.sanding_after_varnish[i];
+            }
+        } else {
+            target.sanding_grits.push(*grit);
+            target.sanding.push(after.sanding[i].clone());
+            target
+                .sanding_after_varnish
+                .push(after.sanding_after_varnish[i]);
         }
     }
     step(&mut target.pre_stain, &before.pre_stain, &after.pre_stain);
@@ -554,23 +585,73 @@ pub(super) fn treatment_controls(
         ]
     };
     sidebar::inspector_section(ui, "Sanding", keys[0], false, |ui| {
-        let mut table = InspectorTable::new(
-            ui.available_width(),
-            [Column::flex(1.), Column::flex(1.4), Column::flex(1.)],
-        );
-        table.header(ui, ["Grit", "Between coats", "Min / m²"]);
-        for ((grit, step), after_varnish) in GRITS
-            .iter()
-            .zip(&mut settings.sanding)
-            .zip(&mut settings.sanding_after_varnish)
-        {
-            table.row(ui, ("sanding", grit), |column, ui| {
-                match column {
-                    0 => { ui.checkbox(&mut step.enabled, grit.to_string()); }
-                    1 => { ui.checkbox(after_varnish, "").on_hover_text("Between varnish coats: sand after each coat except the last, instead of before finishing."); }
-                    _ => { ui.add_enabled_ui(step.enabled, |ui| rate_input(ui, &mut step.minutes_per_m2)); }
+        settings.sanitize();
+        let scroll_key = format!("{}/grits", keys[0]);
+        let mut remove = None;
+        let scroll = sidebar::restored_scroll_area(
+            ui,
+            &scroll_key,
+            egui::ScrollArea::horizontal()
+                .id_salt((&scroll_key, "table"))
+                .auto_shrink([false, true]),
+        ).show(ui, |ui| {
+            let mut table = InspectorTable::new(
+                ui.available_width(),
+                [Column::at_least(100.), Column::at_least(85.), Column::at_least(70.), Column::fixed(26.)],
+            );
+            table.header(ui, ["Grit", "Between coats", "Min / m²", ""]);
+            for i in 0..settings.sanding_grits.len() {
+                let mut grit = settings.sanding_grits[i];
+                table.row(ui, ("sanding", i), |column, ui| {
+                    match column {
+                        0 => {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut settings.sanding[i].enabled, "")
+                                    .on_hover_text("Include this grit in the estimate");
+                                ui.add(egui::DragValue::new(&mut grit).range(1..=u32::MAX).speed(1.))
+                                    .on_hover_text("Enter any positive grit number, including values above 320");
+                            });
+                        }
+                        1 => { ui.checkbox(&mut settings.sanding_after_varnish[i], "").on_hover_text("Between varnish coats: sand after each coat except the last, instead of before finishing."); }
+                        2 => { ui.add_enabled_ui(settings.sanding[i].enabled, |ui| rate_input(ui, &mut settings.sanding[i].minutes_per_m2)); }
+                        _ => {
+                            if ui.small_button("×").on_hover_text("Remove this grit").clicked() {
+                                remove = Some(i);
+                            }
+                        }
+                    }
+                });
+                if !settings.sanding_grits.iter().enumerate().any(|(j, value)| j != i && *value == grit) {
+                    settings.sanding_grits[i] = grit;
                 }
+            }
+        });
+        sidebar::remember_scroll(ui.ctx(), &scroll_key, scroll.state.clamped_offset());
+        if let Some(i) = remove {
+            settings.sanding_grits.remove(i);
+            settings.sanding.remove(i);
+            settings.sanding_after_varnish.remove(i);
+        }
+        if ui.button("Add grit").clicked() {
+            let mut grit = settings
+                .sanding_grits
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0)
+                .saturating_add(80)
+                .max(1);
+            if settings.sanding_grits.contains(&grit) {
+                grit = (1..=u32::MAX)
+                    .find(|value| !settings.sanding_grits.contains(value))
+                    .unwrap_or(1);
+            }
+            settings.sanding_grits.push(grit);
+            settings.sanding.push(Step {
+                enabled: true,
+                ..Step::default()
             });
+            settings.sanding_after_varnish.push(false);
         }
         ui.label(
             RichText::new(

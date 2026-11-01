@@ -463,6 +463,13 @@ impl KetchupApp {
     }
 
     pub(super) fn save_inspector_preferences(&self, storage: &mut dyn eframe::Storage) {
+        // Preserve unreadable settings before saving defaults over them. A
+        // future migration failure must not destroy the user's catalogs.
+        if let Some(raw) = storage.get_string(PREFERENCE_KEY)
+            && eframe::get_value::<InspectorPreferences>(storage, PREFERENCE_KEY).is_none()
+        {
+            storage.set_string("ketchup.inspector.unreadable-backup.v1", raw);
+        }
         eframe::set_value(storage, PREFERENCE_KEY, &self.inspector_preferences);
         save_order(&self.inspector_order, storage);
     }
@@ -666,6 +673,38 @@ mod preference_tests {
     struct SavedPreferences {
         values: std::collections::BTreeMap<String, String>,
         flushed: bool,
+    }
+
+    #[test]
+    fn legacy_ron_sanding_arrays_keep_the_rest_of_the_preferences() {
+        #[derive(serde::Serialize)]
+        struct LegacyTreatment {
+            sanding: [time_estimates::Step; 6],
+            sanding_after_varnish: [bool; 6],
+        }
+        #[derive(serde::Serialize)]
+        struct LegacyPreferences {
+            general: settings::GeneralSettings,
+            time_estimates: LegacyTreatment,
+        }
+        let mut general = settings::GeneralSettings::default();
+        general.stock.currency = "MXN".into();
+        let old = LegacyPreferences {
+            general,
+            time_estimates: LegacyTreatment {
+                sanding: std::array::from_fn(|_| time_estimates::Step::default()),
+                sanding_after_varnish: [false; 6],
+            },
+        };
+        let mut storage = SavedPreferences::default();
+        eframe::set_value(&mut storage, PREFERENCE_KEY, &old);
+        let restored = eframe::get_value::<InspectorPreferences>(&storage, PREFERENCE_KEY).unwrap();
+        assert_eq!(restored.general.stock.currency, "MXN");
+        assert_eq!(restored.time_estimates.sanding.len(), 6);
+        assert_eq!(
+            restored.time_estimates.sanding_after_varnish,
+            vec![false; 6]
+        );
     }
 
     impl Storage for SavedPreferences {
@@ -2155,7 +2194,7 @@ mod preference_tests {
             step.enabled = i % 2 == 0;
             step.minutes_per_m2 = 7. + i as f64;
         }
-        app.time_estimates.sanding_after_varnish = [false, true, false, true, false, true];
+        app.time_estimates.sanding_after_varnish = vec![false, true, false, true, false, true];
         for (step, product) in [
             &mut app.time_estimates.pre_stain,
             &mut app.time_estimates.stain,
