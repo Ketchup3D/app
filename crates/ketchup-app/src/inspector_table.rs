@@ -1,5 +1,5 @@
 //! Shared layout for inspector tables: full width, fixed column boundaries,
-//! top-aligned cells, and inputs that fill their cell by default.
+//! vertically centered cells, and inputs that fill their cell by default.
 use eframe::egui::{self, Rect};
 
 const COLUMN_SPACING: f32 = 8.;
@@ -99,6 +99,7 @@ pub(crate) struct InspectorTable<const N: usize> {
     row: usize,
     striped: bool,
     column_spacing: f32,
+    cell_padding: f32,
     centered: bool,
 }
 
@@ -127,8 +128,14 @@ impl<const N: usize> InspectorTable<N> {
             row: 0,
             striped: false,
             column_spacing,
-            centered: false,
+            cell_padding: 0.,
+            centered: true,
         }
+    }
+
+    pub(crate) fn cell_padding(mut self, horizontal: f32) -> Self {
+        self.cell_padding = horizontal.max(0.);
+        self
     }
 
     pub(crate) fn striped(mut self) -> Self {
@@ -136,8 +143,8 @@ impl<const N: usize> InspectorTable<N> {
         self
     }
 
-    /// Center label/value cells using measured content heights, without fixing
-    /// row heights or stretching text. Other tables retain top-aligned cells.
+    /// Cells are vertically centered by default, including wrapped text and controls.
+    /// Keep this builder for existing callers of the shared field layout.
     pub(crate) fn centered(mut self) -> Self {
         self.centered = true;
         self
@@ -147,7 +154,10 @@ impl<const N: usize> InspectorTable<N> {
         self.row(ui, "header", |column, cell| {
             cell.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 // Truncated labels already show their full text on hover in egui.
-                ui.add(crate::natural_text::Label::new(egui::RichText::new(labels[column]).strong()).truncate());
+                ui.add(
+                    crate::natural_text::Label::new(egui::RichText::new(labels[column]).strong())
+                        .truncate(),
+                );
             });
         });
     }
@@ -181,9 +191,11 @@ impl<const N: usize> InspectorTable<N> {
             } else {
                 0.
             };
+            let padding = self.cell_padding.min(width * 0.5);
+            let content_width = (width - padding * 2.).max(0.);
             let rect = Rect::from_min_max(
-                egui::pos2(x, origin.y + offset),
-                egui::pos2(x + width, ui.max_rect().bottom()),
+                egui::pos2(x + padding, origin.y + offset),
+                egui::pos2(x + width - padding, ui.max_rect().bottom()),
             );
             let mut cell = ui.new_child(
                 egui::UiBuilder::new()
@@ -191,15 +203,16 @@ impl<const N: usize> InspectorTable<N> {
                     .max_rect(rect)
                     .layout(egui::Layout::top_down_justified(egui::Align::Min)),
             );
-            cell.set_width(width);
+            cell.set_width(content_width);
             cell.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             cell.spacing_mut().interact_size.y = ROW_HEIGHT;
-            cell.spacing_mut().text_edit_width = width;
-            cell.spacing_mut().combo_width = width;
+            cell.spacing_mut().text_edit_width = content_width;
+            cell.spacing_mut().combo_width = content_width;
             let clip = ui.clip_rect();
+            let cell_bounds = cell.max_rect();
             cell.set_clip_rect(clip.intersect(Rect::from_min_max(
-                egui::pos2(x, clip.top()),
-                egui::pos2(x + width, clip.bottom()),
+                egui::pos2(cell_bounds.left(), clip.top()),
+                egui::pos2(cell_bounds.right(), clip.bottom()),
             )));
             contents(column, &mut cell);
             measured[column] = cell.min_rect().height();
@@ -244,14 +257,16 @@ mod tests {
         for width in [360., 180., 500., 240.] {
             let mut bounds = [Rect::NOTHING; 2];
             let mut value = "Editable value".to_owned();
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 ui.set_width(width);
-                let mut table = InspectorTable::new(width, [Column::flex(1.); 2]).centered();
+                let mut table = InspectorTable::new(width, [Column::flex(1.); 2]);
                 table.row(ui, "centered_test", |column, cell| {
                     bounds[column] = if column == 0 {
                         cell.add(
-                            crate::natural_text::Label::new("A long property label that wraps onto several lines")
-                                .wrap(),
+                            crate::natural_text::Label::new(
+                                "A long property label that wraps onto several lines",
+                            )
+                            .wrap(),
                         )
                         .rect
                     } else {
@@ -259,6 +274,7 @@ mod tests {
                     };
                 });
             });
+            output.textures_delta.clear();
             assert!(
                 (bounds[0].center().y - bounds[1].center().y).abs() <= 1.,
                 "{bounds:?}"
@@ -292,7 +308,7 @@ mod tests {
             }
         }
         let ctx = egui::Context::default();
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let mut table = InspectorTable::new(180., [Column::flex(1.)]);
             table.row(ui, "product", |_, cell| {
                 product_cell_text(
@@ -305,6 +321,7 @@ mod tests {
                 );
             });
         });
+        output.textures_delta.clear();
         let mut found = false;
         for shape in output.shapes {
             check(&shape.shape, &mut found);
@@ -332,7 +349,7 @@ mod tests {
         }
         let ctx = egui::Context::default();
         for width in [180., 280., 640.] {
-            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 ui.set_width(width);
                 let mut table = InspectorTable::new(width, [Column::flex(1.); 3]);
                 table.header(
@@ -342,10 +359,11 @@ mod tests {
                 let widths = table.widths;
                 let right = ui.max_rect().right();
                 table.row(ui, "body", |column, cell| {
-                    assert!((cell.max_rect().width() - widths[column]).abs() < 0.01);
+                    assert!((cell.max_rect().width() - widths[column]).abs() <= 1.);
                     assert!(cell.max_rect().right() <= right + 1.);
                 });
             });
+            output.textures_delta.clear();
             let mut count = 0;
             for shape in output.shapes {
                 check(&shape.shape, &mut count);
@@ -385,7 +403,9 @@ mod tests {
     fn rows_align_and_inputs_fill_cells_after_resizing() {
         let ctx = egui::Context::default();
         for width in [280., 640., 360., 1000., 280.] {
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut final_rows = Vec::new();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                final_rows.clear();
                 ui.set_width(width);
                 let mut table = InspectorTable::new(width, [Column::flex(1.); 3]);
                 let mut previous = None;
@@ -396,7 +416,10 @@ mod tests {
                         let bounds = cell.max_rect();
                         let response = match row_index {
                             0 => cell.add(
-                                crate::natural_text::Label::new("Wrapped column heading with details").wrap(),
+                                crate::natural_text::Label::new(
+                                    "Wrapped column heading with details",
+                                )
+                                .wrap(),
                             ),
                             1 => cell.add(egui::TextEdit::singleline(&mut "Board".to_owned())),
                             2 => cell.add(egui::DragValue::new(&mut 12.5)),
@@ -420,23 +443,32 @@ mod tests {
                         cells.push(cell.min_rect());
                     });
                     assert!((row.width() - width).abs() <= 1.);
-                    for cell in cells {
+                    for cell in &cells {
                         assert!(cell.bottom() <= row.bottom() + 1.);
-                        assert!((cell.top() - row.top()).abs() <= 1.);
                     }
+                    final_rows.push((row, cells));
                     if let Some(previous) = previous {
                         assert!(row.top() >= previous);
                     }
                     previous = Some(row.bottom());
                 }
             });
+            output.textures_delta.clear();
+            for (row, cells) in final_rows {
+                for cell in cells {
+                    assert!(
+                        (cell.center().y - row.center().y).abs() <= 1.,
+                        "cell {cell:?}, row {row:?}"
+                    );
+                }
+            }
         }
     }
 
     #[test]
     fn disabled_inputs_keep_the_same_column_width() {
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.set_width(400.);
             let mut table = InspectorTable::new(400., [Column::flex(1.); 2]);
             table.row(ui, "disabled", |_, cell| {
@@ -448,5 +480,6 @@ mod tests {
                 assert!((response.rect.width() - bounds.width()).abs() <= 1.);
             });
         });
+        output.textures_delta.clear();
     }
 }

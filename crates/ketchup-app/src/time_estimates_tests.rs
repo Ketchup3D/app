@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 use super::*;
-use ketchup_core::{DVec3, Face, Vertex};
+use ketchup_core::DVec3;
 
 fn rectangle(model: &mut Model, offset: DVec3) -> u64 {
     let corners = [
@@ -150,32 +150,14 @@ fn scope_expands_nested_objects_deduplicates_faces_and_excludes_hidden_surfaces(
 #[test]
 fn area_subtracts_holes_and_does_not_double_front_and_back() {
     let mut model = Model::default();
-    for (id, x, y) in [
-        (1, 0., 0.),
-        (2, 4., 0.),
-        (3, 4., 4.),
-        (4, 0., 4.),
-        (5, 1., 1.),
-        (6, 2., 1.),
-        (7, 2., 2.),
-        (8, 1., 2.),
+    for ring in [
+        [DVec3::new(0.,0.,0.), DVec3::new(4.,0.,0.), DVec3::new(4.,4.,0.), DVec3::new(0.,4.,0.)],
+        [DVec3::new(1.,1.,0.), DVec3::new(2.,1.,0.), DVec3::new(2.,2.,0.), DVec3::new(1.,2.,0.)],
     ] {
-        model.vertices.insert(
-            id,
-            Vertex {
-                id,
-                position: DVec3::new(x, y, 0.),
-            },
-        );
+        for i in 0..4 { model.add_edge(ring[i], ring[(i+1)%4]).unwrap(); }
     }
-    model.faces.insert(
-        9,
-        Face {
-            id: 9,
-            vertices: vec![1, 2, 3, 4],
-            holes: vec![vec![5, 6, 7, 8]],
-        },
-    );
+    model.faces.retain(|_, face| !face.holes.is_empty());
+    assert_eq!(model.faces.len(), 1);
     let object = model
         .make_object(&model.root_entities(), false, "Panel")
         .unwrap();
@@ -577,6 +559,7 @@ fn material_estimate_prices_purchased_stock_and_flags_missing_prices() {
     let unassigned = rectangle(&mut app.doc.model, DVec3::X * 10.);
     app.doc.model.push_pull(unassigned, 0.019).unwrap();
     rectangle(&mut app.doc.model, DVec3::X * 20.);
+    app.project.modified = false; // Treat the supplied document as already saved.
     let before = app.doc.model.clone();
     let text = labels(&mut app);
     assert_eq!(app.estimate_cache.material_recomputations, 1);
@@ -876,6 +859,7 @@ fn object_defaults_apply_to_existing_objects_and_explicit_overrides_survive_relo
     let before = app.doc.model.clone();
     app.create_object(&ctx, false, "Part");
     let id = *app.selected.first().unwrap();
+    let created = app.doc.model.clone();
     app.time_estimates.stain.enabled = true;
     let areas = std::collections::BTreeMap::from([(id, 6.)]);
     assert!(
@@ -900,6 +884,8 @@ fn object_defaults_apply_to_existing_objects_and_explicit_overrides_survive_relo
     let restored: Model =
         serde_json::from_str(&serde_json::to_string(&app.doc.model).unwrap()).unwrap();
     assert!(object_tasks(&restored, &areas, &app.time_estimates).is_empty());
+    // Direct fixture edits above are not undoable commands; restore the recorded state.
+    app.doc.model = created;
     app.undo(&ctx, false);
     assert_eq!(app.doc.model, before);
 }
@@ -1320,6 +1306,8 @@ fn apply_materials_to_descendants_preserves_nested_selection_and_supports_undo()
         .model
         .make_object(&BTreeSet::from([child]), false, "Parent")
         .unwrap();
+    let child = *doc.model.objects[&root].entities.iter().find(|id| doc.model.objects.contains_key(id)).unwrap();
+    let leaf = *doc.model.objects[&child].entities.iter().find(|id| doc.model.objects.contains_key(id)).unwrap();
     let other_edge = doc
         .model
         .add_edge(DVec3::Y * 10., DVec3::Y * 10. + DVec3::X)

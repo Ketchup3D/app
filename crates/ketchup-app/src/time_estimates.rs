@@ -363,6 +363,12 @@ fn finishing_costs(
         .collect()
 }
 
+// Monetary values always occupy one line; egui exposes the full value on hover
+// when it needs to elide the text to fit a narrow inspector column.
+fn price_text(ui: &mut egui::Ui, text: RichText) {
+    ui.add(crate::natural_text::Label::new(text).truncate());
+}
+
 fn cost_group(ui: &mut egui::Ui, label: &str) {
     let colors = Palette::for_ui(ui);
     ui.separator();
@@ -409,6 +415,10 @@ fn finishing_cost_rows(
                         .map(|value| currency::format_value(currency, value))
                         .unwrap_or_else(|| "—".into()),
                 };
+                if column >= 2 {
+                    price_text(ui, RichText::new(text).strong());
+                    return;
+                }
                 let mut lines = vec![RichText::new(text).strong()];
                 if column == 0 {
                     if let Some(issue) = cost.issue {
@@ -1076,10 +1086,7 @@ impl KetchupApp {
                                 }
                                 product_cell_text(ui, lines);
                             } else {
-                                product_cell_text(
-                                    ui,
-                                    vec![RichText::new(&values[column - 1]).strong()],
-                                );
+                                price_text(ui, RichText::new(&values[column - 1]).strong());
                             }
                         },
                     );
@@ -1283,7 +1290,8 @@ impl KetchupApp {
             ui.available_width(),
             [Column::flex(1.), Column::flex(1.)],
         )
-        .striped();
+        .striped()
+        .cell_padding(8.);
         summary.header(ui, ["Estimate", "Value"]);
         for (key, label, value, accent) in [
             ("price", "Price", material_summary, colors.green),
@@ -1318,7 +1326,12 @@ impl KetchupApp {
                     if column == 0 {
                         ui.text_label(label);
                     } else {
-                        ui.text_label(RichText::new(&value).strong().color(value_color));
+                        let text = RichText::new(&value).strong().color(value_color);
+                        if key == "price" {
+                            price_text(ui, text);
+                        } else {
+                            ui.text_label(text);
+                        }
                     }
                 });
             });
