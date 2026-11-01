@@ -10,7 +10,7 @@ import { tmpdir, homedir } from 'node:os';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
-  console.log('Usage: node scripts/capture_readme.mjs [--dist PATH] [--browser PATH]\nUses an existing Web build; creates assets/screenshots/ketchup.jpg and updates README.md.\nRequires Node.js >= 22 and Chromium/Chrome (or CHROME_BIN). No build is started.');
+  console.log('Usage: node scripts/capture_readme.mjs [--dist PATH] [--browser PATH]\nUses assets/examples/Example.ketchup with an existing Web build; creates assets/screenshots/ketchup.jpg and updates README.md.\nRequires Node.js >= 22 and Chromium/Chrome (or CHROME_BIN). No build is started.');
   process.exit(0);
 }
 function option(name) {
@@ -23,6 +23,9 @@ for (let i = 0; i < args.length; i += 2) {
   if (!['--dist', '--browser'].includes(args[i])) throw Error(`Unknown option: ${args[i]}`);
 }
 const dist = resolve(root, option('--dist') || 'dist');
+const example = await readFile(join(root, 'assets/examples/Example.ketchup'), 'utf8');
+// Fail before launching the browser if the bundled project is invalid JSON.
+JSON.parse(example);
 await access(join(dist, 'index.html'));
 const cache = join(homedir(), '.cache/ms-playwright');
 const cachedBrowsers = (await readdir(cache).catch(() => []))
@@ -83,8 +86,14 @@ try {
     pending.set(id, { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
     socket.send(JSON.stringify({ id, method, params }));
   });
+  await call('Page.enable');
   await call('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
   await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
+  // Seed only the temporary browser profile, before the app restores its document.
+  // Keep the bundled project's saved camera and display settings intact.
+  await call('Page.addScriptToEvaluateOnNewDocument', {
+    source: `localStorage.setItem('ketchup.document.v1', ${JSON.stringify(example)});`,
+  });
   await call('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
   await until(async () => {
     const result = await call('Runtime.evaluate', { expression: `!document.getElementById('loading') && document.getElementById('ketchup-canvas')?.width === 1920` });
