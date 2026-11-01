@@ -3653,12 +3653,16 @@ impl KetchupApp {
         } else {
             Vec2::ZERO
         };
-        let painter = ctx
-            .layer_painter(egui::LayerId::new(
-                egui::Order::Tooltip,
-                egui::Id::unique("viewport_tool_cursor"),
-            ))
-            .with_clip_rect(self.viewport);
+        #[cfg(target_arch = "wasm32")]
+        if crate::tool_cursor::show(ctx, tool, hotspot, offset) {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+            return;
+        }
+        // Let the tool cursor overlap adjacent panels at viewport edges.
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            egui::Id::unique("viewport_tool_cursor"),
+        ));
         ctx.set_cursor_icon(egui::CursorIcon::None);
         icons::tool(
             &painter,

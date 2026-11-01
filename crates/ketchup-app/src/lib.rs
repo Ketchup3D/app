@@ -25,5 +25,9 @@ mod updates;
 pub use updates::initialize as initialize_updater;
 
 pub use app::KetchupApp;
+
+#[cfg(target_arch = "wasm32")]
+mod tool_cursor;
+
 #[cfg(test)]
 mod test_ui;

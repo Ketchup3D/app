@@ -184,8 +184,14 @@ impl PickingCache {
             return None;
         }
         let mut best: Option<(u64, f64, DVec3)> = None;
-        let mut pending = vec![0];
-        while let Some(index) = pending.pop() {
+        // The hierarchy halves each range, so its traversal needs at most one
+        // pending sibling per bit of usize. Keep this hot occlusion query off
+        // the allocator (it also runs for every edge candidate and snap marker).
+        let mut pending = [0; usize::BITS as usize + 1];
+        let mut pending_len = 1;
+        while pending_len != 0 {
+            pending_len -= 1;
+            let index = pending[pending_len];
             let node = &self.nodes[index];
             let limit = best.map_or(f64::INFINITY, |(_, t, _)| t);
             if node.bounds.entry(ray, limit).is_none() {
@@ -197,13 +203,21 @@ impl PickingCache {
                 match (a, b) {
                     (Some(a), Some(b)) => {
                         if a < b {
-                            pending.extend([right, left]);
+                            pending[pending_len..pending_len + 2].copy_from_slice(&[right, left]);
+                            pending_len += 2;
                         } else {
-                            pending.extend([left, right]);
+                            pending[pending_len..pending_len + 2].copy_from_slice(&[left, right]);
+                            pending_len += 2;
                         }
                     }
-                    (Some(_), None) => pending.push(left),
-                    (None, Some(_)) => pending.push(right),
+                    (Some(_), None) => {
+                        pending[pending_len] = left;
+                        pending_len += 1;
+                    }
+                    (None, Some(_)) => {
+                        pending[pending_len] = right;
+                        pending_len += 1;
+                    }
                     _ => {}
                 }
                 continue;
@@ -279,11 +293,14 @@ struct EdgePickingCache {
     view: Option<(Camera, DVec2)>,
     source_edges: Vec<ketchup_core::Edge>,
     source_vertices: Vec<(u64, DVec3)>,
+    world_edges: Vec<(u64, DVec3, DVec3)>,
     items: Vec<ScreenEdge>,
     nodes: Vec<ScreenEdgeNode>,
     pending: Vec<usize>,
     #[cfg(test)]
     projection_builds: usize,
+    #[cfg(test)]
+    geometry_builds: usize,
     #[cfg(test)]
     tested_edges: usize,
 }
@@ -307,7 +324,9 @@ impl EdgePickingCache {
         // Public model collections permit direct edits, so validate the source
         // with linear iterators. An unchanged hover does no edge projection,
         // map lookup per endpoint, or spatial-index construction.
-        let same_geometry = self.source_edges.iter().eq(model.edges.values())
+        let same_geometry = self.source_edges.len() == model.edges.len()
+            && self.source_vertices.len() == model.vertices.len()
+            && self.source_edges.iter().eq(model.edges.values())
             && self
                 .source_vertices
                 .iter()
@@ -322,6 +341,17 @@ impl EdgePickingCache {
             return;
         }
         if !same_geometry {
+            // Camera changes only reproject these endpoints; resolve the model's
+            // vertex maps once per geometry change, including direct public edits.
+            self.world_edges.clear();
+            self.world_edges.extend(model.edges.values().map(|edge| {
+                let (a, b) = model.points(edge);
+                (edge.id, a, b)
+            }));
+            #[cfg(test)]
+            {
+                self.geometry_builds += 1;
+            }
             self.source_edges.clear();
             self.source_edges.extend(model.edges.values().cloned());
             self.source_vertices.clear();
@@ -331,11 +361,11 @@ impl EdgePickingCache {
         self.view = Some((camera.clone(), size));
         self.items.clear();
         let view = camera.view(size);
-        self.items.extend(model.edges.values().filter_map(|edge| {
-            let (a, b) = model.points(edge);
-            let (a, b) = view.segment(a, b)?;
-            Some(ScreenEdge { id: edge.id, a, b })
-        }));
+        self.items
+            .extend(self.world_edges.iter().filter_map(|&(id, a, b)| {
+                let (a, b) = view.segment(a, b)?;
+                Some(ScreenEdge { id, a, b })
+            }));
         self.nodes.clear();
         if !self.items.is_empty() {
             self.build(0, self.items.len());

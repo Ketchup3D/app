@@ -79,8 +79,99 @@ fn select_arrow(p: &egui::Painter, rect: Rect, stroke: Stroke) {
     ));
 }
 
-pub fn ui_tool(p: &egui::Painter, rect: Rect, tool: Tool) {
+#[derive(Clone, Default)]
+struct IconMeshCache {
+    entries: Vec<(IconMeshKey, Vec<egui::epaint::Mesh>)>,
+}
+
+#[derive(Clone, PartialEq)]
+enum IconKind {
+    Tool(Tool),
+    Line(String, Color32),
+    Logo,
+    Group(Color32, Color32),
+    Face(Color32, Color32),
+    Axis(Axis, bool, Color32, Color32),
+}
+
+#[derive(Clone, PartialEq)]
+struct IconMeshKey {
+    kind: IconKind,
+    size: egui::Vec2,
+    dark: bool,
+    pixels_per_point: f32,
+}
+
+// Browser cursor export needs vector shapes, independent of the UI mesh cache.
+pub(crate) fn tool_vectors(p: &egui::Painter, rect: Rect, tool: Tool) {
     paint_tool(p, rect, tool, ToolPalette::for_painter(p));
+}
+
+pub fn ui_tool(p: &egui::Painter, rect: Rect, tool: Tool) {
+    cached_icon(p, rect, IconKind::Tool(tool), |p, rect| {
+        tool_vectors(p, rect, tool);
+    });
+}
+
+fn cached_icon(
+    p: &egui::Painter,
+    rect: Rect,
+    kind: IconKind,
+    paint: impl FnOnce(&egui::Painter, Rect),
+) {
+    if !p.is_visible() || !p.clip_rect().intersects(rect) {
+        return;
+    }
+    let key = IconMeshKey {
+        kind,
+        size: rect.size(),
+        dark: p.ctx().global_style().visuals.dark_mode,
+        pixels_per_point: p.ctx().pixels_per_point(),
+    };
+    let id = egui::Id::unique("static_icon_mesh_cache");
+    let cached = p.ctx().data_mut(|data| {
+        data.get_temp_mut_or_default::<IconMeshCache>(id)
+            .entries
+            .iter()
+            .find(|(previous, _)| *previous == key)
+            .map(|(_, meshes)| meshes.clone())
+    });
+    let meshes = cached.unwrap_or_else(|| {
+        // Collect vector shapes offscreen without adding them to the UI layer.
+        let scratch = egui::Context::default();
+        scratch.set_global_style(p.ctx().global_style());
+        let collector = scratch.layer_painter(egui::LayerId::background());
+        paint(&collector, Rect::from_min_size(Pos2::ZERO, key.size));
+        let mut shapes = Vec::new();
+        collector.for_each_shape(|shape| shapes.push(shape.clone()));
+        // Keep cached UVs independent of the font atlas, which can grow later.
+        let options = egui::epaint::TessellationOptions {
+            prerasterized_discs: false,
+            ..Default::default()
+        };
+        let meshes: Vec<_> =
+            egui::epaint::Tessellator::new(key.pixels_per_point, options, [1, 1], Vec::new())
+                .tessellate_shapes(shapes)
+                .into_iter()
+                .filter_map(|primitive| match primitive.primitive {
+                    egui::epaint::Primitive::Mesh(mesh) => Some(mesh),
+                    egui::epaint::Primitive::Callback(_) => None,
+                })
+                .collect();
+        p.ctx().data_mut(|data| {
+            let cache = data.get_temp_mut_or_default::<IconMeshCache>(id);
+            // Resizing and zooming must not leave an unbounded set of meshes.
+            if cache.entries.len() >= 128 {
+                cache.entries.remove(0);
+            }
+            cache.entries.push((key, meshes.clone()));
+        });
+        meshes
+    });
+    for mut mesh in meshes {
+        mesh.translate(rect.min.to_vec2());
+        p.add(egui::Shape::mesh(mesh));
+    }
 }
 
 fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, colors: ToolPalette) {
@@ -421,9 +512,25 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, colors: ToolPalette) {
     }
 }
 pub fn logo(p: &egui::Painter, rect: Rect) {
-    super::brand_mark::paint(p, rect);
+    cached_icon(p, rect, IconKind::Logo, super::brand_mark::paint);
 }
 pub fn axis_lock(
+    p: &egui::Painter,
+    c: Pos2,
+    axis: Axis,
+    locked: bool,
+    color: Color32,
+    muted: Color32,
+) {
+    cached_icon(
+        p,
+        Rect::from_center_size(c, egui::Vec2::splat(40.)),
+        IconKind::Axis(axis, locked, color, muted),
+        |p, rect| paint_axis_lock(p, rect.center(), axis, locked, color, muted),
+    );
+}
+
+fn paint_axis_lock(
     p: &egui::Painter,
     c: Pos2,
     axis: Axis,
@@ -486,6 +593,15 @@ pub fn axis_lock(
 }
 
 pub fn group_emphasis(p: &egui::Painter, c: Pos2, solid: Color32, wireframe: Color32) {
+    cached_icon(
+        p,
+        Rect::from_center_size(c, egui::Vec2::splat(32.)),
+        IconKind::Group(solid, wireframe),
+        |p, rect| paint_group_emphasis(p, rect.center(), solid, wireframe),
+    );
+}
+
+fn paint_group_emphasis(p: &egui::Painter, c: Pos2, solid: Color32, wireframe: Color32) {
     // Keep the surrounding cubes hollow; only the edited object has shaded faces.
     let cube = |center: Pos2, radius: f32, filled: bool| {
         let at = |x: f32, y: f32| center + egui::vec2(x, y) * radius;
@@ -527,6 +643,15 @@ pub fn group_emphasis(p: &egui::Painter, c: Pos2, solid: Color32, wireframe: Col
 }
 
 pub fn face_icon(p: &egui::Painter, c: Pos2, fill: Color32, outline: Color32) {
+    cached_icon(
+        p,
+        Rect::from_center_size(c, egui::Vec2::splat(32.)),
+        IconKind::Face(fill, outline),
+        |p, rect| paint_face_icon(p, rect.center(), fill, outline),
+    );
+}
+
+fn paint_face_icon(p: &egui::Painter, c: Pos2, fill: Color32, outline: Color32) {
     p.add(egui::Shape::convex_polygon(
         [(-8., 4.), (-3., -5.), (8., -5.), (3., 4.)]
             .map(|(x, y)| c + egui::vec2(x, y))
@@ -551,6 +676,20 @@ pub(super) fn section_icon(id: &str) -> &str {
 
 pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
     let kind = section_icon(kind);
+    cached_icon(
+        p,
+        Rect::from_center_size(c, egui::Vec2::splat(32.)),
+        IconKind::Line(kind.to_owned(), color),
+        |p, rect| paint_line_icon(p, rect.center(), kind, color),
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn line_icon_vectors(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
+    paint_line_icon(p, c, section_icon(kind), color);
+}
+
+fn paint_line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
     let s = Stroke::new(1.5, color);
     match kind {
         "suggest_feature" => {
@@ -608,7 +747,7 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
                 p.line_segment([at(-5., y), at(4., y)], grain);
             }
         }
-        "settings_colors" => {
+        "settings_colors" | "entity_appearance" => {
             let at = |x: f32, y: f32| c + egui::vec2(x, y);
             p.line_segment([at(-6., 6.), at(7., 6.)], s);
             p.line_segment([at(-6., 6.), at(-6., -7.)], s);
@@ -616,6 +755,19 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
             for point in [at(7., 6.), at(-6., -7.), at(4., -4.)] {
                 p.circle_filled(point, 2.2, color);
             }
+        }
+        "account" => {
+            p.circle_stroke(c + egui::vec2(0., -4.), 3.5, s);
+            p.add(egui::Shape::line(vec![c + egui::vec2(-7., 7.), c + egui::vec2(-6., 3.),
+                c + egui::vec2(-3., 1.), c + egui::vec2(3., 1.),
+                c + egui::vec2(6., 3.), c + egui::vec2(7., 7.)], s));
+        }
+        "diagnostics" => {
+            p.add(egui::Shape::line(vec![
+                c + egui::vec2(-8., 3.), c + egui::vec2(-4., 3.),
+                c + egui::vec2(-1., -6.), c + egui::vec2(2., 7.),
+                c + egui::vec2(5., -2.), c + egui::vec2(8., -2.),
+            ], s));
         }
         "settings_navigation" => {
             let at = |x: f32, y: f32| c + egui::vec2(x, y);
@@ -1132,5 +1284,122 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
             ));
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tool_mesh_tests {
+    use super::*;
+
+    #[test]
+    fn browser_cursor_export_keeps_vector_geometry_for_every_tool() {
+        let ctx = egui::Context::default();
+        let p = ctx.layer_painter(egui::LayerId::background());
+        for tool in Tool::ALL {
+            tool_vectors(
+                &p,
+                Rect::from_min_size(Pos2::ZERO, egui::Vec2::splat(28.)),
+                tool,
+            );
+        }
+        let mut count = 0;
+        p.for_each_shape(|shape| {
+            assert!(!matches!(shape.shape, egui::Shape::Mesh(_)));
+            count += 1;
+        });
+        assert!(count >= Tool::ALL.len());
+    }
+
+    #[test]
+    fn all_tools_reuse_meshes_and_keep_texture_coordinates_at_white_pixel() {
+        let ctx = egui::Context::default();
+        let p = ctx.layer_painter(egui::LayerId::background());
+        let rect = Rect::from_min_size(egui::pos2(100., 80.), egui::vec2(28., 28.));
+        for tool in Tool::ALL {
+            ui_tool(&p, rect, tool);
+            ui_tool(&p, rect.translate(egui::vec2(20., 30.)), tool);
+        }
+        ctx.data_mut(|data| {
+            let cache = data.get_temp_mut_or_default::<IconMeshCache>(egui::Id::unique(
+                "static_icon_mesh_cache",
+            ));
+            assert_eq!(cache.entries.len(), Tool::ALL.len());
+            for (_, meshes) in &cache.entries {
+                assert!(!meshes.is_empty());
+                assert!(meshes.iter().all(|mesh| !mesh.indices.is_empty()));
+                assert!(
+                    meshes
+                        .iter()
+                        .flat_map(|mesh| &mesh.vertices)
+                        .all(|v| v.uv == egui::epaint::WHITE_UV)
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn shared_icons_reuse_geometry_across_panels_and_colors_refresh() {
+        let ctx = egui::Context::default();
+        let p = ctx.layer_painter(egui::LayerId::background());
+        for center in [egui::pos2(20., 20.), egui::pos2(200., 300.)] {
+            line_icon(&p, center, "undo", Color32::WHITE);
+            logo(&p, Rect::from_center_size(center, egui::Vec2::splat(32.)));
+            group_emphasis(&p, center, Color32::RED, Color32::WHITE);
+            face_icon(&p, center, Color32::BLUE, Color32::WHITE);
+            axis_lock(&p, center, Axis::X, true, Color32::RED, Color32::GRAY);
+        }
+        line_icon(&p, egui::pos2(30., 30.), "undo", Color32::RED);
+        ctx.data_mut(|data| {
+            let cache = data.get_temp_mut_or_default::<IconMeshCache>(egui::Id::unique(
+                "static_icon_mesh_cache",
+            ));
+            assert_eq!(cache.entries.len(), 6);
+            assert!(cache.entries.iter().all(|(_, meshes)| !meshes.is_empty()));
+        });
+    }
+
+    #[test]
+    fn theme_size_and_scale_invalidate_cached_icons_and_cache_is_bounded() {
+        let ctx = egui::Context::default();
+        let p = ctx.layer_painter(egui::LayerId::background());
+        let paint = |size| {
+            ui_tool(
+                &p,
+                Rect::from_min_size(Pos2::ZERO, egui::Vec2::splat(size)),
+                Tool::Line,
+            )
+        };
+        paint(28.);
+        let mut style = (*ctx.global_style()).clone();
+        style.visuals.dark_mode = !style.visuals.dark_mode;
+        ctx.set_global_style(style);
+        paint(28.);
+        ctx.set_pixels_per_point(2.);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+        paint(28.);
+        ctx.data_mut(|data| {
+            assert_eq!(
+                data.get_temp_mut_or_default::<IconMeshCache>(egui::Id::unique(
+                    "static_icon_mesh_cache"
+                ))
+                .entries
+                .len(),
+                3
+            );
+        });
+        for size in 30..200 {
+            paint(size as f32);
+        }
+        ctx.data_mut(|data| {
+            assert_eq!(
+                data.get_temp_mut_or_default::<IconMeshCache>(egui::Id::unique(
+                    "static_icon_mesh_cache"
+                ))
+                .entries
+                .len(),
+                128
+            );
+        });
     }
 }

@@ -159,7 +159,9 @@ impl Settings {
         });
         sidebar::inspector_section(ui, "Wood", "settings/stock/wood", true, |ui| {
             if self.wood.is_empty() {
-                ui.text_weak("No wood stock yet. Add a board or sheet, then enter its size and price.");
+                ui.text_weak(
+                    "No wood stock yet. Add a board or sheet, then enter its size and price.",
+                );
             } else {
                 let key = "settings/stock/wood/table";
                 let scroll = sidebar::restored_scroll_area(
@@ -290,8 +292,75 @@ impl Stock {
     }
 }
 
+// Hovering UI controls must not rebuild catalogs or project usage records.
+// Track only assignments and catalog data; camera and geometry edits are irrelevant.
+#[derive(Clone, Default)]
+struct StockSyncCache {
+    input: Option<StockSyncInput>,
+    #[cfg(test)]
+    refreshes: usize,
+}
+
+#[derive(Clone)]
+struct StockSyncInput {
+    settings: Settings,
+    assignments: Vec<(
+        u64,
+        Option<ketchup_core::MaterialId>,
+        Option<ketchup_core::StockMaterial>,
+    )>,
+    definitions: std::collections::BTreeMap<ketchup_core::MaterialId, ketchup_core::StockMaterial>,
+    project_id: Option<ketchup_core::MaterialId>,
+    name: String,
+    path: Option<std::path::PathBuf>,
+}
+
+impl StockSyncInput {
+    fn matches(&self, app: &KetchupApp) -> bool {
+        self.settings == app.general_settings.stock
+            && self.definitions == app.doc.model.stock_materials
+            && self.project_id == app.doc.project_id
+            && self.name == app.doc.name
+            && self.path == app.project.path
+            && self.assignments.len() == app.doc.model.objects.len()
+            && self.assignments.iter().zip(&app.doc.model.objects).all(
+                |((id, material, legacy), (key, object))| {
+                    id == key
+                        && *material == object.stock_material_id
+                        && *legacy == object.stock_material
+                },
+            )
+    }
+
+    fn capture(app: &KetchupApp) -> Self {
+        Self {
+            settings: app.general_settings.stock.clone(),
+            assignments: app
+                .doc
+                .model
+                .objects
+                .iter()
+                .map(|(&id, object)| (id, object.stock_material_id, object.stock_material.clone()))
+                .collect(),
+            definitions: app.doc.model.stock_materials.clone(),
+            project_id: app.doc.project_id,
+            name: app.doc.name.clone(),
+            path: app.project.path.clone(),
+        }
+    }
+}
+
 impl KetchupApp {
     pub(super) fn sync_stock_materials(&mut self, ctx: &egui::Context) {
+        let cache_id = egui::Id::unique("stock_sync_cache");
+        if ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<StockSyncCache>(cache_id)
+                .input
+                .as_ref()
+                .is_some_and(|input| input.matches(self))
+        }) {
+            return;
+        }
         self.general_settings.stock.normalize();
         let catalog = self
             .general_settings
@@ -339,6 +408,15 @@ impl KetchupApp {
         if document_changed {
             self.changed(ctx);
         }
+        let input = StockSyncInput::capture(self);
+        ctx.data_mut(|data| {
+            let cache = data.get_temp_mut_or_default::<StockSyncCache>(cache_id);
+            cache.input = Some(input);
+            #[cfg(test)]
+            {
+                cache.refreshes += 1;
+            }
+        });
     }
 
     fn material_usage_key(&self) -> Option<String> {
@@ -550,7 +628,7 @@ mod tests {
             assert!(
                 labels
                     .iter()
-                    .any(|text| text == &format!("Prices in {currency} per container"))
+                    .any(|text| text.starts_with(&format!("Prices in {currency} per container")))
             );
             assert!(
                 labels

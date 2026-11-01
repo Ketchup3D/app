@@ -215,11 +215,10 @@ fn clear_keeps_picker_open_and_unassigned_remains_available_with_no_matches() {
             assert!(!assigned);
             assert_eq!(selected, Some(wood[0].id));
             assert!(filter.is_empty());
+            frame(&ctx, &wood, &mut selected, &mut filter, vec![]);
             let (_, _, labels) = frame(&ctx, &wood, &mut selected, &mut filter, vec![]);
             assert!(
-                labels
-                    .iter()
-                    .any(|(text, _)| text.starts_with("Pine sheet"))
+                labels.iter().any(|(text, _)| text.starts_with("Pine sheet")), "{labels:?}"
             );
             assert!(ctx.memory(|memory| memory.focused()).is_some());
         } else {
@@ -228,4 +227,62 @@ fn clear_keeps_picker_open_and_unassigned_remains_available_with_no_matches() {
             assert_eq!(filter, "unmatched query");
         }
     }
+}
+
+#[test]
+fn stock_sync_reuses_static_catalogs_and_refreshes_assignments_and_project_identity() {
+    let ctx = egui::Context::default();
+    let mut app = KetchupApp::with_document(Document::default(), None, true);
+    let stock = Stock::default();
+    let id = stock.id;
+    app.general_settings.stock.wood.push(stock);
+    let edge = app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    let object = app
+        .doc
+        .model
+        .make_object(&BTreeSet::from([edge]), false, "Board")
+        .unwrap();
+    app.doc
+        .model
+        .objects
+        .get_mut(&object)
+        .unwrap()
+        .stock_material_id = Some(id);
+    let refreshes = || {
+        ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<StockSyncCache>(egui::Id::unique("stock_sync_cache"))
+                .refreshes
+        })
+    };
+    app.sync_stock_materials(&ctx);
+    assert_eq!(refreshes(), 1);
+    for _ in 0..10 {
+        app.sync_stock_materials(&ctx);
+    }
+    assert_eq!(refreshes(), 1);
+    app.general_settings.stock.wood[0].name = "Updated board".into();
+    app.sync_stock_materials(&ctx);
+    assert_eq!(refreshes(), 2);
+    assert_eq!(app.doc.model.stock_materials[&id].name, "Updated board");
+    app.doc.name = "Renamed project".into();
+    app.project.path = Some("renamed.ketchup".into());
+    app.sync_stock_materials(&ctx);
+    assert_eq!(refreshes(), 3);
+    app.doc
+        .model
+        .objects
+        .get_mut(&object)
+        .unwrap()
+        .stock_material_id = None;
+    app.sync_stock_materials(&ctx);
+    assert_eq!(refreshes(), 4);
+    assert!(
+        app.general_settings.stock.projects[&app.material_usage_key().unwrap()]
+            .materials
+            .is_empty()
+    );
+    // Direct document replacement and legacy material migration must invalidate.
+    app.doc = Document::default();
+    app.sync_stock_materials(&ctx);
+    assert_eq!(refreshes(), 5);
 }

@@ -854,7 +854,7 @@ mod tests {
                     assert_ne!(colors[0], colors[1]);
                     assert_ne!(colors[1], colors[2]);
                     assert_ne!(colors[0], colors[2]);
-                    icons::line_icon(ui.painter(), Pos2::new(30., 30.), status.icon(), color);
+                    icons::line_icon_vectors(ui.painter(), Pos2::new(30., 30.), status.icon(), color);
                 });
                 assert_eq!(output.shapes.iter().filter(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == color)).count(), filled_boards);
             }
@@ -902,6 +902,7 @@ mod tests {
         fn has_icon_color(shape: &egui::Shape, color: Color32, filled: bool) -> bool {
             match shape {
                 egui::Shape::Rect(rect) => filled && rect.fill == color,
+                egui::Shape::Mesh(mesh) => mesh.vertices.iter().any(|vertex| vertex.color == color),
                 egui::Shape::Path(path) => {
                     !filled && path.stroke.color == egui::epaint::ColorMode::Solid(color)
                 }
@@ -1261,7 +1262,16 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| app.outliner_contents(ui),
-            )
+            );
+            // AccessKit sends node deltas; retain a tree for bounds queries.
+            if let Some(update) = output.platform_output.accesskit_update.as_mut() {
+                ctx.data_mut(|data| {
+                    let nodes = data.get_temp_mut_or_default::<std::collections::BTreeMap<egui::accesskit::NodeId, egui::accesskit::Node>>(egui::Id::unique("outliner_test_accesskit_tree"));
+                    for (id, node) in &update.nodes { nodes.insert(*id, node.clone()); }
+                    update.nodes = nodes.iter().map(|(id, node)| (*id, node.clone())).collect();
+                });
+            }
+            output
         }
         fn bounds(output: &egui::FullOutput, name: &str) -> Rect {
             let node = output

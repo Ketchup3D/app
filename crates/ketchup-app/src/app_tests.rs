@@ -5373,6 +5373,7 @@ fn materials_revert_button_clears_only_selected_treatment_overrides_and_is_undoa
     board.surface_treatment_customized = true;
     board.surface_treatment.stain.enabled = true;
     h.app.selected = BTreeSet::from([object]);
+    h.frame(vec![], egui::Modifiers::NONE); // Register the project's material usage first.
     let defaults = h.app.time_estimates.clone();
     let catalog = h.app.general_settings.stock.clone();
     let customized = h.app.doc.model.clone();

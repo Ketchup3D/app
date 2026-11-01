@@ -113,9 +113,14 @@ fn edge_hover_cache_tracks_camera_resize_and_direct_edits_to_free_edges() {
     assert_eq!(edges.projection_builds, 2);
     edges.update(&model, &camera, size * 0.75);
     assert_eq!(edges.projection_builds, 3);
+    assert_eq!(
+        edges.geometry_builds, 1,
+        "camera changes reuse world endpoints"
+    );
     model.vertices.values_mut().next().unwrap().position.x -= 0.2;
     edges.update(&model, &camera, size * 0.75);
     assert_eq!(edges.projection_builds, 4);
+    assert_eq!(edges.geometry_builds, 2);
     model.add_edge(DVec3::Y, DVec3::Y + DVec3::X).unwrap();
     edges.update(&model, &camera, size * 0.75);
     assert_eq!(edges.projection_builds, 5);
@@ -343,4 +348,50 @@ fn cached_snapping_matches_geometry_locks_visibility_and_editing_contexts() {
             }
         }
     }
+}
+
+#[test]
+fn edge_world_endpoints_follow_same_size_topology_edits_and_document_replacement() {
+    let mut model = triangle_grid(2);
+    let camera = Camera::default();
+    let size = DVec2::new(900., 700.);
+    let mut cache = EdgePickingCache::default();
+    cache.update(&model, &camera, size);
+    let edge_id = *model.edges.keys().next().unwrap();
+    let other_vertex = *model.vertices.keys().next_back().unwrap();
+    model.edges.get_mut(&edge_id).unwrap().b = other_vertex;
+    cache.update(&model, &camera, size);
+    assert_eq!(cache.geometry_builds, 2);
+    assert_eq!(
+        cache
+            .world_edges
+            .iter()
+            .find(|&&(id, _, _)| id == edge_id)
+            .map(|&(_, a, b)| (a, b)),
+        Some(model.points(&model.edges[&edge_id]))
+    );
+    // Another document can reuse all IDs and collection lengths.
+    let mut replacement = triangle_grid(2);
+    for vertex in replacement.vertices.values_mut() {
+        vertex.position += DVec3::new(10., 20., 30.);
+    }
+    cache.update(&replacement, &camera, size);
+    assert_eq!(cache.geometry_builds, 3);
+    let view = camera.view(size);
+    let expected: Vec<_> = replacement
+        .edges
+        .values()
+        .filter_map(|edge| {
+            let (a, b) = replacement.points(edge);
+            let (a, b) = view.segment(a, b)?;
+            Some((edge.id, a, b))
+        })
+        .collect();
+    let mut actual: Vec<_> = cache
+        .items
+        .iter()
+        .map(|edge| (edge.id, edge.a, edge.b))
+        .collect();
+    actual.sort_unstable_by_key(|edge| edge.0);
+    assert_eq!(actual, expected);
 }

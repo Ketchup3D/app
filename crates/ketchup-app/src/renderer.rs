@@ -766,7 +766,32 @@ impl Mesh {
         }
     }
 
-    fn into_callback(self) -> SceneCallback {
+    fn into_callback(mut self) -> SceneCallback {
+        // Rendering already draws all faces before all strokes. Pack the index
+        // buffer in that same stable order once, rather than issuing one draw
+        // per interleaved fragment on every retained frame (and twice for edges).
+        // Vertex data, blending order within each pass, and depth stay unchanged.
+        if self.triangle_ranges.len() > 1
+            || self
+                .triangle_ranges
+                .first()
+                .is_some_and(|range| range.start != 0)
+        {
+            let mut packed = Vec::with_capacity(self.indices.len());
+            for range in &self.triangle_ranges {
+                packed.extend_from_slice(&self.indices[range.start as usize..range.end as usize]);
+            }
+            let face_end = packed.len() as u32;
+            let mut start = 0;
+            for range in &self.triangle_ranges {
+                packed.extend_from_slice(&self.indices[start..range.start as usize]);
+                start = range.end as usize;
+            }
+            packed.extend_from_slice(&self.indices[start..]);
+            self.indices = packed;
+            self.triangle_ranges.clear();
+            self.triangle_ranges.push(0..face_end);
+        }
         SceneCallback {
             vertices: self.vertices,
             indices: self.indices,
@@ -1968,6 +1993,40 @@ mod tests {
         mesh.triangle_ranges.clear();
         let strokes = mesh.retain(&mut cache);
         assert!(!Arc::ptr_eq(&first, &strokes));
+    }
+
+    #[test]
+    fn callback_batches_interleaved_faces_and_strokes_in_stable_pass_order() {
+        let camera = Camera::default();
+        let mut mesh = Mesh::new(&camera, DVec2::new(1000., 800.));
+        // Use distinct indices to prove both pass ordering and completeness.
+        mesh.indices = (0..27).collect();
+        mesh.triangle_ranges = vec![6..12, 18..21, 24..27];
+        let callback = mesh.into_callback();
+        assert_eq!(callback.triangle_ranges, vec![0..12]);
+        assert_eq!(
+            callback.indices,
+            [
+                6, 7, 8, 9, 10, 11, 18, 19, 20, 24, 25, 26, 0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16,
+                17, 21, 22, 23,
+            ]
+        );
+        for ranges in [vec![], vec![0..27], vec![6..12]] {
+            let mut mesh = Mesh::new(&camera, DVec2::new(1000., 800.));
+            mesh.indices = (0..27).collect();
+            mesh.triangle_ranges = ranges.clone();
+            let expected_faces: Vec<_> = ranges.iter().flat_map(|range| range.clone()).collect();
+            let expected_edges: Vec<_> = (0..27)
+                .filter(|i| !ranges.iter().any(|r| r.contains(i)))
+                .collect();
+            let callback = mesh.into_callback();
+            let face_end = callback
+                .triangle_ranges
+                .first()
+                .map_or(0, |range| range.end as usize);
+            assert_eq!(&callback.indices[..face_end], expected_faces);
+            assert_eq!(&callback.indices[face_end..], expected_edges);
+        }
     }
 
     #[test]
