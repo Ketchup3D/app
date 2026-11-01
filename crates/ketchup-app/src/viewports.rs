@@ -610,6 +610,7 @@ impl KetchupApp {
             // Activate on press so the first click/drag uses this camera.
             // Hover and wheel input leave the active camera unchanged.
             if self.gesture.is_none()
+                && self.section_drag.is_none()
                 && self.viewports.dragging.is_none()
                 && response.enabled()
                 && response.contains_pointer()
@@ -622,7 +623,7 @@ impl KetchupApp {
             }
             views.push((pane.selected, rect, response));
         }
-        if self.gesture.is_none() {
+        if self.gesture.is_none() && self.section_drag.is_none() {
             if let Some(id) = activate {
                 if self.viewports.active != id {
                     ctx.request_repaint();
@@ -690,6 +691,7 @@ impl KetchupApp {
                 );
             }
             self.paint_compass(ui, response);
+            self.paint_section_handles(ui, response, *id == self.viewports.active);
             crate::environment::paint_sun_hint(ui.painter(), *rect, &self.doc.camera, &self.doc.display);
             if self.general_settings.show_fps {
                 crate::frame_rate::paint(ui, *rect);

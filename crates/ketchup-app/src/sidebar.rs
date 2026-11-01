@@ -806,6 +806,26 @@ mod preference_tests {
     }
 
     #[test]
+    fn section_axes_survive_immediate_reload_without_model_edit() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        app.doc.display.section_axes = [true, true, false];
+        app.doc.display.section_offsets = [-3.5, 8.25];
+        app.doc.display.section_height = 9.;
+        app.doc.display.section_cuts = true;
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(!app.project.modified);
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!(restored.doc.display.section_axes, [true, true, false]);
+        assert_eq!(restored.doc.display.section_offsets, [-3.5, 8.25]);
+        assert_eq!(restored.doc.display.section_height, 9.);
+        assert!(restored.doc.display.section_cuts);
+    }
+
+    #[test]
     fn modal_sizes_survive_reload_without_a_model_edit() {
         let ctx = egui::Context::default();
         let mut storage = SavedPreferences::default();
@@ -2628,7 +2648,7 @@ mod preference_tests {
                     .iter()
                     .filter(|text| text.as_str() == "Minutes / m²")
                     .count(),
-                3
+                app.time_estimates.sanding_grits.len() + 3
             );
             assert!(
                 !labels.iter().any(|text| text.contains("Grid ID")),
@@ -3088,7 +3108,7 @@ impl InspectorSection {
     fn title(self) -> &'static str {
         match self {
             Self::Outliner => "Outliner",
-            Self::EntityInfo => "Entity Info",
+            Self::EntityInfo => "Propriétés",
             Self::Components => "Components",
             Self::Tags => "Tags",
             Self::Display => "Display",
@@ -3726,6 +3746,22 @@ impl KetchupApp {
         }
     }
 
+    pub(in crate::app) fn tags_menu(&mut self, ui: &mut egui::Ui) {
+        let colors = Palette::for_ui(ui);
+        let icon = egui::Atom::paint(egui::vec2(18., 18.), |ui, args| {
+            icons::line_icon(ui.painter(), args.rect.center(), "tags", Color32::from_rgb(67, 125, 208));
+        });
+        let response = ui.add(egui::Button::new((icon, "Tags", RichText::new("▾").small().color(colors.muted)))
+            .min_size(egui::vec2(0., 32.))).on_hover_text("Manage tags, visibility, colors, and assignments");
+        egui::Popup::menu(&response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                Self::menu_style(ui.style_mut());
+                ui.set_width(340.);
+                self.toolbar_tags_contents(ui);
+            });
+    }
+
     fn tags_contents(&mut self, ui: &mut egui::Ui) {
         let mut before = None;
         let mut label = "Edit tags";
@@ -4080,24 +4116,6 @@ impl KetchupApp {
                 ui.add(egui::Slider::new(&mut d.profile_width, 1. ..=8.))
                     .labelled_by(label.id);
             });
-        });
-        inspector_section(ui, "Sections", "sections", false, |ui| {
-            ui.checkbox(&mut d.section_planes, "Section planes");
-            ui.checkbox(&mut d.section_cuts, "Section cuts");
-            ui.checkbox(&mut d.section_fill, "Section fill");
-            crate::inspector_table::inspector_field(ui, "section_height", "Height", |ui| {
-                ui.add(
-                    egui::DragValue::new(&mut d.section_height)
-                        .speed(0.05)
-                        .range(-1e8..=1e8)
-                        .suffix(" m"),
-                )
-            });
-            ui.text_label(
-                RichText::new("Horizontal section: keeps geometry below the plane.")
-                    .small()
-                    .color(Palette::for_ui(ui).muted),
-            );
         });
         inspector_section(ui, "Shadows", "shadows", false, |ui| {
             ui.checkbox(&mut d.shadows, "Display shadows");

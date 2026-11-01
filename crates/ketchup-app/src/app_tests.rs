@@ -4509,7 +4509,7 @@ fn units_section_controls_change_measurements_without_editing_geometry() {
     h.ctx.style_mut_of(h.ctx.theme(), |s| s.animation_time = 0.);
     h.size.y = 2000.;
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    assert!(text_position(&output, "Entity Info").y < text_position(&output, "Units").y);
+    assert!(text_position(&output, "Propriétés").y < text_position(&output, "Units").y);
     assert!(text_position(&output, "Units").y < text_position(&output, "Components").y);
     let model = h.app.doc.model.clone();
     for (current, choice) in [
@@ -4638,7 +4638,7 @@ fn sidebar_sections_collapse_and_display_controls_change_saved_settings() {
     for title in ["Components", "Tags", "Display"] {
         text_position(&output, title);
     }
-    h.click(text_position(&output, "Entity Info"));
+    h.click(text_position(&output, "Propriétés"));
     for _ in 0..30 {
         h.frame(vec![], egui::Modifiers::NONE);
     }
@@ -4968,7 +4968,7 @@ fn materials_section_assigns_catalog_material_as_an_undoable_document_edit() {
             wood_type: Default::default(),
         });
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(text_position(&output, "Entity Info"));
+    h.click(text_position(&output, "Propriétés"));
     let output = h.frame(vec![], egui::Modifiers::NONE);
     assert!(text_position(&output, "Materials").y < text_position(&output, "Stock material").y);
     for label in ["Sanding", "Finishing", "Revert to defaults"] {
@@ -5094,7 +5094,7 @@ fn shared_finishing_editor_selects_products_for_defaults_and_objects() {
             h.app.general_settings.stock.wood.push(stock);
             h.app.selected = BTreeSet::from([id]);
             let output = h.frame(vec![], egui::Modifiers::NONE);
-            h.click(text_position(&output, "Entity Info"));
+            h.click(text_position(&output, "Propriétés"));
             Some(id)
         };
         let before = h.app.doc.model.clone();
@@ -5378,7 +5378,7 @@ fn materials_revert_button_clears_only_selected_treatment_overrides_and_is_undoa
     let catalog = h.app.general_settings.stock.clone();
     let customized = h.app.doc.model.clone();
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(text_position(&output, "Entity Info"));
+    h.click(text_position(&output, "Propriétés"));
     let output = h.frame(vec![], egui::Modifiers::NONE);
     assert!(text_position(&output, "Revert to defaults").y > text_position(&output, "Finishing").y);
     assert!(

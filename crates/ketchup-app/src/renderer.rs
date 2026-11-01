@@ -178,23 +178,10 @@ impl Mesh {
             alpha,
         )
     }
-    fn section_line(&self, mut a: DVec3, mut b: DVec3) -> Option<(DVec3, DVec3)> {
-        if self.display.section_cuts {
-            let z = self.display.section_height;
-            if a.z > z && b.z > z {
-                return None;
-            }
-            if (a.z > z) != (b.z > z) {
-                let cut = a.lerp(b, (z - a.z) / (b.z - a.z));
-                if a.z > z {
-                    a = cut;
-                } else {
-                    b = cut;
-                }
-            }
-        }
-        Some((a, b))
+    fn section_line(&self, a: DVec3, b: DVec3) -> Option<(DVec3, DVec3)> {
+        self.display.section_segment(a, b)
     }
+
     pub fn overlay_line(&mut self, a: DVec3, b: DVec3, width: f64, color: Color32, dashed: bool) {
         let Some((a, b)) = self.section_line(a, b) else {
             return;
@@ -657,26 +644,7 @@ impl Mesh {
     }
     fn face_triangle(&mut self, triangle: [DVec3; 3], color: Color32, draw: bool, occlude: bool) {
         let start = self.indices.len() as u32;
-        // A triangle clipped against the section plane has at most four points.
-        let mut polygon = [DVec3::ZERO; 4];
-        polygon[..3].copy_from_slice(&triangle);
-        let mut len: usize = 3;
-        if self.display.section_cuts {
-            let z = self.display.section_height;
-            len = 0;
-            for i in 0..3 {
-                let a = triangle[i];
-                let b = triangle[(i + 1) % 3];
-                if a.z <= z {
-                    polygon[len] = a;
-                    len += 1;
-                }
-                if (a.z <= z) != (b.z <= z) {
-                    polygon[len] = a.lerp(b, (z - a.z) / (b.z - a.z));
-                    len += 1;
-                }
-            }
-        }
+        let (polygon, len) = self.display.section_triangle(triangle);
         for i in 1..len.saturating_sub(1) {
             let triangle = [polygon[0], polygon[i], polygon[i + 1]];
             let color = self

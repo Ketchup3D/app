@@ -237,6 +237,27 @@ impl DockLayout {
         }
     }
 
+    // Filtering out Tags can collapse branches, but surviving split IDs stay stable.
+    // Copy only their ratios so legacy sections and hidden splits remain intact.
+    fn remember_visible_ratios(&mut self, visible: &Self) {
+        fn find_ratio(layout: &DockLayout, split_id: u64) -> Option<f32> {
+            match layout {
+                DockLayout::Split { id, ratio, .. } if *id == split_id => Some(*ratio),
+                DockLayout::Split { first, second, .. } => {
+                    find_ratio(first, split_id).or_else(|| find_ratio(second, split_id))
+                }
+                DockLayout::Stack { .. } => None,
+            }
+        }
+        if let Self::Split { id, ratio, first, second, .. } = self {
+            if let Some(visible_ratio) = find_ratio(visible, *id) {
+                *ratio = visible_ratio;
+            }
+            first.remember_visible_ratios(visible);
+            second.remember_visible_ratios(visible);
+        }
+    }
+
     fn panes(&mut self, ui: &mut egui::Ui, rect: Rect, panes: &mut Vec<Pane>, dragging: bool) {
         match self {
             Self::Stack { id, sections } => panes.push(Pane {
@@ -402,10 +423,11 @@ impl KetchupApp {
         }
         let rect = ui.available_rect_before_wrap();
         let mut panes = Vec::new();
-        layout
-            .dock
-            .get_or_insert_with(|| DockLayout::stack(&self.inspector_order))
-            .panes(ui, rect, &mut panes, layout.drag.is_some());
+        // Retain legacy docking preferences, but display Tags only in its toolbar menu.
+        let mut visible_dock = layout.dock.get_or_insert_with(|| DockLayout::stack(&self.inspector_order)).clone();
+        visible_dock.remove(InspectorSection::Tags);
+        visible_dock.panes(ui, rect, &mut panes, layout.drag.is_some());
+        layout.dock.as_mut().unwrap().remember_visible_ratios(&visible_dock);
         let pointer = ctx.pointer_interact_pos();
         let mut target = pointer.and_then(|p| find_drop_target(&panes, p));
         let show_insertion_slot = !target.is_some_and(|target| target.side != Side::Center);
@@ -1160,35 +1182,60 @@ mod tests {
     }
 
     #[test]
+    fn visible_ratios_preserve_legacy_tags_branches_and_section_order() {
+        let mut dock = DockLayout::stack(&InspectorSection::ALL);
+        dock.dock(InspectorSection::Tags, 0, Side::Top, 0);
+        dock.dock(InspectorSection::Components, 0, Side::Right, 0);
+        let mut visible = dock.clone();
+        visible.remove(InspectorSection::Tags);
+        let DockLayout::Split { ratio, .. } = &mut visible else { panic!() };
+        *ratio = 0.7;
+        let mut expected = dock.clone();
+        let DockLayout::Split { second, .. } = &mut expected else { panic!() };
+        let DockLayout::Split { ratio, .. } = second.as_mut() else { panic!() };
+        *ratio = 0.7;
+        dock.remember_visible_ratios(&visible);
+        assert_eq!(dock, expected);
+        assert!(visible.pane_for(InspectorSection::Tags).is_none());
+    }
+
+    #[test]
     fn mouse_dragging_a_divider_resizes_the_areas_without_changing_their_sections() {
-        let ctx = egui::Context::default();
-        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.);
-        let mut app = KetchupApp::with_document(Document::default(), None, true);
-        for section in InspectorSection::ALL {
-            set_section_open(&ctx, section.id(), false);
+        for side in [Side::Right, Side::Bottom] {
+            let ctx = egui::Context::default();
+            ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.);
+            let mut app = KetchupApp::with_document(Document::default(), None, true);
+            for section in InspectorSection::ALL {
+                set_section_open(&ctx, section.id(), false);
+            }
+            app.inspector_layout = InspectorLayout::restore(None, &app.inspector_order);
+            app.inspector_layout.dock.as_mut().unwrap().dock(
+                InspectorSection::Components,
+                0,
+                side,
+                0,
+            );
+            let order = app.inspector_layout.order();
+            ui_frame(&ctx, &mut app, vec![]);
+            let (_, rect) = ui_frame(&ctx, &mut app, vec![]);
+            drag(
+                &ctx,
+                &mut app,
+                rect.center(),
+                rect.center() + if side == Side::Right { egui::vec2(50., 0.) } else { egui::vec2(0., 50.) },
+            );
+            let Some(DockLayout::Split { ratio, .. }) = &app.inspector_layout.dock else {
+                panic!()
+            };
+            assert!(*ratio > 0.5 && *ratio < 0.7, "{side:?}: {ratio}");
+            assert_eq!(app.inspector_layout.order(), order);
+            assert!(!app.project.modified);
+            let mut storage = Storage::default();
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.inspector_layout.dock, app.inspector_layout.dock);
         }
-        app.inspector_layout = InspectorLayout::restore(None, &app.inspector_order);
-        app.inspector_layout.dock.as_mut().unwrap().dock(
-            InspectorSection::Components,
-            0,
-            Side::Right,
-            0,
-        );
-        let order = app.inspector_layout.order();
-        ui_frame(&ctx, &mut app, vec![]);
-        let (_, rect) = ui_frame(&ctx, &mut app, vec![]);
-        drag(
-            &ctx,
-            &mut app,
-            rect.center(),
-            rect.center() + egui::vec2(50., 0.),
-        );
-        let Some(DockLayout::Split { ratio, .. }) = &app.inspector_layout.dock else {
-            panic!()
-        };
-        assert!(*ratio > 0.55 && *ratio < 0.65, "{ratio}");
-        assert_eq!(app.inspector_layout.order(), order);
-        assert!(!app.project.modified);
     }
 
     #[derive(Default)]

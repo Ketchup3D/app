@@ -45,6 +45,7 @@ struct Node {
 #[derive(Default)]
 pub struct PickingCache {
     revision: Option<u64>,
+    display: ketchup_core::DisplaySettings,
     items: Vec<Item>,
     nodes: Vec<Node>,
     edges: EdgePickingCache,
@@ -65,6 +66,9 @@ impl ketchup_core::inference::FaceQuery for SnapQuery<'_> {
     }
 }
 impl PickingCache {
+    pub fn set_display(&mut self, display: &ketchup_core::DisplaySettings) {
+        self.display = display.clone();
+    }
     pub fn snap_query<'a>(
         &'a self,
         faces: &'a FaceCache,
@@ -234,7 +238,9 @@ impl PickingCache {
                     continue;
                 }
                 *visited += 1;
-                if let Some((t, p)) = faces.get(item.id).hit(ray) {
+                if let Some((t, p)) = faces.get(item.id).hit(ray)
+                    && self.display.section_contains(p)
+                {
                     if best.is_none_or(|(id, best, _)| t < best || t == best && item.id > id) {
                         best = Some((item.id, t, p));
                     }
@@ -269,11 +275,17 @@ impl PickingCache {
         for (id, _) in candidates {
             let edge = &model.edges[&id];
             let (a, b) = model.points(edge);
-            let point = ray.segment_point(a, b);
-            let Some(pixel) = view.project(point) else {
+            let Some((a, b)) = self.display.section_segment(a, b) else {
                 continue;
             };
-            let point_ray = view.ray(pixel);
+            let point = ray.segment_point(a, b);
+            let Some(projected) = view.project(point) else {
+                continue;
+            };
+            if self.display.section_cuts && projected.distance(pixel) > radius {
+                continue;
+            }
+            let point_ray = view.ray(projected);
             let obstruction = self.nearest(faces, entities, point_ray, false);
             if obstruction.is_none_or(|(_, t, _)| t + 1e-5 >= point.distance(point_ray.origin)) {
                 return entities.get(edge.id).context;
@@ -448,3 +460,55 @@ impl EdgePickingCache {
 #[cfg(test)]
 #[path = "picking_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod section_picking_tests {
+    use super::*;
+
+    #[test]
+    fn cut_faces_are_skipped_on_each_axis() {
+        for axis in 0..3 {
+            let u = (axis + 1) % 3;
+            let v = (axis + 2) % 3;
+            let mut model = Model::default();
+            for offset in [0., 2.] {
+                let points: [DVec3; 4] = std::array::from_fn(|i| {
+                    let mut point = DVec3::ZERO;
+                    point[axis] = offset;
+                    point[u] = if i == 1 || i == 2 { 2. } else { 0. };
+                    point[v] = if i >= 2 { 2. } else { 0. };
+                    point
+                });
+                for i in 0..4 {
+                    model.add_edge(points[i], points[(i + 1) % 4]).unwrap();
+                }
+            }
+            let mut faces = FaceCache::default();
+            let mut entities = EntityCache::default();
+            faces.update(&model);
+            entities.update(&model);
+            let mut picking = PickingCache::default();
+            picking.update(&faces);
+            let mut origin = DVec3::ONE;
+            origin[axis] = 3.;
+            let mut direction = DVec3::ZERO;
+            direction[axis] = -1.;
+            let ray = Ray { origin, direction };
+            assert_eq!(
+                picking.nearest(&faces, &entities, ray, false).unwrap().2[axis],
+                2.
+            );
+            let mut display = ketchup_core::DisplaySettings {
+                section_cuts: true,
+                section_axes: [false; 3],
+                ..Default::default()
+            };
+            display.section_axes[axis] = true;
+            picking.set_display(&display);
+            assert_eq!(
+                picking.nearest(&faces, &entities, ray, false).unwrap().2[axis],
+                0.
+            );
+        }
+    }
+}

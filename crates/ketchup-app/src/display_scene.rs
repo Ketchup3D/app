@@ -88,7 +88,7 @@ pub(super) fn profile_edges(
 struct SectionKey {
     geometry: u64,
     entities: u64,
-    height: f64,
+    limits: [Option<f64>; 3],
     fill: bool,
     hidden_objects: bool,
     hidden_geometry: bool,
@@ -113,7 +113,7 @@ impl SectionCache {
         let key = SectionKey {
             geometry: cache.revision(),
             entities: entities.revision(),
-            height: d.section_height,
+            limits: d.section_limits(),
             fill: d.section_fill && d.face_style != ketchup_core::FaceStyle::Wireframe,
             hidden_objects: d.hidden_objects,
             hidden_geometry: d.hidden_geometry,
@@ -123,33 +123,45 @@ impl SectionCache {
         }
         self.segments.clear();
         self.triangles.clear();
-        let mut section = Model::default();
-        for (_, face) in cache
-            .iter()
-            .filter(|(id, _)| entities.get(*id).displayed(d))
-        {
-            for triangle in &face.triangles {
-                let mut hits = [DVec3::ZERO; 2];
-                let mut count = 0;
-                for i in 0..3 {
-                    let a = triangle[i];
-                    let b = triangle[(i + 1) % 3];
-                    if (a.z <= key.height) != (b.z <= key.height) {
-                        hits[count] = a.lerp(b, (key.height - a.z) / (b.z - a.z));
-                        count += 1;
+        for (axis, height) in key.limits.into_iter().enumerate() {
+            let Some(height) = height else { continue };
+            let mut section = Model::default();
+            for (_, face) in cache
+                .iter()
+                .filter(|(id, _)| entities.get(*id).displayed(d))
+            {
+                for triangle in &face.triangles {
+                    let mut hits = [DVec3::ZERO; 2];
+                    let mut count = 0;
+                    for i in 0..3 {
+                        let a = triangle[i];
+                        let b = triangle[(i + 1) % 3];
+                        if (a[axis] <= height) != (b[axis] <= height) {
+                            hits[count] = a.lerp(b, (height - a[axis]) / (b[axis] - a[axis]));
+                            hits[count][axis] = height;
+                            count += 1;
+                        }
                     }
-                }
-                if count == 2 && hits[0].distance_squared(hits[1]) > 1e-12 {
-                    self.segments.push((hits[0], hits[1]));
-                    if key.fill {
-                        let _ = section.add_edge(hits[0], hits[1]);
+                    if count == 2 && hits[0].distance_squared(hits[1]) > 1e-12 {
+                        if let Some(segment) = d.section_segment(hits[0], hits[1]) {
+                            self.segments.push(segment);
+                        }
+                        if key.fill {
+                            let _ = section.add_edge(hits[0], hits[1]);
+                        }
                     }
                 }
             }
-        }
-        if key.fill {
-            for face in section.faces.values() {
-                self.triangles.extend(section.face_triangles(face));
+            if key.fill {
+                for face in section.faces.values() {
+                    for triangle in section.face_triangles(face) {
+                        let (polygon, len) = d.section_triangle(triangle);
+                        for i in 1..len.saturating_sub(1) {
+                            self.triangles
+                                .push([polygon[0], polygon[i], polygon[i + 1]]);
+                        }
+                    }
+                }
             }
         }
         self.key = Some(key);
@@ -173,7 +185,6 @@ pub(super) fn paint_sections(
     if !d.section_cuts && !d.section_planes {
         return;
     }
-    let z = d.section_height;
     if d.section_cuts {
         section.update(cache, entities, d);
         for &(a, b) in &section.segments {
@@ -188,14 +199,31 @@ pub(super) fn paint_sections(
             .bounds()
             .unwrap_or((DVec3::splat(-2.), DVec3::splat(2.)));
         let pad = (hi - lo).max_element().max(1.) * 0.1;
-        let corners = [
-            DVec3::new(lo.x - pad, lo.y - pad, z),
-            DVec3::new(hi.x + pad, lo.y - pad, z),
-            DVec3::new(hi.x + pad, hi.y + pad, z),
-            DVec3::new(lo.x - pad, hi.y + pad, z),
-        ];
-        for i in 0..4 {
-            mesh.overlay_line(corners[i], corners[(i + 1) % 4], 1.5, ACCENT, true);
+        for axis in 0..3 {
+            if !d.section_axes[axis] {
+                continue;
+            }
+            let offset = if axis == 2 {
+                d.section_height
+            } else {
+                d.section_offsets[axis]
+            };
+            let u = (axis + 1) % 3;
+            let v = (axis + 2) % 3;
+            let corners = std::array::from_fn::<_, 4, _>(|i| {
+                let mut point = DVec3::ZERO;
+                point[axis] = offset;
+                point[u] = if i == 1 || i == 2 {
+                    hi[u] + pad
+                } else {
+                    lo[u] - pad
+                };
+                point[v] = if i >= 2 { hi[v] + pad } else { lo[v] - pad };
+                point
+            });
+            for i in 0..4 {
+                mesh.overlay_line(corners[i], corners[(i + 1) % 4], 1.5, ACCENT, true);
+            }
         }
     }
 }
@@ -218,6 +246,49 @@ mod tests {
         let face = *model.faces.keys().next().unwrap();
         model.push_pull(face, 2.).unwrap();
         model
+    }
+
+    #[test]
+    fn sections_fill_each_axis_and_clip_combined_caps() {
+        let model = box_model();
+        let mut faces = renderer::FaceCache::default();
+        let mut entities = renderer::EntityCache::default();
+        faces.update(&model);
+        entities.update(&model);
+        let mut section = SectionCache::default();
+        for axes in [
+            [true, false, false],
+            [false, true, false],
+            [false, false, true],
+            [true; 3],
+        ] {
+            let display = DisplaySettings {
+                section_cuts: true,
+                section_axes: axes,
+                ..Default::default()
+            };
+            section.update(&faces, &entities, &display);
+            let area: f64 = section
+                .triangles
+                .iter()
+                .map(|[a, b, c]| (*b - *a).cross(*c - *a).length() * 0.5)
+                .sum();
+            let expected = if axes == [true; 3] { 3. } else { 4. };
+            assert!((area - expected).abs() < 1e-6, "axes {axes:?}: {area}");
+            assert!(
+                section
+                    .triangles
+                    .iter()
+                    .flatten()
+                    .all(|&p| display.section_contains(p))
+            );
+            assert!(
+                section
+                    .segments
+                    .iter()
+                    .all(|&(a, b)| display.section_contains(a) && display.section_contains(b))
+            );
+        }
     }
 
     #[test]

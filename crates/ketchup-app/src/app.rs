@@ -48,6 +48,8 @@ mod display_scene;
 mod drawing_inference;
 #[path = "entity_gizmo.rs"]
 mod entity_gizmo;
+#[path = "section_gizmo.rs"]
+mod section_gizmo;
 #[path = "finish_settings.rs"]
 mod finish_settings;
 #[path = "grid.rs"]
@@ -81,6 +83,8 @@ mod solid_tools;
 mod stock_settings;
 #[path = "text_tools.rs"]
 mod text_tools;
+#[path = "tag_menu.rs"]
+mod tag_menu;
 #[path = "time_estimates.rs"]
 mod time_estimates;
 #[path = "viewports.rs"]
@@ -315,6 +319,7 @@ pub struct KetchupApp {
     paint_color: [u8; 3],
     paint_target: PaintTarget,
     gesture: Option<Gesture>,
+    section_drag: Option<section_gizmo::SectionDrag>,
     drawing_orbit_down: bool,
     drawing_orbit_pivot: Option<DVec3>,
     viewport_pointer: Option<Pos2>,
@@ -452,6 +457,7 @@ impl KetchupApp {
             paint_color: [195, 96, 67],
             paint_target: PaintTarget::default(),
             gesture: None,
+            section_drag: None,
             drawing_orbit_down: false,
             drawing_orbit_pivot: None,
             viewport_pointer: None,
@@ -1446,6 +1452,12 @@ impl KetchupApp {
         }
 
         if self.project.blocked() || self.screenshot.open {
+            return;
+        }
+        if self.section_drag.is_some() {
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                self.cancel_section_drag(ctx);
+            }
             return;
         }
         if self.settings_open {
@@ -2616,8 +2628,7 @@ impl KetchupApp {
         self.solid_inspector(ui);
         self.measurement_inspector(ui);
         self.text_entity_info(ui);
-        if self.tool == Tool::Paint {
-            ui.text_heading("Paint");
+        sidebar::inspector_section(ui, "Apparence", "entity_appearance", true, |ui| {
             ui.horizontal(|ui| {
                 ui.text_label("Paint by");
                 ui.selectable_value(&mut self.paint_target, PaintTarget::Face, "Face");
@@ -2651,9 +2662,13 @@ impl KetchupApp {
                     }
                 }
             });
-            ui.text_label(self.paint_instructions());
-            ui.add_space(12.);
-        }
+            if self.tool == Tool::Paint {
+                ui.text_label(self.paint_instructions());
+            } else if ui.button("Use Paint tool").clicked() {
+                self.set_tool(Tool::Paint);
+            }
+        });
+        ui.add_space(8.);
         if self.selected.is_empty() {
             ui.text_label(
                 RichText::new("Nothing selected")
@@ -2872,6 +2887,7 @@ impl KetchupApp {
         }
         self.entity_cache.update(&self.doc.model);
         self.face_cache.update(&self.doc.model);
+        self.picking_cache.set_display(&self.doc.display);
         self.picking_cache.update(&self.face_cache);
     }
     // Call after prepare_picking so inference shares the viewport's cached
@@ -3184,6 +3200,7 @@ impl KetchupApp {
                 self.drawing = None;
             }
             self.gesture = None;
+            self.section_drag = None;
             return;
         }
         let events = ctx.input(|i| i.events.clone());
@@ -3196,6 +3213,7 @@ impl KetchupApp {
                 self.drawing = None;
             }
             self.gesture = None;
+            self.section_drag = None;
             self.hover = None;
             return;
         }
@@ -3222,6 +3240,10 @@ impl KetchupApp {
                 && matches!(events.peek(), Some(egui::Event::PointerMoved(_)))
                 && !stroking
             {
+                continue;
+            }
+            if self.section_plane_event(ctx, &event, response) {
+                refresh_pointer = false;
                 continue;
             }
             match event {
@@ -3583,7 +3605,8 @@ impl KetchupApp {
             .gesture
             .as_ref()
             .is_some_and(|gesture| matches!(gesture.kind, GestureKind::Compass { .. }));
-        if !response.contains_pointer() || over_compass || compass_drag {
+        let over_section = self.section_drag.is_some() || ctx.input(|i| i.pointer.hover_pos()).is_some_and(|pos| self.section_handle_at(pos));
+        if !response.contains_pointer() || over_compass || compass_drag || over_section {
             self.hover = None;
             self.flip_hover = None;
         } else if response.hovered() && refresh_pointer {
@@ -3591,7 +3614,7 @@ impl KetchupApp {
                 self.update_pointer(pos);
             }
         }
-        if response.hovered() && !over_compass && !compass_drag {
+        if response.hovered() && !over_compass && !compass_drag && !over_section {
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.01 {
                 if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
@@ -3620,6 +3643,7 @@ impl KetchupApp {
         let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
             return;
         };
+        if self.section_drag.is_some() || self.section_handle_at(pos) { return; }
         if self.compass_contains(pos)
             || self
                 .gesture
@@ -4101,6 +4125,7 @@ impl KetchupApp {
             // Reuse the rendered geometry, including a live modeling preview.
             // A full membership/face scan here makes orbiting grouped imports
             // dramatically slower whenever axes are enabled.
+            self.picking_cache.set_display(&self.doc.display);
             self.picking_cache.update(&self.face_cache);
             if let Some(origin) = screen(DVec3::ZERO) {
                 if self
@@ -4787,8 +4812,11 @@ impl KetchupApp {
                                     self.drawing_lock_buttons(ui);
                                     ui.separator();
                                     self.snapping_menu(ui);
-                                    // This row flows right to left, so emphasis appears before Snapping.
                                     self.group_emphasis_button(ui);
+                                    // This row flows right to left: Sections sits left of this separator.
+                                    ui.separator();
+                                    self.sections_menu(ui);
+                                    self.tags_menu(ui);
                                     ui.allocate_ui_with_layout(
                                         ui.available_size(),
                                         egui::Layout::left_to_right(egui::Align::Center),

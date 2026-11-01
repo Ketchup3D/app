@@ -61,6 +61,8 @@ pub struct DisplaySettings {
     pub section_cuts: bool,
     pub section_fill: bool,
     pub section_height: f64,
+    pub section_axes: [bool; 3],
+    pub section_offsets: [f64; 2],
     pub shadows: bool,
     pub shadow_darkness: f64,
     pub sun_angle: f64,
@@ -107,6 +109,8 @@ impl Default for DisplaySettings {
             section_cuts: false,
             section_fill: true,
             section_height: 1.,
+            section_axes: [false, false, true],
+            section_offsets: [1., 1.],
             shadows: false,
             shadow_darkness: 0.35,
             sun_angle: 135.,
@@ -124,10 +128,80 @@ impl Default for DisplaySettings {
     }
 }
 impl DisplaySettings {
+    /// Z retains the legacy height field so older documents keep their cut.
+    pub fn section_limits(&self) -> [Option<f64>; 3] {
+        let offsets = [
+            self.section_offsets[0],
+            self.section_offsets[1],
+            self.section_height,
+        ];
+        std::array::from_fn(|axis| {
+            (self.section_cuts && self.section_axes[axis]).then_some(offsets[axis])
+        })
+    }
+    pub fn section_contains(&self, point: crate::DVec3) -> bool {
+        self.section_limits()
+            .iter()
+            .enumerate()
+            .all(|(axis, limit)| limit.is_none_or(|v| point[axis] <= v + 1e-8))
+    }
+    pub fn section_segment(
+        &self,
+        mut a: crate::DVec3,
+        mut b: crate::DVec3,
+    ) -> Option<(crate::DVec3, crate::DVec3)> {
+        for (axis, limit) in self.section_limits().into_iter().enumerate() {
+            let Some(limit) = limit else { continue };
+            if a[axis] > limit && b[axis] > limit {
+                return None;
+            }
+            if (a[axis] > limit) != (b[axis] > limit) {
+                let mut cut = a.lerp(b, (limit - a[axis]) / (b[axis] - a[axis]));
+                cut[axis] = limit;
+                if a[axis] > limit {
+                    a = cut;
+                } else {
+                    b = cut;
+                }
+            }
+        }
+        Some((a, b))
+    }
+    /// Clip a triangle into at most six vertices without per-frame allocations.
+    pub fn section_triangle(&self, triangle: [crate::DVec3; 3]) -> ([crate::DVec3; 6], usize) {
+        let mut polygon = [crate::DVec3::ZERO; 6];
+        polygon[..3].copy_from_slice(&triangle);
+        let mut len = 3;
+        for (axis, limit) in self.section_limits().into_iter().enumerate() {
+            let Some(limit) = limit else { continue };
+            let input = polygon;
+            let input_len = len;
+            len = 0;
+            for i in 0..input_len {
+                let a = input[i];
+                let b = input[(i + 1) % input_len];
+                if a[axis] <= limit {
+                    polygon[len] = a;
+                    len += 1;
+                }
+                if (a[axis] <= limit) != (b[axis] <= limit) {
+                    let mut cut = a.lerp(b, (limit - a[axis]) / (b[axis] - a[axis]));
+                    cut[axis] = limit;
+                    polygon[len] = cut;
+                    len += 1;
+                }
+            }
+        }
+        (polygon, len)
+    }
     pub fn valid(&self) -> bool {
         (0.000001..=1e6).contains(&self.grid_spacing)
             && (0.000001..=1e6).contains(&self.grid_max_length)
             && (1. ..=8.).contains(&self.profile_width)
+            && self
+                .section_offsets
+                .iter()
+                .all(|v| v.is_finite() && v.abs() <= 1e10)
             && self.section_height.is_finite()
             && self.section_height.abs() <= 1e10
             && (0. ..=1.).contains(&self.shadow_darkness)
@@ -169,6 +243,55 @@ mod tests {
                 }
                 .valid()
             );
+        }
+    }
+
+    #[test]
+    fn sections_restore_legacy_z_and_round_trip_all_axes() {
+        let old: DisplaySettings =
+            serde_json::from_str(r#"{"section_cuts":true,"section_height":2.5}"#).unwrap();
+        assert_eq!(old.section_limits(), [None, None, Some(2.5)]);
+        let mut display = old;
+        display.section_axes = [true; 3];
+        display.section_offsets = [-2., 4.];
+        let restored: DisplaySettings =
+            serde_json::from_str(&serde_json::to_string(&display).unwrap()).unwrap();
+        assert_eq!(restored, display);
+        assert_eq!(restored.section_limits(), [Some(-2.), Some(4.), Some(2.5)]);
+        for value in [f64::NAN, f64::INFINITY, 1e11] {
+            display.section_offsets[0] = value;
+            assert!(!display.valid());
+        }
+    }
+
+    #[test]
+    fn sections_clip_segments_and_triangles_against_every_active_axis() {
+        use crate::DVec3;
+        let display = DisplaySettings {
+            section_cuts: true,
+            section_axes: [true; 3],
+            ..Default::default()
+        };
+        let (a, b) = display
+            .section_segment(DVec3::ZERO, DVec3::splat(2.))
+            .unwrap();
+        assert_eq!(a, DVec3::ZERO);
+        assert_eq!(b, DVec3::ONE);
+        assert!(
+            display
+                .section_segment(DVec3::splat(2.), DVec3::splat(3.))
+                .is_none()
+        );
+        let (polygon, len) =
+            display.section_triangle([DVec3::ZERO, DVec3::new(3., 0., 2.), DVec3::new(0., 3., 2.)]);
+        assert!(len >= 3);
+        assert!(polygon[..len].iter().all(|&p| display.section_contains(p)));
+        for axis in 0..3 {
+            let mut display = display.clone();
+            display.section_axes = [false; 3];
+            display.section_axes[axis] = true;
+            assert!(!display.section_contains(DVec3::splat(2.)));
+            assert!(display.section_contains(DVec3::ZERO));
         }
     }
 

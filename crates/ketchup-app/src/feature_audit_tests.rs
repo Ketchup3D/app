@@ -93,6 +93,16 @@ pub(super) fn render_cases() -> Vec<RenderCase> {
             serde_json::json!([240, 20, 150]),
         );
     }
+    for (key, value) in [
+        (
+            "axis_colors",
+            serde_json::json!([[240, 20, 150], [20, 150, 240], [150, 240, 20]]),
+        ),
+        ("section_axes", serde_json::json!([true, true, false])),
+        ("section_offsets", serde_json::json!([0.5, 1.5])),
+    ] {
+        pair(key, key, defaults[key].clone(), value);
+    }
     pair(
         "units",
         "units",
@@ -172,7 +182,9 @@ pub(super) fn render_workspace(name: &str) -> KetchupApp {
                 kind: Inference::Axis(Axis::Z),
             });
         }
-        "section_fill" | "section_height" => app.doc.display.section_cuts = true,
+        "section_fill" | "section_height" | "section_axes" | "section_offsets" => {
+            app.doc.display.section_cuts = true
+        }
         "profile_width" => app.doc.display.profiles = true,
         "shadow_darkness" | "sun_angle" | "sun_elevation" => {
             app.doc.display.shadows = true;
@@ -254,14 +266,7 @@ fn options_workspace() -> Harness {
     for _ in 0..2 {
         h.frame(vec![], egui::Modifiers::NONE);
     }
-    for title in [
-        "Entity Info",
-        "Edge style",
-        "Sections",
-        "Shadows",
-        "Fog",
-        "Environment",
-    ] {
+    for title in ["Propriétés", "Edge style", "Shadows", "Fog", "Environment"] {
         let output = h.frame(vec![], egui::Modifiers::NONE);
         h.click(sidebar_position(&h, &output, title));
         h.time += 1.;
@@ -278,7 +283,13 @@ fn check_option(key: &str, label: &str) {
         .unwrap();
     for expected in [!before, before] {
         let output = h.frame(vec![], egui::Modifiers::NONE);
-        let position = sidebar_position(&h, &output, label);
+        let position = if key.starts_with("section_") {
+            h.click(text_position(&output, "Sections"));
+            let output = h.frame(vec![], egui::Modifiers::NONE);
+            text_position(&output, label)
+        } else {
+            sidebar_position(&h, &output, label)
+        };
         h.click(position);
         assert_eq!(
             serde_json::to_value(&h.app.doc.display).unwrap()[key],
@@ -292,6 +303,9 @@ fn check_option(key: &str, label: &str) {
         assert_eq!(h.app.doc.model, model, "{label} changed model geometry");
         let saved = Document::from_json(&serde_json::to_string(&h.app.doc).unwrap()).unwrap();
         assert_eq!(serde_json::to_value(saved.display).unwrap()[key], expected);
+        if key.starts_with("section_") {
+            h.key(Key::Escape);
+        }
     }
 }
 

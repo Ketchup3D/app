@@ -1,4 +1,3 @@
-use crate::natural_text::TextUi as _;
 use super::*;
 use ketchup_core::StandardView;
 
@@ -215,4 +214,74 @@ fn standard_view_preview(
         highlighted,
         Stroke::new(1.8, colors.green),
     ));
+}
+
+impl KetchupApp {
+    pub(in crate::app) fn sections_menu(&mut self, ui: &mut egui::Ui) {
+        let before = self.doc.display.clone();
+        let colors = Palette::for_ui(ui);
+        let icon = egui::Atom::paint(egui::vec2(18., 18.), |ui, args| {
+            icons::line_icon(ui.painter(), args.rect.center(), "sections", colors.accent);
+        });
+        let response = ui
+            .add(
+                egui::Button::new((
+                    icon,
+                    "Sections",
+                    RichText::new("▾").small().color(colors.muted),
+                ))
+                .min_size(egui::vec2(0., 32.))
+                .selected(self.doc.display.section_planes || self.doc.display.section_cuts),
+            )
+            .on_hover_text("Configure section planes, cuts, fill, and axis positions");
+        egui::Popup::menu(&response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                Self::menu_style(ui.style_mut());
+                ui.set_width(208.);
+                let d = &mut self.doc.display;
+                Self::menu_checkbox(ui, &mut d.section_planes, "Section planes");
+                Self::menu_checkbox(ui, &mut d.section_cuts, "Section cuts");
+                Self::menu_checkbox(ui, &mut d.section_fill, "Section fill");
+                ui.separator();
+                let padding = ui.spacing().button_padding.x as i8;
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(padding, 0))
+                    .show(ui, |ui| {
+                        use crate::inspector_table::{Column, InspectorTable};
+                        let mut table = InspectorTable::new(
+                            ui.available_width(),
+                            [Column::fixed(112.), Column::flex(1.)],
+                        );
+                        for (axis, label) in ["X · vertical", "Y · vertical", "Z · horizontal"]
+                            .into_iter()
+                            .enumerate()
+                        {
+                            table.row(ui, ("section_axis", axis), |column, cell| {
+                                if column == 0 {
+                                    cell.checkbox(&mut d.section_axes[axis], label)
+                                        .on_hover_text(
+                                            "Keeps geometry on the negative side of this axis.",
+                                        );
+                                } else {
+                                    let offset = if axis == 2 {
+                                        &mut d.section_height
+                                    } else {
+                                        &mut d.section_offsets[axis]
+                                    };
+                                    cell.add(
+                                        egui::DragValue::new(offset)
+                                            .speed(0.05)
+                                            .range(-1e8..=1e8)
+                                            .suffix(" m"),
+                                    );
+                                }
+                            });
+                        }
+                    });
+            });
+        if self.doc.display != before {
+            self.changed(ui.ctx());
+        }
+    }
 }

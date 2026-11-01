@@ -18,7 +18,7 @@ struct Key {
     revision: u64,
     angle: f64,
     elevation: f64,
-    section: Option<f64>,
+    section: [Option<f64>; 3],
     receivers: Vec<u64>,
     casters: Vec<u64>,
 }
@@ -40,7 +40,7 @@ impl ShadowCache {
         if !self.enabled {
             return;
         }
-        let section = d.section_cuts.then_some(d.section_height);
+        let section = d.section_limits();
         // Hover/orbit frames only validate visibility; do not allocate fresh
         // face ID lists when the cached geometry is still valid.
         if self.key.as_ref().is_some_and(|key| {
@@ -168,18 +168,28 @@ fn triangulate(polygon: &[DVec3], triangles: &mut Vec<Triangle>) {
     }
 }
 
-fn section_triangle(triangle: Triangle, section: Option<f64>) -> Vec<Triangle> {
-    let Some(z) = section else {
+fn section_triangle(triangle: Triangle, section: [Option<f64>; 3]) -> Vec<Triangle> {
+    if section == [None; 3] {
         return vec![triangle];
-    };
-    let (polygon, _) = split(
-        &triangle,
-        Plane {
-            origin: DVec3::Z * z,
-            normal: -DVec3::Z,
-            inset: 0.,
-        },
-    );
+    }
+    let mut polygon = triangle.to_vec();
+    for (axis, limit) in section.into_iter().enumerate() {
+        let Some(limit) = limit else { continue };
+        let mut normal = DVec3::ZERO;
+        normal[axis] = -1.;
+        let mut origin = DVec3::ZERO;
+        origin[axis] = limit;
+        polygon = split(
+            &polygon,
+            Plane {
+                origin,
+                normal,
+                inset: 0.,
+            },
+        )
+        .0;
+    }
+
     let mut triangles = Vec::new();
     triangulate(&polygon, &mut triangles);
     triangles
@@ -618,7 +628,7 @@ mod tests {
     #[test]
     fn section_clipping_keeps_the_retained_part_of_a_crossing_caster() {
         let triangle = [DVec3::ZERO, DVec3::X * 2., DVec3::new(0., 2., 2.)];
-        let clipped = section_triangle(triangle, Some(1.));
+        let clipped = section_triangle(triangle, [None, None, Some(1.)]);
         assert_eq!(clipped.len(), 2);
         assert!(clipped.iter().flatten().all(|p| p.z <= 1.));
         close(area(&clipped), area(&[triangle]) * 0.75);
