@@ -5409,3 +5409,23 @@ fn materials_revert_button_clears_only_selected_treatment_overrides_and_is_undoa
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model, customized);
 }
+
+
+#[test]
+fn system_information_opens_from_help_and_copies_the_report() {
+    let mut h = Harness::new();
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "Help"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(menu_text_position(&output, "System information"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let copy = text_position(&output, "Copy to clipboard");
+    let copied = h.click(copy);
+    let report = copied.platform_output.commands.iter().find_map(|command| {
+        match command { egui::OutputCommand::CopyText(text) => Some(text), _ => None }
+    }).expect("copy button sends report to clipboard");
+    assert!(report.contains(concat!("KetchUp ", env!("CARGO_PKG_VERSION"))));
+    assert!(report.contains("Architecture:"));
+    assert!(report.contains("Window:"));
+    assert!(!report.contains(&h.app.doc.name), "diagnostics omit document names");
+}

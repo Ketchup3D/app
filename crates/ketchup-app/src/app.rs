@@ -1921,7 +1921,7 @@ impl KetchupApp {
                         .on_hover_text("Suggest a feature on GitHub")
                         .clicked()
                     {
-                        ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Ketchup3D/app/issues/new"));
+                        crate::system_info::request_issue(&ctx);
                     }
                     // This row flows right to left, placing the divider left of the button.
                     ui.add(egui::Separator::default().vertical().spacing(16.));
@@ -2078,7 +2078,7 @@ impl KetchupApp {
                             }
                             ui.separator();
                             if ui.button("Report a bug").clicked() {
-                                ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Ketchup3D/app/issues"));
+                                crate::system_info::request_issue(&ctx);
                                 ui.close();
                             }
                             if ui.button("GitHub").clicked() {
@@ -2101,6 +2101,10 @@ impl KetchupApp {
                                 ui.close();
                             }
                             ui.separator();
+                            if ui.button("System information").clicked() {
+                                crate::system_info::open(&ctx);
+                                ui.close();
+                            }
                             if ui.button("About KetchUp").clicked() {
                                 self.about = true;
                                 ui.close();
@@ -4967,6 +4971,7 @@ impl eframe::App for KetchupApp {
         if self.about {
             self.about_window(&ctx);
         }
+        crate::system_info::show(&ctx, frame);
         self.sync_stock_materials(&ctx);
         self.release_notes.show(&ctx);
         #[cfg(not(target_arch = "wasm32"))]

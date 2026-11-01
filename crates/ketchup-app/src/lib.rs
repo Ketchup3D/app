@@ -31,5 +31,7 @@ mod tool_cursor;
 
 mod frame_rate;
 
+mod system_info;
+
 #[cfg(test)]
 mod test_ui;
