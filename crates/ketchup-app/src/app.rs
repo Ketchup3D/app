@@ -2413,6 +2413,11 @@ impl KetchupApp {
                     egui::ScrollArea::vertical().id_salt("tool_scroll"),
                 )
                 .show(ui, |ui| {
+                    // Reserve a shape behind every button, then resolve the final selection
+                    // after clicks and nested menus have activated their tool this frame.
+                    let selection_shape = ui.painter().add(egui::Shape::Noop);
+                    let content_top = ui.cursor().top();
+                    let mut tool_rects = Vec::with_capacity(Tool::RAIL.len());
                     for rail_tool in Tool::RAIL {
                         let tool = if rail_tool == Tool::Line {
                             self.drawing_tool
@@ -2437,6 +2442,7 @@ impl KetchupApp {
                         };
                         let (rect, response) =
                             ui.allocate_exact_size(egui::vec2(56., 55.), Sense::click());
+                        tool_rects.push((rail_tool, rect));
                         response.widget_info(|| {
                             egui::WidgetInfo::selected(
                                 if nested {
@@ -2449,25 +2455,11 @@ impl KetchupApp {
                                 tooltip.clone(),
                             )
                         });
-                        if active || response.hovered() {
+                        if !active && response.hovered() {
                             ui.painter().rect_filled(
                                 rect.shrink2(egui::vec2(0., 3.)),
                                 8,
-                                if active {
-                                    colors.selected
-                                } else {
-                                    colors.hovered
-                                },
-                            );
-                        }
-                        if active {
-                            ui.painter().rect_filled(
-                                Rect::from_min_size(
-                                    rect.left_center() - egui::vec2(10., 12.),
-                                    egui::vec2(3., 24.),
-                                ),
-                                2,
-                                colors.accent,
+                                colors.hovered,
                             );
                         }
                         let color = if active { colors.accent } else { colors.ink };
@@ -2533,6 +2525,47 @@ impl KetchupApp {
                             self.set_tool(tool);
                         }
                         ui.add_space(5.);
+                    }
+                    let selected_rail_tool = if self.tool.is_solid() {
+                        Tool::Union
+                    } else if Tool::DRAWING.contains(&self.tool) {
+                        Tool::Line
+                    } else if Tool::MEASURING.contains(&self.tool) {
+                        Tool::Dimensions
+                    } else {
+                        self.tool
+                    };
+                    if let Some((_, target)) = tool_rects
+                        .iter()
+                        .find(|(tool, _)| *tool == selected_rail_tool)
+                    {
+                        // Animate only the content-relative offset: scrolling must not
+                        // become another animation target. Zero-duration styles snap.
+                        let offset = ui.ctx().animate_value_with_time(
+                            ui.scope_id().with("tool_rail_selection"),
+                            target.top() - content_top,
+                            ui.style().animation_time.min(0.14),
+                        );
+                        let rect =
+                            target.translate(egui::vec2(0., content_top + offset - target.top()));
+                        ui.painter().set(
+                            selection_shape,
+                            egui::Shape::Vec(vec![
+                                egui::Shape::rect_filled(
+                                    rect.shrink2(egui::vec2(0., 3.)),
+                                    8,
+                                    colors.selected,
+                                ),
+                                egui::Shape::rect_filled(
+                                    Rect::from_min_size(
+                                        rect.left_center() - egui::vec2(10., 12.),
+                                        egui::vec2(3., 24.),
+                                    ),
+                                    2,
+                                    colors.accent,
+                                ),
+                            ]),
+                        );
                     }
                 });
                 sidebar::remember_scroll(ui.ctx(), "sidebar_left", scroll.state.clamped_offset());
@@ -5048,3 +5081,7 @@ mod tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "project_tests.rs"]
 mod project_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "tool_rail_tests.rs"]
+mod tool_rail_tests;
