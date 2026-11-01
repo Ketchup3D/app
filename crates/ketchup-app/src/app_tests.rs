@@ -15,6 +15,8 @@ mod grid_snapping;
 mod outliner_drag;
 #[path = "precision_tests.rs"]
 mod precision_input;
+#[path = "feature_suggestion_tests.rs"]
+mod feature_suggestion;
 #[path = "release_notes_tests.rs"]
 mod release_notes;
 #[path = "rendering_tests.rs"]

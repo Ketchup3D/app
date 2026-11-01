@@ -553,6 +553,17 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
     let kind = section_icon(kind);
     let s = Stroke::new(1.5, color);
     match kind {
+        "suggest_feature" => {
+            p.circle_stroke(c + egui::vec2(0., -2.), 4.5, s);
+            p.line_segment([c + egui::vec2(-2.5, 2.), c + egui::vec2(-2.5, 5.)], s);
+            p.line_segment([c + egui::vec2(2.5, 2.), c + egui::vec2(2.5, 5.)], s);
+            p.line_segment([c + egui::vec2(-2.5, 5.), c + egui::vec2(2.5, 5.)], s);
+            p.line_segment([c + egui::vec2(-1.5, 7.5), c + egui::vec2(1.5, 7.5)], s);
+            for direction in [egui::vec2(-1., 0.), egui::vec2(1., 0.), egui::vec2(0., -1.)] {
+                let center = c + egui::vec2(0., -2.);
+                p.line_segment([center + direction * 6.5, center + direction * 8.], s);
+            }
+        }
         "export_pdf" => {
             p.rect_stroke(
                 Rect::from_center_size(c, egui::vec2(14., 18.)),

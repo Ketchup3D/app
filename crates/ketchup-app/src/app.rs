@@ -1897,6 +1897,17 @@ impl KetchupApp {
                     if self.updates.ready() && ui.button("Update ready").clicked() {
                         self.updates.open = true;
                     }
+                    let suggestion_icon = egui::Atom::paint(egui::vec2(18., 18.), |ui, args| {
+                        icons::line_icon(ui.painter(), args.rect.center(), "suggest_feature", args.fallback_text_color);
+                    });
+                    if ui.add(egui::Button::new((suggestion_icon, "Suggest a feature")))
+                        .on_hover_text("Suggest a feature on GitHub")
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Ketchup3D/app/issues/new"));
+                    }
+                    // This row flows right to left, placing the divider left of the button.
+                    ui.add(egui::Separator::default().vertical().spacing(16.));
                     let (text, color) = if self.save_error.is_some() {
                         ("Unsaved", Color32::from_rgb(243, 177, 145))
                     } else if self.dirty_since.is_some() {
