@@ -331,3 +331,46 @@ fn creation_and_rename_fields_focus_and_select_the_name_on_every_open() {
         }
     }
 }
+
+
+#[test]
+fn duplicate_preserves_original_and_clipboard_and_undoes_in_one_step() {
+    let mut h = Harness::new();
+    let source = object(&mut h, "Beam", false, DVec3::ZERO);
+    h.app.selected = BTreeSet::from([source]);
+    let before = h.app.doc.model.clone();
+    h.app.clipboard = Some(GeometryClipboard { model: Model::default(), anchor: DVec3::splat(7.) });
+    h.app.context_action(&h.ctx, context_menu::ContextAction::Duplicate);
+    assert_eq!(h.app.doc.model.objects.len(), 2);
+    let duplicate = *h.app.selected.first().unwrap();
+    assert_ne!(duplicate, source);
+    assert_eq!(h.app.doc.model.objects[&source], before.objects[&source]);
+    assert_eq!(h.app.doc.model.objects[&duplicate].name, "Beam");
+    assert_eq!(h.app.clipboard.as_ref().unwrap().anchor, DVec3::splat(7.));
+    assert_eq!(h.app.doc.history.undo_label(), Some("Duplicate"));
+    let after = h.app.doc.model.clone();
+    h.app.undo(&h.ctx, false);
+    assert_eq!(h.app.doc.model, before);
+    h.app.undo(&h.ctx, true);
+    assert_eq!(h.app.doc.model, after);
+}
+
+#[test]
+fn clean_aligned_vertices_is_one_undoable_shared_menu_action() {
+    let mut h = Harness::new();
+    for i in 0..4 {
+        h.app.doc.model.add_edge(DVec3::X*i as f64,DVec3::X*(i+1) as f64).unwrap();
+    }
+    let object=h.app.doc.model.make_object(&h.app.doc.model.root_entities(),false,"Straight run").unwrap();
+    h.app.selected=BTreeSet::from([object]);
+    let before=h.app.doc.model.clone();
+    h.app.context_action(&h.ctx,context_menu::ContextAction::CleanAligned);
+    assert_eq!(h.app.doc.model.edges.len(),1);
+    assert_eq!(h.app.selected,BTreeSet::from([object]));
+    assert_eq!(h.app.doc.history.undo_label(),Some("Clean aligned vertices"));
+    let cleaned=h.app.doc.model.clone();
+    h.app.undo(&h.ctx,false);
+    assert_eq!(h.app.doc.model,before);
+    h.app.undo(&h.ctx,true);
+    assert_eq!(h.app.doc.model,cleaned);
+}

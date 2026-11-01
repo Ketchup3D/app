@@ -14,6 +14,8 @@ pub(super) enum ContextAction {
     Explode,
     Cut,
     Copy,
+    Duplicate,
+    CleanAligned,
     Paste,
     PasteInPlace,
     Delete,
@@ -61,6 +63,27 @@ impl KetchupApp {
             }
             CloseContext => self.close_edit_context(ctx),
             Copy => self.copy_selection(ctx),
+            Duplicate if !locked && !self.selected.is_empty() => {
+                let copy = self.doc.model.copy_entities(&self.selected);
+                let before = self.doc.model.clone();
+                let selected = self.doc.model.paste_entities(&copy, DVec3::ZERO);
+                if !selected.is_empty() {
+                    self.set_tool(Tool::Select);
+                    self.selected = selected;
+                    self.finish_edit("Duplicate", before, ctx);
+                }
+            }
+            CleanAligned if !locked && !self.selected.is_empty() => {
+                let before = self.doc.model.clone();
+                match self.doc.model.clean_collinear_vertices(&self.selected) {
+                    Ok(0) => self.say(ctx, "No redundant aligned vertices in the selection"),
+                    Ok(count) => {
+                        self.finish_edit("Clean aligned vertices", before, ctx);
+                        self.say(ctx, format!("Removed {count} redundant vertices"));
+                    }
+                    Err(error) => self.say(ctx, error),
+                }
+            }
             Cut if !locked => {
                 self.copy_selection(ctx);
                 self.erase_selected(ctx);
@@ -297,6 +320,8 @@ impl KetchupApp {
         ui.separator();
         item(ui, "Cut", editable, ContextAction::Cut);
         item(ui, "Copy", selected, ContextAction::Copy);
+        item(ui, "Duplicate", editable, ContextAction::Duplicate);
+        item(ui, "Clean aligned vertices", editable, ContextAction::CleanAligned);
         item(ui, "Paste", self.clipboard.is_some(), ContextAction::Paste);
         item(
             ui,
