@@ -335,7 +335,11 @@ impl KetchupApp {
                 );
             }
             Section::StockPricing => {
-                if let Some(id) = self.general_settings.stock.show(ui) {
+                if let Some(id) = self
+                    .general_settings
+                    .stock
+                    .show(ui, &mut self.wood_type_filters)
+                {
                     self.material_removal = Some(id);
                 }
             }

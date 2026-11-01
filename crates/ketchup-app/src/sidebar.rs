@@ -39,6 +39,7 @@ pub(super) struct InspectorPreferences {
     time_estimates: time_estimates::Settings,
     finish_product_filters: std::collections::BTreeMap<String, String>,
     stock_material_filter: String,
+    wood_type_filters: std::collections::BTreeMap<String, String>,
     last_seen_release_notes: Option<String>,
     display: Option<DisplaySettings>,
     camera: Option<CameraPreferences>,
@@ -66,6 +67,7 @@ impl Default for InspectorPreferences {
             time_estimates: Default::default(),
             finish_product_filters: Default::default(),
             stock_material_filter: String::new(),
+            wood_type_filters: Default::default(),
             last_seen_release_notes: None,
             display: None,
             camera: None,
@@ -354,6 +356,7 @@ impl KetchupApp {
         self.time_estimates.sanitize();
         self.finish_product_filters = preferences.finish_product_filters.clone();
         self.stock_material_filter = preferences.stock_material_filter.clone();
+        self.wood_type_filters = preferences.wood_type_filters.clone();
         self.inspector = preferences.visible;
         self.inspector_width = if preferences.width.is_finite() {
             preferences.width.clamp(260., 2000.)
@@ -444,6 +447,7 @@ impl KetchupApp {
             time_estimates: self.time_estimates.clone(),
             finish_product_filters: self.finish_product_filters.clone(),
             stock_material_filter: self.stock_material_filter.clone(),
+            wood_type_filters: self.wood_type_filters.clone(),
             last_seen_release_notes: self.release_notes.last_seen_version.clone(),
             display: Some(self.doc.display.clone()),
             camera: Some(CameraPreferences::capture(&self.doc.camera)),
@@ -1666,6 +1670,7 @@ mod preference_tests {
             width_mm: 89.,
             length_mm: 2438.4,
             price: 8.25,
+            wood_type: Default::default(),
         });
         set_section_open(&ctx, "settings/stock/wood", false);
         app.doc.display.grid_auto_size = false;
@@ -1748,6 +1753,42 @@ mod preference_tests {
             restored.replace_project(Document::default(), None, &restored_ctx);
             assert_eq!(restored.general_settings.stock.currency_filter, query);
             assert!(!restored.project.modified);
+        }
+    }
+
+    #[test]
+    fn wood_types_and_searches_save_immediately_without_model_edits() {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let model = app.doc.model.clone();
+        let mut storage = SavedPreferences::default();
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert!(old.wood_type_filters.is_empty());
+        let stock = stock_settings::Stock::default();
+        let id = stock.id;
+        let key = format!("settings/stock/wood/{id}/type");
+        app.general_settings.stock.wood.push(stock);
+        for (kind, query) in [
+            (stock_settings::WoodType::Plywood, "ply"),
+            (stock_settings::WoodType::Mdf, "MDF"),
+            (stock_settings::WoodType::Unspecified, ""),
+        ] {
+            app.general_settings.stock.wood[0].wood_type = kind;
+            app.wood_type_filters.insert(key.clone(), query.into());
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert_eq!(app.doc.model, model);
+            assert!(!app.project.modified);
+            let restored_ctx = egui::Context::default();
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+            assert_eq!(restored.general_settings.stock.wood[0].wood_type, kind);
+            assert_eq!(restored.wood_type_filters[&key], query);
+            restored.replace_project(Document::default(), None, &restored_ctx);
+            assert_eq!(restored.general_settings.stock.wood[0].wood_type, kind);
+            assert_eq!(restored.wood_type_filters[&key], query);
+            assert!(restored.doc.model.stock_materials.is_empty());
         }
     }
 

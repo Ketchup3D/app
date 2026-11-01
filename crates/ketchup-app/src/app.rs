@@ -41,6 +41,8 @@ mod app_updates;
 mod context_menu;
 #[path = "currency.rs"]
 mod currency;
+#[path = "searchable_selector.rs"]
+mod searchable_selector;
 #[path = "display_scene.rs"]
 mod display_scene;
 #[path = "drawing_inference.rs"]
@@ -320,6 +322,7 @@ pub struct KetchupApp {
     time_estimates: time_estimates::Settings,
     finish_product_filters: std::collections::BTreeMap<String, String>,
     stock_material_filter: String,
+    wood_type_filters: std::collections::BTreeMap<String, String>,
     estimate_cache: time_estimates::EstimateCache,
     inspector_order: [sidebar::InspectorSection; sidebar::InspectorSection::COUNT],
     inspector_layout: sidebar::InspectorLayout,
@@ -456,6 +459,7 @@ impl KetchupApp {
             time_estimates: Default::default(),
             finish_product_filters: Default::default(),
             stock_material_filter: String::new(),
+            wood_type_filters: Default::default(),
             estimate_cache: Default::default(),
             inspector_order: sidebar::InspectorSection::ALL,
             inspector_layout: sidebar::InspectorLayout::default(),

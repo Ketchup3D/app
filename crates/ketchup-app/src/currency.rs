@@ -1,5 +1,5 @@
 //! One currency preference and one price format for catalogs and estimates.
-use super::sidebar;
+use super::searchable_selector::{Choice, SearchableSelector};
 use eframe::egui;
 
 pub(super) const DEFAULT: &str = "USD";
@@ -106,115 +106,32 @@ pub(super) fn price_input<'a>(currency: &str, value: &'a mut f64) -> egui::DragV
         .prefix(format!("{} ", code(currency)))
 }
 
-fn matches_query(code: &str, name: &str, query: &str) -> bool {
-    let candidate = format!("{code} {name}").to_lowercase();
-    query
-        .to_lowercase()
-        .split_whitespace()
-        .all(|word| candidate.contains(word))
-}
-
 pub(super) fn selector(
     ui: &mut egui::Ui,
     currency: &mut String,
     filter: &mut String,
 ) -> egui::Response {
-    let id = "settings_material_currency";
-    let width = 220.;
-    let was_open = egui::ComboBox::is_open(ui.ctx(), ui.make_persistent_id(id));
-    egui::ComboBox::from_id_salt(id)
-        .width(width)
-        // Only the nested results list scrolls. The focused search stays outside
-        // it, so caret visibility requests cannot pull the results back upward.
-        .height(f32::INFINITY)
-        .selected_text(label(currency))
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show_ui(ui, |ui| {
-            // Popup content determines the popup's size. Deriving the row from
-            // its available size feeds each measured expansion into the next pass.
-            let row_height = ui.spacing().interact_size.y.max(26.);
-            let mut query_changed = false;
-            let search = ui
-                .allocate_ui_with_layout(
-                    egui::vec2(width, row_height),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        let clear_width = 48.;
-                        let search_width = width - clear_width - ui.spacing().item_spacing.x;
-                        let search = ui.add_sized(
-                            [search_width, row_height],
-                            egui::TextEdit::singleline(filter)
-                                .id_salt("settings_material_currency_search")
-                                .return_key(None)
-                                .hint_text("Search code or name…")
-                                .desired_width(search_width),
-                        );
-                        if ui
-                            .add_enabled(
-                                !filter.is_empty(),
-                                egui::Button::new("Clear")
-                                    .min_size(egui::vec2(clear_width, row_height)),
-                            )
-                            .clicked()
-                        {
-                            filter.clear();
-                            query_changed = true;
-                            search.request_focus();
-                        }
-                        search
-                    },
-                )
-                .inner;
-            if !was_open {
-                search.request_focus();
-            }
-            query_changed |= search.changed();
-            ui.separator();
-            let current = code(currency).to_owned();
-            let mut choices = Vec::new();
-            if !CURRENCIES.iter().any(|(code, _)| *code == current)
-                && matches_query(&current, "", filter)
-            {
-                choices.push((current.as_str(), current.clone()));
-            }
-            for &(code, name) in CURRENCIES {
-                if matches_query(code, name, filter) {
-                    choices.push((code, format!("{code} — {name}")));
-                }
-            }
-            if search.has_focus()
-                && choices.len() == 1
-                && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
-            {
-                *currency = choices[0].0.to_owned();
-                ui.close();
-            }
-            let mut results = sidebar::restored_scroll_area(
-                ui,
-                RESULTS_SCROLL_KEY,
-                egui::ScrollArea::vertical()
-                    .id_salt(RESULTS_SCROLL_KEY)
-                    .max_height(ui.spacing().combo_height),
-            );
-            if query_changed {
-                results = results.vertical_scroll_offset(0.);
-            }
-            let output = results.show(ui, |ui| {
-                if choices.is_empty() {
-                    ui.weak("No currencies match your search.");
-                }
-                for (code, label) in choices {
-                    if ui
-                        .selectable_value(currency, code.to_owned(), label)
-                        .clicked()
-                    {
-                        ui.close();
-                    }
-                }
-            });
-            sidebar::remember_scroll(ui.ctx(), RESULTS_SCROLL_KEY, output.state.clamped_offset());
-        })
-        .response
+    let current = code(currency).to_owned();
+    let mut choices = Vec::new();
+    if !CURRENCIES.iter().any(|(code, _)| *code == current) {
+        choices.push(Choice::new(current.clone(), current));
+    }
+    choices.extend(
+        CURRENCIES
+            .iter()
+            .map(|(code, name)| Choice::new((*code).to_owned(), format!("{code} — {name}"))),
+    );
+    SearchableSelector {
+        id_salt: egui::IdSalt::new("settings_material_currency"),
+        scroll_key: RESULTS_SCROLL_KEY,
+        selected_label: &label(currency),
+        width: 220.,
+        popup_width: 220.,
+        hint: "Search code or name…",
+        empty_text: "No currencies match your search.",
+    }
+    .show(ui, currency, filter, choices)
+    .response
 }
 
 #[cfg(test)]

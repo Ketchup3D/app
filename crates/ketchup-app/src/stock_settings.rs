@@ -3,12 +3,56 @@ use super::*;
 use crate::inspector_table::{Column, InspectorTable};
 use ketchup_core::LengthUnit;
 
+/// Purchasing categories; existing stock remains unspecified until classified.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) enum WoodType {
+    #[default]
+    Unspecified,
+    SolidWood,
+    Plywood,
+    Mdf,
+    Particleboard,
+    Osb,
+    Hardboard,
+    Veneer,
+    Other,
+}
+
+impl WoodType {
+    const ALL: [Self; 9] = [
+        Self::Unspecified,
+        Self::SolidWood,
+        Self::Plywood,
+        Self::Mdf,
+        Self::Particleboard,
+        Self::Osb,
+        Self::Hardboard,
+        Self::Veneer,
+        Self::Other,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Unspecified => "Unspecified",
+            Self::SolidWood => "Solid wood",
+            Self::Plywood => "Plywood",
+            Self::Mdf => "MDF",
+            Self::Particleboard => "Particleboard",
+            Self::Osb => "OSB",
+            Self::Hardboard => "Hardboard",
+            Self::Veneer => "Veneer",
+            Self::Other => "Other",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(super) struct Stock {
     #[serde(default)]
     pub id: ketchup_core::MaterialId,
     pub name: String,
+    pub wood_type: WoodType,
     pub thickness_mm: f64,
     pub width_mm: f64,
     pub length_mm: f64,
@@ -20,6 +64,7 @@ impl Default for Stock {
         Self {
             id: ketchup_core::MaterialId::new_v4(),
             name: "Wood stock".into(),
+            wood_type: WoodType::default(),
             thickness_mm: 19.,
             width_mm: 89.,
             length_mm: 2440.,
@@ -90,7 +135,11 @@ impl Settings {
         finish_settings::normalize(&mut self.finishes);
     }
 
-    pub(super) fn show(&mut self, ui: &mut egui::Ui) -> Option<ketchup_core::MaterialId> {
+    pub(super) fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        type_filters: &mut std::collections::BTreeMap<String, String>,
+    ) -> Option<ketchup_core::MaterialId> {
         let mut requested_removal = None;
         ui.weak("Save the wood stock and finishing products you can buy, with your supplier’s prices. Use actual dimensions for boards or sheets.");
         ui.horizontal_wrapped(|ui| {
@@ -122,6 +171,7 @@ impl Settings {
                     ui.available_width(),
                     [
                         Column::at_least(100.),
+                        Column::at_least(150.),
                         Column::at_least(66.),
                         Column::at_least(66.),
                         Column::at_least(66.),
@@ -133,7 +183,15 @@ impl Settings {
                 let output = scroll.show(ui, |ui| {
                     table.header(
                         ui,
-                        ["Stock", "Thickness", "Width", "Length", "Price / piece", ""],
+                        [
+                            "Stock",
+                            "Type",
+                            "Thickness",
+                            "Width",
+                            "Length",
+                            "Price / piece",
+                            "",
+                        ],
                     );
                     for stock in &mut self.wood {
                         table.row(ui, stock.id, |column, ui| {
@@ -146,10 +204,32 @@ impl Settings {
                                             .char_limit(120),
                                     );
                                 }
-                                1..=3 => {
+                                1 => {
+                                    use super::searchable_selector::{Choice, SearchableSelector};
+                                    let key = format!("settings/stock/wood/{}/type", stock.id);
+                                    SearchableSelector {
+                                        id_salt: egui::IdSalt::new((&key, "selector")),
+                                        scroll_key: &format!("{key}/results"),
+                                        selected_label: stock.wood_type.label(),
+                                        width: ui.available_width(),
+                                        popup_width: 240.,
+                                        hint: "Search wood types…",
+                                        empty_text: "No wood types match your search.",
+                                    }
+                                    .show(
+                                        ui,
+                                        &mut stock.wood_type,
+                                        type_filters.entry(key.clone()).or_default(),
+                                        WoodType::ALL
+                                            .into_iter()
+                                            .map(|kind| Choice::new(kind, kind.label()))
+                                            .collect(),
+                                    );
+                                }
+                                2..=4 => {
                                     let dimension = match column {
-                                        1 => &mut stock.thickness_mm,
-                                        2 => &mut stock.width_mm,
+                                        2 => &mut stock.thickness_mm,
+                                        3 => &mut stock.width_mm,
                                         _ => &mut stock.length_mm,
                                     };
                                     let mut value = *dimension / factor;
@@ -165,7 +245,7 @@ impl Settings {
                                         *dimension = value * factor;
                                     }
                                 }
-                                4 => {
+                                5 => {
                                     ui.add(currency::price_input(&self.currency, &mut stock.price))
                                         .on_hover_text(format!("{} per piece", self.currency));
                                 }
@@ -364,13 +444,7 @@ fn material_choices(
             });
         }
     }
-    let query = query.to_lowercase();
-    choices.retain(|choice| {
-        let candidate = choice.label.to_lowercase();
-        query
-            .split_whitespace()
-            .all(|word| candidate.contains(word))
-    });
+    choices.retain(|choice| super::searchable_selector::matches_query(&choice.label, query));
     choices
 }
 
@@ -388,115 +462,45 @@ pub(super) fn material_selector(
     >,
     filter: &mut String,
 ) -> egui::InnerResponse<bool> {
-    let id = "entity_stock_material";
-    let was_open = egui::ComboBox::is_open(ui.ctx(), ui.make_persistent_id(id));
-    let mut assigned = false;
-    let response = egui::ComboBox::from_id_salt(id)
-        .selected_text(selected_label)
-        .width(ui.available_width())
-        .truncate()
-        // Like currency, keep the search fixed above an independently scrolling list.
-        .height(f32::INFINITY)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show_ui(ui, |ui| {
-            let width = 300.;
-            let row_height = ui.spacing().interact_size.y.max(26.);
-            let mut query_changed = false;
-            let search = ui
-                .allocate_ui_with_layout(
-                    egui::vec2(width, row_height),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        let clear_width = 48.;
-                        let search_width = width - clear_width - ui.spacing().item_spacing.x;
-                        let search = ui.add_sized(
-                            [search_width, row_height],
-                            egui::TextEdit::singleline(filter)
-                                .id_salt("entity_material_search")
-                                .return_key(None)
-                                .hint_text("Search name or size…")
-                                .desired_width(search_width),
-                        );
-                        if ui
-                            .add_enabled(
-                                !filter.is_empty(),
-                                egui::Button::new("Clear")
-                                    .min_size(egui::vec2(clear_width, row_height)),
-                            )
-                            .clicked()
-                        {
-                            filter.clear();
-                            query_changed = true;
-                            search.request_focus();
-                        }
-                        search
-                    },
-                )
-                .inner;
-            if !was_open {
-                search.request_focus();
-            }
-            query_changed |= search.changed();
-            ui.separator();
-            let choices = material_choices(wood, project_materials, filter);
-            if search.has_focus()
-                && choices.len() == 1
-                && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Enter))
-            {
-                *selected_id = Some(choices[0].id);
-                assigned = true;
-                ui.close();
-            }
-            let mut results = sidebar::restored_scroll_area(
-                ui,
-                MATERIAL_RESULTS_SCROLL_KEY,
-                egui::ScrollArea::vertical()
-                    .id_salt(MATERIAL_RESULTS_SCROLL_KEY)
-                    .max_height(ui.spacing().combo_height),
-            );
-            if query_changed {
-                results = results.vertical_scroll_offset(0.);
-            }
-            let output = results.show(ui, |ui| {
-                // Clearing an assignment must stay possible even with no matches.
-                if ui
-                    .selectable_value(selected_id, None, "Unassigned")
-                    .clicked()
-                {
-                    assigned = true;
-                    ui.close();
-                }
-                if choices.is_empty() {
-                    ui.weak("No stock materials match your search.");
-                }
-                for choice in choices {
-                    ui.push_id(choice.id, |ui| {
-                        if ui
-                            .selectable_value(selected_id, Some(choice.id), choice.label)
-                            .clicked()
-                        {
-                            assigned = true;
-                            ui.close();
-                        }
-                    });
-                }
-            });
-            sidebar::remember_scroll(
-                ui.ctx(),
-                MATERIAL_RESULTS_SCROLL_KEY,
-                output.state.clamped_offset(),
-            );
-        })
-        .response;
-    egui::InnerResponse {
-        inner: assigned,
-        response,
+    use super::searchable_selector::{Choice, SearchableSelector};
+    let mut none = Choice::new(None, "Unassigned");
+    none.always_visible = true;
+    let mut choices = vec![none];
+    choices.extend(
+        material_choices(wood, project_materials, "")
+            .into_iter()
+            .map(|choice| Choice::new(Some(choice.id), choice.label)),
+    );
+    SearchableSelector {
+        id_salt: egui::IdSalt::new("entity_stock_material"),
+        scroll_key: MATERIAL_RESULTS_SCROLL_KEY,
+        selected_label,
+        width: ui.available_width(),
+        popup_width: 300.,
+        hint: "Search name or size…",
+        empty_text: "No stock materials match your search.",
     }
+    .show(ui, selected_id, filter, choices)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_stock_defaults_to_unspecified_and_all_types_round_trip() {
+        let old: Stock = serde_json::from_str(r#"{"name":"Oak","price":12.5}"#).unwrap();
+        assert_eq!(old.wood_type, WoodType::Unspecified);
+        assert_eq!(old.name, "Oak");
+        for wood_type in WoodType::ALL {
+            let stock = Stock {
+                wood_type,
+                ..old.clone()
+            };
+            let saved = serde_json::to_string(&stock).unwrap();
+            assert_eq!(serde_json::from_str::<Stock>(&saved).unwrap(), stock);
+        }
+    }
 
     #[test]
     fn both_catalogs_show_the_selected_currency_on_editable_prices() {
@@ -528,7 +532,7 @@ mod tests {
                         ..Default::default()
                     },
                     |ui| {
-                        settings.show(ui);
+                        settings.show(ui, &mut Default::default());
                     },
                 );
                 labels.clear();

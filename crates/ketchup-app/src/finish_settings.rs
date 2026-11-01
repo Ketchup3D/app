@@ -134,14 +134,6 @@ pub(super) fn normalize(finishes: &mut [Finish]) {
     }
 }
 
-fn matches_query(product: &Finish, query: &str) -> bool {
-    let candidate = format!("{} {}", product.name, product.finish_type.label()).to_lowercase();
-    query
-        .to_lowercase()
-        .split_whitespace()
-        .all(|word| candidate.contains(word))
-}
-
 pub(super) fn selector(
     ui: &mut egui::Ui,
     key: &str,
@@ -149,109 +141,33 @@ pub(super) fn selector(
     products: &[Finish],
     filter: &mut String,
 ) -> egui::Response {
-    let id = (key, "product");
-    let was_open = egui::ComboBox::is_open(ui.ctx(), ui.make_persistent_id(id));
+    use super::searchable_selector::{Choice, SearchableSelector};
     let selected = selected_id.map_or("No product", |id| {
         products
             .iter()
             .find(|product| product.id == id)
             .map_or("Unavailable product", |product| product.name.as_str())
     });
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(selected)
-        .width(ui.available_width())
-        .truncate()
-        .height(f32::INFINITY)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show_ui(ui, |ui| {
-            // Match the currency picker: fixed search row, independently scrolling results.
-            let width = 260.;
-            let row_height = ui.spacing().interact_size.y.max(26.);
-            let mut query_changed = false;
-            let search = ui
-                .allocate_ui_with_layout(
-                    egui::vec2(width, row_height),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        let clear_width = 48.;
-                        let search_width = width - clear_width - ui.spacing().item_spacing.x;
-                        let search = ui.add_sized(
-                            [search_width, row_height],
-                            egui::TextEdit::singleline(filter)
-                                .id_salt((key, "product_search"))
-                                .return_key(None)
-                                .hint_text("Search name or type…")
-                                .desired_width(search_width),
-                        );
-                        if ui
-                            .add_enabled(
-                                !filter.is_empty(),
-                                egui::Button::new("Clear")
-                                    .min_size(egui::vec2(clear_width, row_height)),
-                            )
-                            .clicked()
-                        {
-                            filter.clear();
-                            query_changed = true;
-                            search.request_focus();
-                        }
-                        search
-                    },
-                )
-                .inner;
-            if !was_open {
-                search.request_focus();
-            }
-            query_changed |= search.changed();
-            ui.separator();
-            let choices: Vec<_> = products
-                .iter()
-                .filter(|product| matches_query(product, filter))
-                .collect();
-            if search.has_focus()
-                && choices.len() == 1
-                && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Enter))
-            {
-                *selected_id = Some(choices[0].id);
-                ui.close();
-            }
-            let scroll_key = format!("{key}/product/results");
-            let mut results = sidebar::restored_scroll_area(
-                ui,
-                &scroll_key,
-                egui::ScrollArea::vertical()
-                    .id_salt(&scroll_key)
-                    .max_height(ui.spacing().combo_height),
-            );
-            if query_changed {
-                results = results.vertical_scroll_offset(0.);
-            }
-            let output = results.show(ui, |ui| {
-                // Clearing the assignment stays available even with an unmatched search.
-                if ui
-                    .selectable_value(selected_id, None, "No product")
-                    .clicked()
-                {
-                    ui.close();
-                }
-                if choices.is_empty() {
-                    ui.weak("No products match your search.");
-                }
-                for product in choices {
-                    ui.push_id(product.id, |ui| {
-                        if ui
-                            .selectable_value(selected_id, Some(product.id), &product.name)
-                            .on_hover_text(product.finish_type.label())
-                            .clicked()
-                        {
-                            ui.close();
-                        }
-                    });
-                }
-            });
-            sidebar::remember_scroll(ui.ctx(), &scroll_key, output.state.clamped_offset());
-        })
-        .response
+    let mut none = Choice::new(None, "No product");
+    none.always_visible = true;
+    let mut choices = vec![none];
+    choices.extend(products.iter().map(|product| {
+        let mut choice = Choice::new(Some(product.id), &product.name);
+        choice.search_text = format!("{} {}", product.name, product.finish_type.label());
+        choice.tooltip = Some(product.finish_type.label().into());
+        choice
+    }));
+    SearchableSelector {
+        id_salt: egui::IdSalt::new((key, "product")),
+        scroll_key: &format!("{key}/product/results"),
+        selected_label: selected,
+        width: ui.available_width(),
+        popup_width: 260.,
+        hint: "Search name or type…",
+        empty_text: "No products match your search.",
+    }
+    .show(ui, selected_id, filter, choices)
+    .response
 }
 
 pub(super) fn show(ui: &mut egui::Ui, finishes: &mut Vec<Finish>, currency: &str) {
