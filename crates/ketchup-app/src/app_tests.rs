@@ -5351,9 +5351,18 @@ fn materials_revert_button_clears_only_selected_treatment_overrides_and_is_undoa
     let mut h = Harness::new();
     h.size.y = 4000.;
     let edge = h.app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
-    let object = h.app.doc.model.make_object(&BTreeSet::from([edge]), false, "Board").unwrap();
+    let object = h
+        .app
+        .doc
+        .model
+        .make_object(&BTreeSet::from([edge]), false, "Board")
+        .unwrap();
     let stock = stock_settings::Stock::default();
-    h.app.doc.model.stock_materials.insert(stock.id, stock.definition());
+    h.app
+        .doc
+        .model
+        .stock_materials
+        .insert(stock.id, stock.definition());
     h.app.general_settings.stock.wood.push(stock.clone());
     let board = h.app.doc.model.objects.get_mut(&object).unwrap();
     board.stock_material_id = Some(stock.id);
@@ -5367,16 +5376,31 @@ fn materials_revert_button_clears_only_selected_treatment_overrides_and_is_undoa
     h.click(text_position(&output, "Entity Info"));
     let output = h.frame(vec![], egui::Modifiers::NONE);
     assert!(text_position(&output, "Revert to defaults").y > text_position(&output, "Finishing").y);
+    assert!(
+        text_position(&output, "Apply to all children").y
+            < text_position(&output, "Revert to defaults").y
+    );
     h.click(text_position(&output, "Revert to defaults"));
-    assert!(h.app.doc.model.objects[&object].surface_treatment_override().is_none());
-    assert_eq!(h.app.doc.model.objects[&object].stock_material_id, Some(stock.id));
+    assert!(
+        h.app.doc.model.objects[&object]
+            .surface_treatment_override()
+            .is_none()
+    );
+    assert_eq!(
+        h.app.doc.model.objects[&object].stock_material_id,
+        Some(stock.id)
+    );
     assert_eq!(h.app.time_estimates, defaults);
     assert_eq!(h.app.general_settings.stock, catalog);
     assert!(h.app.project.modified);
     // The absence of an override survives saving and follows future Settings defaults.
     let saved = serde_json::to_string(&h.app.doc).unwrap();
     let restored: Document = serde_json::from_str(&saved).unwrap();
-    assert!(restored.model.objects[&object].surface_treatment_override().is_none());
+    assert!(
+        restored.model.objects[&object]
+            .surface_treatment_override()
+            .is_none()
+    );
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model, customized);
 }

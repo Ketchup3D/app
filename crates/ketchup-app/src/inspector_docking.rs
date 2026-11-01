@@ -612,38 +612,69 @@ impl KetchupApp {
                 },
             );
             let mut header = panel.inner;
-            let settings_rect = (section == InspectorSection::Materials).then(|| {
+            let action_rect = matches!(
+                section,
+                InspectorSection::Materials | InspectorSection::TimeCostEstimates
+            )
+            .then(|| {
                 let rect = Rect::from_center_size(
                     egui::pos2(header.rect.right() - 22., header.rect.center().y),
                     egui::vec2(32., 32.),
                 );
-                // Keep the gear separate from the disclosure and docking drag target.
+                // Keep the menu separate from the disclosure and docking drag target.
                 header.interact_rect.max.x = header.interact_rect.right().min(rect.left());
                 rect
             });
             let header = header.interact(egui::Sense::click_and_drag())
                 .on_hover_cursor(egui::CursorIcon::Grab)
                 .on_hover_text("Drop within 10px inside an area's edge to split; cross a section's vertical midpoint to reorder, or drop in another area's center to join");
-            if let Some(rect) = settings_rect {
+            if let Some(rect) = action_rect {
                 // Use the header's layer so the button follows sticky and floating headers.
                 let mut action_ui = panel_ui.new_child(
                     egui::UiBuilder::new()
-                        .id_salt("material_settings")
+                        .id_salt(("inspector_header_action", section.id()))
                         .layer_id(header.layer_id)
                         .max_rect(rect)
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
                 action_ui.set_clip_rect(panel_ui.clip_rect().intersect(header.rect));
-                if Self::icon_button(
-                    &mut action_ui,
-                    "settings",
-                    "Manage available stock materials, sizes, and prices",
-                    true,
-                    colors.muted,
-                ) {
-                    self.general_settings.section = settings::Section::StockPricing;
-                    self.settings_open = true;
-                }
+                // Inset only the painted frame; retain the 32px click target.
+                let widgets = &mut action_ui.visuals_mut().widgets;
+                widgets.inactive.expansion = -4.;
+                widgets.hovered.expansion = -4.;
+                widgets.active.expansion = -4.;
+                widgets.open.expansion = -4.;
+                let menu_button = action_ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("⋯").color(colors.muted))
+                            .min_size(rect.size()),
+                    )
+                    .on_hover_text("Section actions");
+                egui::Popup::menu(&menu_button)
+                    .align(egui::emath::RectAlign::BOTTOM_END)
+                    .style(Self::menu_style)
+                    .show(|ui| {
+                        if section == InspectorSection::Materials {
+                            if ui
+                                .button("Settings")
+                                .on_hover_text(
+                                    "Manage available stock materials, sizes, and prices",
+                                )
+                                .clicked()
+                            {
+                                self.general_settings.section = settings::Section::StockPricing;
+                                self.settings_open = true;
+                                ui.close();
+                            }
+                        } else if ui
+                            .add_enabled(!self.project.blocked(), egui::Button::new("Generate PDF"))
+                            .on_hover_text("Export time and cost estimates as PDF")
+                            .clicked()
+                        {
+                            self.export_time_estimates(ui.ctx());
+                            ui.close();
+                        }
+                    });
             }
             layout.heights[index] = panel_ui.min_rect().height() + spacing;
             // Keep the slot's space stable even when a split preview hides its

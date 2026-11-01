@@ -1292,4 +1292,96 @@ fn unified_cost_table_groups_stock_and_finishes_with_one_header() {
             .iter()
             .any(|text| text == "Finishing products" || text == "Material total")
     );
+    let report = app.time_estimate_report();
+    assert_eq!(report.summary[0], "USD 67.50");
+    assert_eq!(report.costs.len(), 2);
+    assert_eq!(report.costs[0].title, "Wood stock");
+    assert_eq!(report.costs[1].title, "Paint");
+    assert!(report.costs[1].rows[0][0].contains("Container: 1 L"));
+    assert_eq!(report.costs[1].rows[0][1], "1 container");
+    assert_eq!(report.costs[1].rows[0][3], "25.00");
+}
+
+#[test]
+fn apply_materials_to_descendants_preserves_nested_selection_and_supports_undo() {
+    let mut doc = Document::default();
+    let edge = doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+    let leaf = doc
+        .model
+        .make_object(&BTreeSet::from([edge]), true, "Component")
+        .unwrap();
+    let child = doc
+        .model
+        .make_object(&BTreeSet::from([leaf]), false, "Child")
+        .unwrap();
+    let root = doc
+        .model
+        .make_object(&BTreeSet::from([child]), false, "Parent")
+        .unwrap();
+    let other_edge = doc
+        .model
+        .add_edge(DVec3::Y * 10., DVec3::Y * 10. + DVec3::X)
+        .unwrap();
+    let other = doc
+        .model
+        .make_object(&BTreeSet::from([other_edge]), false, "Unrelated")
+        .unwrap();
+    let source_stock = stock_settings::Stock::default();
+    let child_stock = stock_settings::Stock::default();
+    for stock in [&source_stock, &child_stock] {
+        doc.model
+            .stock_materials
+            .insert(stock.id, stock.definition());
+    }
+    doc.model.objects.get_mut(&root).unwrap().stock_material_id = Some(source_stock.id);
+    let child_object = doc.model.objects.get_mut(&child).unwrap();
+    child_object.stock_material_id = Some(child_stock.id);
+    child_object.surface_treatment_customized = true;
+    child_object.surface_treatment.stain.enabled = true;
+    let child_treatment = child_object.surface_treatment.clone();
+    let mut app = KetchupApp::with_document(doc, None, true);
+    app.time_estimates.varnish.enabled = true;
+    app.selected = BTreeSet::from([root, child]);
+    let before = app.doc.model.clone();
+    let defaults = app.time_estimates.clone();
+    let ctx = egui::Context::default();
+    app.apply_materials_to_children(&ctx);
+    assert_eq!(
+        app.doc.model.objects[&leaf].stock_material_id,
+        Some(child_stock.id)
+    );
+    assert_eq!(
+        app.doc.model.objects[&leaf].surface_treatment,
+        child_treatment
+    );
+    for id in [root, child, other] {
+        assert_eq!(app.doc.model.objects[&id], before.objects[&id]);
+    }
+    let changed = app.doc.model.clone();
+    assert!(app.project.modified);
+    app.undo(&ctx, false);
+    assert_eq!(app.doc.model, before);
+    app.undo(&ctx, true);
+    assert_eq!(app.doc.model, changed);
+    app.selected = BTreeSet::from([root]);
+    app.apply_materials_to_children(&ctx);
+    for id in [child, leaf] {
+        assert_eq!(
+            app.doc.model.objects[&id].stock_material_id,
+            Some(source_stock.id)
+        );
+        assert_eq!(app.doc.model.objects[&id].surface_treatment, defaults);
+        assert!(app.doc.model.objects[&id].surface_treatment_customized);
+    }
+    assert_eq!(app.doc.model.objects[&other], before.objects[&other]);
+    let saved = serde_json::to_string(&app.doc).unwrap();
+    let restored: Document = serde_json::from_str(&saved).unwrap();
+    assert_eq!(restored.model, app.doc.model);
+    assert_eq!(app.time_estimates, defaults);
+    // A locked descendant blocks the whole operation, including sibling edits.
+    app.doc.model.locked.insert(leaf);
+    let locked = app.doc.model.clone();
+    app.time_estimates.varnish.enabled = false;
+    app.apply_materials_to_children(&ctx);
+    assert_eq!(app.doc.model, locked);
 }

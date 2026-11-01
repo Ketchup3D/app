@@ -555,6 +555,17 @@ pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
     let kind = section_icon(kind);
     let s = Stroke::new(1.5, color);
     match kind {
+        "export_pdf" => {
+            p.rect_stroke(
+                Rect::from_center_size(c, egui::vec2(14., 18.)),
+                1,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            p.line_segment([c + egui::vec2(-4., -4.), c + egui::vec2(4., -4.)], s);
+            p.line_segment([c + egui::vec2(-4., 0.), c + egui::vec2(4., 0.)], s);
+            p.line_segment([c + egui::vec2(-4., 4.), c + egui::vec2(2., 4.)], s);
+        }
         "settings" => {
             let points = (0..32)
                 .map(|index| {

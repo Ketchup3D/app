@@ -576,3 +576,50 @@ pub fn export_screenshots(
     ctx.request_repaint();
     receiver
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn export_estimate_pdf(
+    ctx: &eframe::egui::Context,
+    name: String,
+    contents: Vec<u8>,
+) -> Pending {
+    run(ctx, move || {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Export time and cost estimates")
+            .add_filter("PDF document", &["pdf"])
+            .set_file_name(exchange_name(&format!("{name} - estimates"), "pdf"))
+            .save_file()
+        else {
+            return Ok(Outcome::Cancelled);
+        };
+        let path = extension_path(path, "pdf")?;
+        write(&path, &contents)?;
+        open_pdf(&path).map_err(|error| {
+            format!(
+                "PDF saved to {}, but its viewer could not be opened: {error}",
+                path.display()
+            )
+        })?;
+        Ok(Outcome::Exported)
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn export_estimate_pdf(
+    ctx: &eframe::egui::Context,
+    _name: String,
+    contents: Vec<u8>,
+) -> Pending {
+    let (sender, receiver) = mpsc::channel();
+    // Opening synchronously preserves browser user activation for the PDF viewer.
+    let result = open_pdf(&contents)
+        .map(|_| Outcome::Exported)
+        .map_err(|error| {
+            error
+                .as_string()
+                .unwrap_or_else(|| "The browser could not open this PDF".into())
+        });
+    let _ = sender.send(result);
+    ctx.request_repaint();
+    receiver
+}

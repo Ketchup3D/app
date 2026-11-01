@@ -1814,6 +1814,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "skrifa",
  "tempfile",
  "velopack",
  "wasm-bindgen-futures",

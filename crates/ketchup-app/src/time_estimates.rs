@@ -278,6 +278,7 @@ fn object_tasks(
 
 #[derive(Debug)]
 struct FinishCost {
+    product_id: Option<ketchup_core::MaterialId>,
     name: String,
     kind: Option<finish_settings::FinishType>,
     containers: Option<f64>,
@@ -314,6 +315,7 @@ fn finishing_costs(
             let product = id.and_then(|id| products.iter().find(|product| product.id == id));
             let Some(product) = product else {
                 return FinishCost {
+                    product_id: id,
                     name: if id.is_some() {
                         "Unavailable finishing product"
                     } else {
@@ -340,6 +342,7 @@ fn finishing_costs(
                 .map(|(quantity, price)| quantity * price)
                 .filter(|amount| amount.is_finite());
             FinishCost {
+                product_id: id,
                 name: product.name.clone(),
                 kind: Some(product.finish_type),
                 containers,
@@ -683,6 +686,286 @@ pub(super) fn treatment_controls(
 }
 
 impl KetchupApp {
+    pub(super) fn export_time_estimates(&mut self, ctx: &egui::Context) {
+        if self.project.blocked() {
+            return;
+        }
+        let report = self.time_estimate_report();
+        match crate::estimate_pdf::render(&report) {
+            Ok(bytes) => {
+                self.project.operation = projects::Operation::Export;
+                self.project.pending = Some(crate::project_files::export_estimate_pdf(
+                    ctx,
+                    self.doc.name.clone(),
+                    bytes,
+                ));
+            }
+            Err(error) => self.project.error = Some(error),
+        }
+    }
+
+    fn time_estimate_report(&mut self) -> crate::estimate_pdf::Report {
+        use crate::estimate_pdf::{Group, Report};
+        let area = self.estimate_cache.area(
+            &self.doc.model,
+            &self.selected,
+            &self.general_settings.stock,
+        );
+        let areas = &self.estimate_cache.area.as_ref().unwrap().1;
+        let tasks = object_tasks(&self.doc.model, areas, &self.time_estimates);
+        let finishes = finishing_costs(
+            &self.doc.model,
+            areas,
+            &self.time_estimates,
+            &self.general_settings.stock.finishes,
+        );
+        let duration = tasks
+            .iter()
+            .fold(Duration::default(), |total, (_, task, _)| Duration {
+                work: total.work + task.work,
+                wait: total.wait + task.wait,
+            });
+        let catalog = &self.general_settings.stock;
+        let mut total: f64 = finishes.iter().filter_map(|cost| cost.amount).sum();
+        let mut partial = finishes.iter().any(|cost| cost.amount.is_none());
+        let mut report = Report {
+            name: self.doc.name.clone(),
+            scope: if self.selected.is_empty() {
+                "All visible parts"
+            } else {
+                "Selected parts (visible only)"
+            }
+            .into(),
+            currency: currency::code(&catalog.currency).into(),
+            tasks: tasks
+                .iter()
+                .map(|(title, duration, count)| {
+                    [
+                        format!("{title} ({count} objects)"),
+                        format_minutes(duration.work),
+                        format_minutes(duration.wait),
+                    ]
+                })
+                .collect(),
+            totals: [
+                format_minutes(duration.work + duration.wait),
+                format_minutes(duration.work),
+                format_minutes(duration.wait),
+            ],
+            ..Default::default()
+        };
+        report.notes.push(format!("{} - {} wood surfaces. Finishing applies only to objects assigned a material from Settings > Material > Wood.",
+            self.doc.display.units.format_area(area), if self.selected.is_empty() { "Visible" } else { "Selected" }));
+        report.notes.push(format!("Kerf {} - Rotation {}. Stock uses each part's full bounding box, including cutting waste; notches and cutouts do not reduce the blank.",
+            self.doc.display.units.format_length(self.project.cutting_plan_layout.kerf_mm / 1000.),
+            if self.project.cutting_plan_layout.allow_rotation { "on" } else { "off" }));
+        report.notes.push("Finishes: whole containers purchased. Surface area and coats are combined across objects and steps for each product before rounding. Coverage is per configured container per coat. Labor is not included in the price.".into());
+        match self.estimate_cache.materials(
+            &self.doc.model,
+            &self.selected,
+            self.project.cutting_plan_layout,
+        ) {
+            Ok(plan) => {
+                partial |= plan.skipped > 0;
+                if plan.skipped > 0 {
+                    report.notes.push(format!(
+                        "Estimate incomplete: {} assigned items omitted: no usable thickness.",
+                        plan.skipped
+                    ));
+                }
+                let mut group = Group {
+                    title: "Wood stock".into(),
+                    rows: Vec::new(),
+                };
+                for required in &plan.requirements {
+                    let price = required
+                        .material_id
+                        .and_then(|id| catalog.wood.iter().find(|stock| stock.id == id))
+                        .filter(|stock| {
+                            stock.definition().dimensions == required.material.dimensions
+                        })
+                        .map(|stock| stock.price);
+                    total += required.quantity as f64 * price.unwrap_or(0.);
+                    partial |= price.is_none() || required.excluded > 0;
+                    let mut item = required.material.name.clone();
+                    if price.is_none() {
+                        item.push_str("\nPrice unavailable. Add a price in Settings > Material.");
+                    }
+                    if required.excluded > 0 {
+                        item.push_str(&format!(
+                            "\n{} cuts do not fit - Excluded from cost.",
+                            required.excluded
+                        ));
+                    }
+                    group.rows.push([
+                        item,
+                        format!(
+                            "{} {}",
+                            required.quantity,
+                            if required.quantity == 1 {
+                                "piece"
+                            } else {
+                                "pieces"
+                            }
+                        ),
+                        price
+                            .map(|value| currency::format_value(&catalog.currency, value))
+                            .unwrap_or_else(|| "Unavailable".into()),
+                        price
+                            .map(|value| {
+                                currency::format_value(
+                                    &catalog.currency,
+                                    required.quantity as f64 * value,
+                                )
+                            })
+                            .unwrap_or_else(|| "Unavailable".into()),
+                    ]);
+                }
+                if !group.rows.is_empty() {
+                    report.costs.push(group);
+                }
+            }
+            Err(message) => {
+                partial = true;
+                report.notes.push(format!("No stock estimate yet: {message}. Assign stock materials to solid parts and configure stock sizes/prices in Settings > Material."));
+            }
+        }
+        for kind in finish_settings::FinishType::ALL
+            .into_iter()
+            .map(Some)
+            .chain([None])
+        {
+            let mut group = Group {
+                title: kind
+                    .map_or("Unresolved finishing products", |kind| kind.label())
+                    .into(),
+                rows: Vec::new(),
+            };
+            for cost in finishes.iter().filter(|cost| cost.kind == kind) {
+                let mut item = cost.name.clone();
+                if let Some(product) = cost
+                    .product_id
+                    .and_then(|id| catalog.finishes.iter().find(|product| product.id == id))
+                {
+                    item.push_str(&format!(
+                        "\nContainer: {} {}",
+                        product.container_size,
+                        product.container_unit.label()
+                    ));
+                    if let Some(coverage) = product.coverage_m2_per_container {
+                        item.push_str(&format!("; coverage {coverage} m² per container per coat"));
+                    }
+                }
+                if let Some(issue) = cost.issue {
+                    item.push_str(&format!("\n{issue}"));
+                }
+                group.rows.push([
+                    item,
+                    cost.containers
+                        .map(|value| {
+                            format!(
+                                "{value:.0} {}",
+                                if value == 1. {
+                                    "container"
+                                } else {
+                                    "containers"
+                                }
+                            )
+                        })
+                        .unwrap_or_else(|| "Unknown".into()),
+                    cost.price
+                        .map(|value| currency::format_value(&catalog.currency, value))
+                        .unwrap_or_else(|| "Unavailable".into()),
+                    cost.amount
+                        .map(|value| currency::format_value(&catalog.currency, value))
+                        .unwrap_or_else(|| "Unavailable".into()),
+                ]);
+            }
+            if !group.rows.is_empty() {
+                report.costs.push(group);
+            }
+        }
+        if area <= 0. {
+            report.notes.push(
+                "No visible surfaces with assigned wood materials in the current scope.".into(),
+            );
+        } else if tasks.is_empty() {
+            report.notes.push("No treatment tasks enabled. Choose sanding grits or finishes for objects in Materials.".into());
+        }
+        report.summary = [
+            if report.costs.is_empty() && partial {
+                "Unavailable".into()
+            } else {
+                format!(
+                    "{} {}{}",
+                    report.currency,
+                    currency::format_value(&catalog.currency, total),
+                    if partial { " (partial)" } else { "" }
+                )
+            },
+            format_minutes(duration.work),
+            format_minutes(duration.wait),
+        ];
+        if partial {
+            report.notes.insert(0, "Estimate incomplete: the priced subtotal excludes items with missing prices/coverage and cuts that do not fit. Review all item warnings.".into());
+        }
+        report
+    }
+
+    pub(super) fn apply_materials_to_children(&mut self, ctx: &egui::Context) {
+        if self.doc.model.selection_locked(&self.selected) {
+            return;
+        }
+        let parents: std::collections::BTreeMap<_, _> = self
+            .doc
+            .model
+            .objects
+            .values()
+            .flat_map(|object| object.entities.iter().map(move |id| (*id, object.id)))
+            .collect();
+        // Snapshot every source before editing. For nested selections the nearest
+        // selected ancestor wins, and selected objects retain their own settings.
+        let updates: Vec<_> = self
+            .doc
+            .model
+            .objects
+            .keys()
+            .filter_map(|id| {
+                if self.selected.contains(id) {
+                    return None;
+                }
+                let mut ancestor = parents.get(id).copied();
+                while let Some(parent) = ancestor {
+                    if self.selected.contains(&parent) {
+                        let source = &self.doc.model.objects[&parent];
+                        return Some((
+                            *id,
+                            source.stock_material_id,
+                            source.stock_material.clone(),
+                            source
+                                .surface_treatment_override()
+                                .unwrap_or(&self.time_estimates)
+                                .clone(),
+                        ));
+                    }
+                    ancestor = parents.get(&parent).copied();
+                }
+                None
+            })
+            .collect();
+        let before = self.doc.model.clone();
+        for (id, material_id, material, treatment) in updates {
+            let object = self.doc.model.objects.get_mut(&id).unwrap();
+            object.stock_material_id = material_id;
+            object.stock_material = material;
+            object.surface_treatment = treatment;
+            object.surface_treatment_customized = true;
+        }
+        if self.doc.model != before {
+            self.finish_edit("Apply materials to children", before, ctx);
+        }
+    }
+
     fn material_cost_estimate_contents(&mut self, ui: &mut egui::Ui) {
         let colors = Palette::for_ui(ui);
         self.estimate_cache.area(
@@ -894,6 +1177,16 @@ impl KetchupApp {
             ui.weak("Mixed sanding and finishing settings. Changes apply to selected wood objects, including nested wood objects.");
         }
         let mut reset = false;
+        let mut apply_children = false;
+        let has_children = self.selected.iter().any(|id| {
+            self.doc.model.objects.get(id).is_some_and(|object| {
+                self.doc
+                    .model
+                    .expand_entities(&object.entities)
+                    .iter()
+                    .any(|child| self.doc.model.objects.contains_key(child))
+            })
+        });
         ui.add_enabled_ui(!self.doc.model.selection_locked(&self.selected), |ui| {
             treatment_controls(
                 ui,
@@ -902,8 +1195,14 @@ impl KetchupApp {
                 &self.general_settings.stock.finishes,
                 &mut self.finish_product_filters,
             );
+            apply_children = ui
+                .add_enabled(has_children, egui::Button::new("Apply to all children")
+                    .min_size(egui::vec2(ui.available_width(), ui.spacing().interact_size.y)))
+                .on_hover_text("Copy each selected object's stock material, sanding and finishing settings to all descendant groups and components. Nested selected objects keep their own settings.")
+                .clicked();
             reset = ui
-                .add_enabled(!all_defaults, egui::Button::new("Revert to defaults"))
+                .add_enabled(!all_defaults, egui::Button::new("Revert to defaults")
+                    .min_size(egui::vec2(ui.available_width(), ui.spacing().interact_size.y)))
                 .on_hover_text("Restore sanding and finishing defaults from Settings for the selected wood objects.")
                 .clicked();
         });
@@ -925,6 +1224,9 @@ impl KetchupApp {
                 }
             }
             self.finish_edit("Change sanding and finishing", before, ui.ctx());
+        }
+        if apply_children {
+            self.apply_materials_to_children(ui.ctx());
         }
     }
 

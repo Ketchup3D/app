@@ -3,6 +3,7 @@ mod brand_mark;
 mod cutting_layout;
 mod cutting_plan;
 mod environment;
+mod estimate_pdf;
 mod icons;
 mod inspector_table;
 mod interchange;
