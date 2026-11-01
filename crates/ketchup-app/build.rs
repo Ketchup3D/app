@@ -1,4 +1,23 @@
+#[allow(dead_code)]
+#[path = "src/server_config.rs"]
+mod server_config;
+
 fn main() {
+    println!("cargo:rerun-if-env-changed=KETCHUP_SERVER_URL");
+    println!("cargo:rerun-if-changed=src/server_config.rs");
+    let dotenv = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
+    println!("cargo:rerun-if-changed={}", dotenv.display());
+    let server = match std::env::var("KETCHUP_SERVER_URL") {
+        Ok(value) => Some(server_config::nonempty(&value).expect("Invalid KETCHUP_SERVER_URL")),
+        Err(std::env::VarError::NotPresent) => {
+            server_config::read_dotenv(&dotenv).expect("Invalid server .env")
+        }
+        Err(error) => panic!("Invalid KETCHUP_SERVER_URL: {error}"),
+    };
+    if let Some(server) = server {
+        println!("cargo:rustc-env=KETCHUP_SERVER_URL={server}");
+    }
+
     // Web imports use the vendored JS reader in a worker, without C/C++ tools.
     if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
         return;

@@ -8,3 +8,13 @@ addresses = ["127.0.0.1"]
 port = 8080
 open = false
 
+
+# Keep browser session requests same-origin during local development.
+[[proxy]]
+backend = "http://localhost:8081/api/"
+no_redirect = true
+
+[[proxy]]
+backend = "http://localhost:8081/auth/"
+# OAuth redirects must reach the browser, preserving its session cookies.
+no_redirect = true
