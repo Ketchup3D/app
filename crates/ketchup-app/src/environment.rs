@@ -232,7 +232,13 @@ pub fn controls(ui: &mut egui::Ui, display: &mut DisplaySettings) -> bool {
             }
         });
     }
-    if ui.button("Reset environment colors").clicked() {
+    if ui
+        .add_sized(
+            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+            egui::Button::new("Reset environment colors"),
+        )
+        .clicked()
+    {
         let defaults = DisplaySettings::default();
         display.sky_color = defaults.sky_color;
         display.ground_color = defaults.ground_color;

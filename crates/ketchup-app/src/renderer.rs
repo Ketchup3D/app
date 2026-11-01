@@ -10,6 +10,7 @@ struct Vertex {
     position: [f32; 3],
     color: [u8; 4],
     lateral: f32,
+    shadow_color: [u8; 4],
 }
 
 // Compare document data because callers can edit Model collections directly.
@@ -89,6 +90,7 @@ struct MeshBuffers {
 }
 
 pub struct Mesh {
+    shadow_vertices: Vec<Vertex>,
     clip_stroke_footprints: bool,
     selection_occlusion: Occlusion,
     annotation_occluders: Vec<[DVec3; 3]>,
@@ -108,6 +110,7 @@ pub struct Mesh {
 impl Mesh {
     pub fn new(camera: &Camera, size: DVec2) -> Self {
         Self {
+            shadow_vertices: Vec::new(),
             clip_stroke_footprints: false,
             selection_occlusion: Occlusion::default(),
             annotation_occluders: Vec::new(),
@@ -363,13 +366,14 @@ impl Mesh {
                     origin,
                     gradient,
                 );
-                // Preserve the already-visible ordinary outlines at contacts.
-                // This is a screen-space mask: coincident model edges can have
-                // different incident face slopes, so depth cannot reliably
-                // decide which color owns the shared antialiased pixels.
+                // Ordinary outlines occlude selection only where their real
+                // projected surface is nearer, including across wide strokes.
                 let polygons: Vec<_> = polygons
                     .into_iter()
-                    .flat_map(|polygon| self.selection_occlusion.visible_polygons(polygon, 1.))
+                    .flat_map(|polygon| {
+                        self.selection_occlusion
+                            .visible_surface_polygons(polygon, origin, gradient)
+                    })
                     .collect();
                 for polygon in polygons {
                     let base = self.vertices.len() as u32;
@@ -383,6 +387,7 @@ impl Mesh {
                             ],
                             color: color.to_array(),
                             lateral: ((p - a).dot(n) / n.length_squared()) as f32,
+                            shadow_color: [0; 4],
                         });
                     }
                     for i in 1..polygon.len().saturating_sub(1) {
@@ -419,13 +424,11 @@ impl Mesh {
                 })
                 .collect();
             for triangle in indices.chunks_exact(3) {
-                // The mask uses synthetic depth only; world and annotation
-                // occlusion keep their real geometric depth separately.
-                self.selection_occlusion
-                    .insert([triangle[0], triangle[1], triangle[2]].map(|i| {
-                        let (endpoint, lateral) = strip[i as usize];
-                        ([a, b][endpoint] + n * lateral).extend(0.)
-                    }));
+                self.selection_occlusion.insert([
+                    projected[triangle[0] as usize],
+                    projected[triangle[1] as usize],
+                    projected[triangle[2] as usize],
+                ]);
                 self.annotation_occluders.push([
                     projected[triangle[0] as usize],
                     projected[triangle[1] as usize],
@@ -444,6 +447,7 @@ impl Mesh {
                 ],
                 color,
                 lateral: lateral as f32,
+                shadow_color: [0; 4],
             });
         }
     }
@@ -614,6 +618,7 @@ impl Mesh {
                 ],
                 color: color.gamma_multiply(opacity[endpoint]).to_array(),
                 lateral: lateral as f32,
+                shadow_color: [0; 4],
             });
         }
         self.indices
@@ -629,17 +634,51 @@ impl Mesh {
         color: Color32,
         shaded: Color32,
     ) {
-        // Lighting subdivisions do not change the opaque surface. Use its
-        // original triangles for edge occlusion, keeping the hierarchy small
-        // and stable when the sun moves or shadows are toggled.
-        for &triangle in triangles {
-            self.face_triangle(triangle, color, false, true);
-        }
-        for &triangle in &shadow.lit {
-            self.face_triangle(triangle, color, true, false);
-        }
-        for &triangle in &shadow.shaded {
-            self.face_triangle(triangle, shaded, true, false);
+        // Keep the receiving face's original hard silhouette. Only its shadow
+        // coverage is multisampled; ordinary geometry never uses that resolve.
+        if self.display.shadow_antialiasing {
+            for &triangle in triangles {
+                let start = self.vertices.len();
+                self.face_triangle(triangle, color, true, true);
+                let shadow_color = self
+                    .fog_color(shaded, triangle.iter().sum::<DVec3>() / 3.)
+                    .to_array();
+                for vertex in &mut self.vertices[start..] {
+                    vertex.shadow_color = shadow_color;
+                }
+            }
+            for &triangle in &shadow.shaded {
+                let (polygon, len) = self.display.section_triangle(triangle);
+                for i in 1..len.saturating_sub(1) {
+                    self.view.for_each_triangle_depth(
+                        [polygon[0], polygon[i], polygon[i + 1]],
+                        |triangle| {
+                            for p in triangle {
+                                self.shadow_vertices.push(Vertex {
+                                    position: [
+                                        (p.x / self.size.x * 2. - 1.) as f32,
+                                        (1. - p.y / self.size.y * 2.) as f32,
+                                        (p.z.clamp(0., 1.) as f32).next_down().max(0.),
+                                    ],
+                                    color: [255; 4],
+                                    lateral: 0.,
+                                    shadow_color: [0; 4],
+                                });
+                            }
+                        },
+                    );
+                }
+            }
+        } else {
+            for &triangle in triangles {
+                self.face_triangle(triangle, color, false, true);
+            }
+            for &triangle in &shadow.lit {
+                self.face_triangle(triangle, color, true, false);
+            }
+            for &triangle in &shadow.shaded {
+                self.face_triangle(triangle, shaded, true, false);
+            }
         }
     }
     fn face_triangle(&mut self, triangle: [DVec3; 3], color: Color32, draw: bool, occlude: bool) {
@@ -672,6 +711,7 @@ impl Mesh {
                         ],
                         color,
                         lateral: 0.,
+                        shadow_color: [0; 4],
                     });
                 }
             });
@@ -711,6 +751,9 @@ impl Mesh {
                 == bytemuck::cast_slice::<Vertex, u8>(&candidate.vertices)
                 && previous.indices == candidate.indices
                 && previous.triangle_ranges == candidate.triangle_ranges
+                && previous.antialiasing == candidate.antialiasing
+                && previous.target_size == candidate.target_size
+                && previous.shadow_range == candidate.shadow_range
             {
                 return Arc::clone(previous);
             }
@@ -729,7 +772,7 @@ impl Mesh {
         // Remap only GPU depths; CPU occlusion keeps its original precision.
         let mut lo = f64::INFINITY;
         let mut hi = f64::NEG_INFINITY;
-        for vertex in &self.vertices {
+        for vertex in self.vertices.iter().chain(&self.shadow_vertices) {
             let depth = f64::from(vertex.position[2]);
             if depth > 0. && depth < 1. {
                 lo = lo.min(depth);
@@ -741,7 +784,7 @@ impl Mesh {
         }
         let center = (lo + hi) * 0.5;
         let span = (hi - lo).max(f64::EPSILON);
-        for vertex in &mut self.vertices {
+        for vertex in self.vertices.iter_mut().chain(&mut self.shadow_vertices) {
             let depth = f64::from(vertex.position[2]);
             // Depths 0 and 1 are reserved for overlays and background lines.
             if depth > 0. && depth < 1. {
@@ -776,13 +819,24 @@ impl Mesh {
             self.triangle_ranges.clear();
             self.triangle_ranges.push(0..face_end);
         }
+        let shadow_start = self.indices.len() as u32;
+        for vertex in self.shadow_vertices {
+            self.indices.push(self.vertices.len() as u32);
+            self.vertices.push(vertex);
+        }
+        let shadow_range = shadow_start..self.indices.len() as u32;
         SceneCallback {
+            shadow_range,
             vertices: self.vertices,
             indices: self.indices,
             triangle_ranges: self.triangle_ranges,
             buffer_pool: self.buffer_pool,
             gpu_pool: self.gpu_pool,
             gpu_buffers: OnceLock::new(),
+            antialiasing: self.display.shadow_antialiasing,
+            target_size: [self.size.x, self.size.y]
+                .map(|v| (v * self.pixels_per_point).round().max(1.) as u32),
+            antialiased: OnceLock::new(),
         }
     }
 }
@@ -1464,6 +1518,9 @@ struct Resources {
     face_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
     edge_depth_pipeline: wgpu::RenderPipeline,
+    mask_base: wgpu::RenderPipeline,
+    mask_shadow: wgpu::RenderPipeline,
+    shadow_faces: wgpu::RenderPipeline,
 }
 pub fn install(cc: &eframe::CreationContext<'_>) -> bool {
     let Some(state) = cc.wgpu_render_state.as_ref() else {
@@ -1486,10 +1543,28 @@ pub(crate) fn install_resources(
     let face_pipeline = create_pipeline(device, &shader, format, PipelinePass::Faces);
     let edge_pipeline = create_pipeline(device, &shader, format, PipelinePass::Edges);
     let edge_depth_pipeline = create_pipeline(device, &shader, format, PipelinePass::EdgeDepth);
+    let mask_base = create_pipeline_with_samples(
+        device,
+        &shader,
+        wgpu::TextureFormat::Rgba8Unorm,
+        PipelinePass::MaskBase,
+        4,
+    );
+    let mask_shadow = create_pipeline_with_samples(
+        device,
+        &shader,
+        wgpu::TextureFormat::Rgba8Unorm,
+        PipelinePass::MaskShadow,
+        4,
+    );
+    let shadow_faces = create_pipeline(device, &shader, format, PipelinePass::ShadowFaces);
     renderer.callback_resources.insert(Resources {
         face_pipeline,
         edge_pipeline,
         edge_depth_pipeline,
+        mask_base,
+        mask_shadow,
+        shadow_faces,
     });
 }
 #[derive(Clone, Copy, PartialEq)]
@@ -1497,6 +1572,9 @@ enum PipelinePass {
     Faces,
     EdgeDepth,
     Edges,
+    MaskBase,
+    MaskShadow,
+    ShadowFaces,
 }
 
 fn create_pipeline(
@@ -1505,11 +1583,24 @@ fn create_pipeline(
     format: wgpu::TextureFormat,
     pass: PipelinePass,
 ) -> wgpu::RenderPipeline {
+    create_pipeline_with_samples(device, shader, format, pass, 1)
+}
+
+fn create_pipeline_with_samples(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    pass: PipelinePass,
+    samples: u32,
+) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(match pass {
             PipelinePass::Faces => "KetchUp filled faces",
             PipelinePass::EdgeDepth => "KetchUp opaque edge depth",
             PipelinePass::Edges => "KetchUp antialiased edges",
+            PipelinePass::MaskBase => "KetchUp shadow receiver depth",
+            PipelinePass::MaskShadow => "KetchUp shadow coverage",
+            PipelinePass::ShadowFaces => "KetchUp faces with antialiased shadows",
         }),
         layout: None,
         vertex: wgpu::VertexState {
@@ -1522,16 +1613,18 @@ fn create_pipeline(
             buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Unorm8x4,2=>Float32],
+                attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Unorm8x4,2=>Float32,3=>Unorm8x4],
             })],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some(if pass == PipelinePass::EdgeDepth {
-                "fragment_edge_depth"
-            } else {
-                "fragment_main"
+            entry_point: Some(match pass {
+                PipelinePass::EdgeDepth => "fragment_edge_depth",
+                PipelinePass::MaskBase => "fragment_mask_base",
+                PipelinePass::MaskShadow => "fragment_mask_shadow",
+                PipelinePass::ShadowFaces => "fragment_shadow_faces",
+                _ => "fragment_main",
             }),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
@@ -1548,26 +1641,37 @@ fn create_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
             // Only opaque stroke cores contribute depth; fringes blend later.
-            depth_write_enabled: Some(pass != PipelinePass::Edges),
+            depth_write_enabled: Some(!matches!(pass, PipelinePass::Edges | PipelinePass::MaskShadow)),
             depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: Default::default(),
             // Faces retain their actual depth. Only their own boundary strips
             // follow the surface slope; unrelated hidden edges get no allowance.
             bias: Default::default(),
         }),
-        multisample: Default::default(),
+        multisample: wgpu::MultisampleState {
+            count: samples,
+            ..Default::default()
+        },
         multiview_mask: None,
         cache: None,
     })
 }
 
+struct AntialiasedScene {
+    bind_group: wgpu::BindGroup,
+}
+
 struct SceneCallback {
+    shadow_range: std::ops::Range<u32>,
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
     triangle_ranges: Vec<std::ops::Range<u32>>,
     buffer_pool: Option<BufferPool>,
     gpu_pool: GpuBufferPool,
     gpu_buffers: OnceLock<GpuBuffers>,
+    antialiasing: bool,
+    target_size: [u32; 2],
+    antialiased: OnceLock<AntialiasedScene>,
 }
 
 struct SharedScene(Arc<SceneCallback>);
@@ -1625,12 +1729,12 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         _screen: &egui_wgpu::ScreenDescriptor,
-        _encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        if resources.get::<Resources>().is_none() {
+        let Some(r) = resources.get::<Resources>() else {
             return vec![];
-        }
+        };
         // Every callback owns its buffers until egui releases it. All prepare
         // calls precede all paint calls, so a shared buffer would render only
         // the last camera in every pane. Pool allocations between frames.
@@ -1679,6 +1783,96 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
             }
             buffers
         });
+        if self.antialiasing && !self.shadow_range.is_empty() {
+            // Render once per retained scene. Each pane owns its resolve texture,
+            // so preparing another camera cannot overwrite this pane's image.
+            self.antialiased.get_or_init(|| {
+                let limit = device.limits().max_texture_dimension_2d;
+                let [width, height] = self.target_size.map(|v| v.clamp(1, limit));
+                let size = wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                };
+                let texture = |format, sample_count, usage| {
+                    device
+                        .create_texture(&wgpu::TextureDescriptor {
+                            label: Some("KetchUp antialiased shadow mask"),
+                            size,
+                            mip_level_count: 1,
+                            sample_count,
+                            dimension: wgpu::TextureDimension::D2,
+                            format,
+                            usage,
+                            view_formats: &[],
+                        })
+                        .create_view(&Default::default())
+                };
+                let color = texture(
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    4,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT,
+                );
+                let resolved = texture(
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    1,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                );
+                let depth = texture(
+                    wgpu::TextureFormat::Depth32Float,
+                    4,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT,
+                );
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("KetchUp 4x antialiasing"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &color,
+                            depth_slice: None,
+                            resolve_target: Some(&resolved),
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Discard,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &depth,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.),
+                                store: wgpu::StoreOp::Discard,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        ..Default::default()
+                    });
+                    let buffers = self.gpu_buffers.get().unwrap();
+                    pass.set_vertex_buffer(0, buffers.vertices.slice(..));
+                    pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_pipeline(&r.mask_base);
+                    for range in &self.triangle_ranges {
+                        pass.draw_indexed(range.clone(), 0, 0..1);
+                    }
+                    pass.set_pipeline(&r.mask_shadow);
+                    pass.draw_indexed(self.shadow_range.clone(), 0, 0..1);
+                }
+                let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("KetchUp resolved viewport"),
+                    layout: &r.shadow_faces.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&resolved),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&sampler),
+                        },
+                    ],
+                });
+                AntialiasedScene { bind_group }
+            });
+        }
         vec![]
     }
     fn paint(
@@ -1693,6 +1887,23 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         if self.vertices.is_empty() {
             return;
         }
+        if let Some(scene) = self.antialiased.get() {
+            pass.set_bind_group(0, &scene.bind_group, &[]);
+            self.draw(
+                pass,
+                [&r.shadow_faces, &r.edge_depth_pipeline, &r.edge_pipeline],
+            );
+        } else {
+            self.draw(
+                pass,
+                [&r.face_pipeline, &r.edge_depth_pipeline, &r.edge_pipeline],
+            );
+        }
+    }
+}
+
+impl SceneCallback {
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, pipelines: [&wgpu::RenderPipeline; 3]) {
         let Some(buffers) = self.gpu_buffers.get() else {
             return;
         };
@@ -1700,14 +1911,14 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
         // Populate depth with faces first, then test edges against that stable
         // surface depth. Grid/overlay depths keep their existing semantics.
-        pass.set_pipeline(&r.face_pipeline);
+        pass.set_pipeline(pipelines[0]);
         for range in &self.triangle_ranges {
             pass.draw_indexed(range.clone(), 0, 0..1);
         }
         // Resolve edge-to-edge occlusion before blending any colors. Otherwise
         // later strokes (including wide selection strokes) overwrite nearer
         // edges because the antialiased color pass cannot safely write depth.
-        for pipeline in [&r.edge_depth_pipeline, &r.edge_pipeline] {
+        for pipeline in [pipelines[1], pipelines[2]] {
             pass.set_pipeline(pipeline);
             let mut start = 0;
             for range in &self.triangle_ranges {
@@ -1716,8 +1927,8 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                 }
                 start = range.end;
             }
-            if start < self.indices.len() as u32 {
-                pass.draw_indexed(start..self.indices.len() as u32, 0, 0..1);
+            if start < self.shadow_range.start {
+                pass.draw_indexed(start..self.shadow_range.start, 0, 0..1);
             }
         }
     }
@@ -1927,6 +2138,270 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shadow_antialiasing_leaves_faces_strokes_and_grid_unchanged() {
+        let build = |enabled| {
+            let camera = Camera::default();
+            let mut mesh = Mesh::new(&camera, DVec2::splat(100.));
+            mesh.display.shadow_antialiasing = enabled;
+            mesh.world_triangle(&camera, [DVec3::ZERO, DVec3::X, DVec3::Z], Color32::RED);
+            mesh.line(
+                DVec3::new(8., 32., 0.5),
+                DVec3::new(56., 32., 0.5),
+                2.,
+                Color32::BLACK,
+            );
+            mesh.background_grid_line(
+                [DVec2::new(8., 32.), DVec2::new(56., 32.)],
+                [1., 1.],
+                true,
+                Color32::GRAY,
+            );
+            mesh.into_callback()
+        };
+        let enabled = build(true);
+        let disabled = build(false);
+        assert_eq!(
+            bytemuck::cast_slice::<Vertex, u8>(&enabled.vertices),
+            bytemuck::cast_slice::<Vertex, u8>(&disabled.vertices)
+        );
+        assert_eq!(enabled.indices, disabled.indices);
+        assert_eq!(enabled.triangle_ranges, disabled.triangle_ranges);
+        assert!(enabled.shadow_range.is_empty());
+        assert!(disabled.shadow_range.is_empty());
+    }
+
+    #[test]
+    fn shadow_antialiasing_preserves_receiver_silhouette() {
+        let camera = Camera::default();
+        let size = DVec2::new(1000., 800.);
+        let triangle = [
+            DVec3::new(-2., -2., 0.),
+            DVec3::new(2., -2., 0.),
+            DVec3::new(0., 2., 2.),
+        ];
+        let shadow = crate::shadows::FaceShadow {
+            lit: vec![],
+            shaded: vec![triangle],
+        };
+        let mut actual = Mesh::new(&camera, size);
+        actual.shadow_face(&[triangle], &shadow, Color32::WHITE, Color32::GRAY);
+        let mut original = Mesh::new(&camera, size);
+        original.world_triangle(&camera, triangle, Color32::WHITE);
+        assert!(!actual.vertices.is_empty());
+        assert_eq!(actual.indices, original.indices);
+        assert_eq!(actual.triangle_ranges, original.triangle_ranges);
+        for (a, b) in actual.vertices.iter().zip(&original.vertices) {
+            assert_eq!(a.position, b.position);
+            assert_eq!(a.color, b.color);
+            assert_eq!(a.shadow_color, Color32::GRAY.to_array());
+        }
+        let callback = actual.into_callback();
+        assert!(!callback.shadow_range.is_empty());
+        assert_eq!(callback.shadow_range.start, original.indices.len() as u32);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "Requires a GPU adapter; verifies only shadow pixels change through the shadow mask resolve"]
+    fn shadow_antialiasing_smooths_shadows_without_smoothing_silhouettes() {
+        use egui_wgpu::CallbackTrait;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        for format in [
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ] {
+            let mut renderer = egui_wgpu::Renderer::new(
+                &device,
+                format,
+                egui_wgpu::RendererOptions {
+                    depth_stencil_format: Some(wgpu::TextureFormat::Depth32Float),
+                    ..Default::default()
+                },
+            );
+            install_resources(&device, format, &mut renderer);
+            let screen = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [64, 64],
+                pixels_per_point: 1.,
+            };
+            let make_callback = |enabled| {
+                let mut vertices = [
+                    [-0.8, -0.8, 0.5],
+                    [0.8, -0.8, 0.5],
+                    [0.8, 0.8, 0.5],
+                    [-0.8, 0.8, 0.5],
+                ]
+                .map(|position| Vertex {
+                    position,
+                    color: [255, 0, 0, 255],
+                    lateral: 0.,
+                    shadow_color: if enabled { [0, 0, 0, 255] } else { [0; 4] },
+                })
+                .to_vec();
+                vertices.extend(
+                    [
+                        [-0.5, -0.5, 0.5_f32.next_down()],
+                        [0.6, -0.3, 0.5_f32.next_down()],
+                        [0.1, 0.6, 0.5_f32.next_down()],
+                    ]
+                    .map(|position| Vertex {
+                        position,
+                        color: [0, 0, 0, 255],
+                        lateral: 0.,
+                        shadow_color: [0; 4],
+                    }),
+                );
+                SceneCallback {
+                    vertices,
+                    indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6],
+                    triangle_ranges: vec![0..if enabled { 6 } else { 9 }],
+                    shadow_range: if enabled { 6..9 } else { 9..9 },
+                    buffer_pool: None,
+                    gpu_pool: Default::default(),
+                    gpu_buffers: OnceLock::new(),
+                    antialiasing: enabled,
+                    target_size: [64, 64],
+                    antialiased: OnceLock::new(),
+                }
+            };
+            let hard = make_callback(false);
+            let smooth = make_callback(true);
+            let other_pane = make_callback(true);
+            let texture = |format, usage| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width: 64,
+                        height: 64,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+            };
+            let color = texture(
+                format,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            );
+            let depth = texture(
+                wgpu::TextureFormat::Depth32Float,
+                wgpu::TextureUsages::RENDER_ATTACHMENT,
+            );
+            let color_view = color.create_view(&Default::default());
+            let depth_view = depth.create_view(&Default::default());
+            // Repeated frames also exercise the retained resolve texture.
+            let mut baseline_silhouette = None;
+            for callback in [&hard, &smooth, &other_pane, &smooth] {
+                let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: 256 * 64,
+                    mapped_at_creation: false,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                callback.prepare(
+                    &device,
+                    &queue,
+                    &screen,
+                    &mut encoder,
+                    &mut renderer.callback_resources,
+                );
+                {
+                    let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &color_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &depth_view,
+                            stencil_ops: None,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                        }),
+                        ..Default::default()
+                    });
+                    let viewport = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(64., 64.));
+                    callback.paint(
+                        egui::PaintCallbackInfo {
+                            viewport,
+                            clip_rect: viewport,
+                            pixels_per_point: 1.,
+                            screen_size_px: [64, 64],
+                        },
+                        &mut pass.forget_lifetime(),
+                        &renderer.callback_resources,
+                    );
+                }
+                encoder.copy_texture_to_buffer(
+                    color.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &readback,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(256),
+                            rows_per_image: None,
+                        },
+                    },
+                    wgpu::Extent3d {
+                        width: 64,
+                        height: 64,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                queue.submit([encoder.finish()]);
+                let (send, receive) = std::sync::mpsc::channel();
+                readback
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        send.send(result).unwrap();
+                    });
+                device
+                    .poll(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: Some(std::time::Duration::from_secs(30)),
+                    })
+                    .unwrap();
+                receive.recv().unwrap().unwrap();
+                let mapped = readback.slice(..).get_mapped_range().unwrap();
+                assert!(
+                    mapped.chunks_exact(4).any(|pixel| pixel[0] == 0),
+                    "shadow must render"
+                );
+                let silhouette: Vec<_> = mapped.chunks_exact(4).map(|p| p[1]).collect();
+                if let Some(baseline) = &baseline_silhouette {
+                    assert_eq!(&silhouette, baseline);
+                } else {
+                    baseline_silhouette = Some(silhouette);
+                }
+                assert_eq!(
+                    mapped
+                        .chunks_exact(4)
+                        .any(|pixel| pixel[0] > 0 && pixel[0] < 255),
+                    callback.antialiasing,
+                    "AA must resolve partial shadow coverage"
+                );
+            }
+            assert_ne!(
+                smooth.antialiased.get().unwrap().bind_group,
+                other_pane.antialiased.get().unwrap().bind_group
+            );
+        }
+    }
+
+    #[test]
     fn retained_mesh_reuses_identical_output_and_keeps_old_frames_alive() {
         let camera = Camera::default();
         let size = DVec2::new(640., 480.);
@@ -2059,6 +2534,7 @@ mod tests {
                 position: [0., 0., z],
                 color: Color32::WHITE.to_array(),
                 lateral: 0.,
+                shadow_color: [0; 4],
             })
             .collect();
         mesh.normalize_parallel_depth();
@@ -2144,12 +2620,16 @@ mod tests {
         let vertices = mesh.vertices.as_ptr();
         let indices = mesh.indices.as_ptr();
         let callback = Arc::new(SceneCallback {
+            shadow_range: mesh.indices.len() as u32..mesh.indices.len() as u32,
             vertices: mesh.vertices,
             indices: mesh.indices,
             triangle_ranges: mesh.triangle_ranges,
             buffer_pool: mesh.buffer_pool,
             gpu_pool: mesh.gpu_pool,
             gpu_buffers: OnceLock::new(),
+            antialiasing: false,
+            target_size: [64, 64],
+            antialiased: OnceLock::new(),
         });
         let retained = Arc::clone(&callback);
         drop(callback);
@@ -2187,16 +2667,21 @@ mod tests {
         install_resources(&device, wgpu::TextureFormat::Rgba8Unorm, &mut renderer);
         let gpu_pool = GpuBufferPool::default();
         let callback = || SceneCallback {
+            shadow_range: 1..1,
             vertices: vec![Vertex {
                 position: [0., 0., 0.5],
                 color: [255; 4],
                 lateral: 0.,
+                shadow_color: [0; 4],
             }],
             indices: vec![0],
             triangle_ranges: vec![],
             buffer_pool: None,
             gpu_pool: gpu_pool.clone(),
             gpu_buffers: OnceLock::new(),
+            antialiasing: false,
+            target_size: [64, 64],
+            antialiased: OnceLock::new(),
         };
         let first = callback();
         let second = callback();
@@ -2400,7 +2885,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_diagonal_selection_is_clipped_across_its_entire_footprint() {
+    fn wide_diagonal_selection_clipping_respects_depth_across_its_entire_footprint() {
         for rear_depth in [0.6, 0.3, 0.2] {
             let mut mesh = Mesh::new(&Camera::default(), DVec2::splat(100.));
             mesh.line(
@@ -2416,15 +2901,28 @@ mod tests {
                 DVec3::new(80., 80., rear_depth),
                 6.,
                 Color32::RED,
-                &[DVec2::X * 0.01],
+                &[],
             );
             assert!(mesh.indices.len() > start);
+            let mut crosses_ordinary_outline = false;
             for triangle in mesh.indices[start..].chunks_exact(3) {
                 let xs = [triangle[0], triangle[1], triangle[2]]
                     .map(|i| (f64::from(mesh.vertices[i as usize].position[0]) + 1.) * 50.);
+                let crosses =
+                    xs.iter().any(|&x| x < 48.5 - 1e-5) && xs.iter().any(|&x| x > 51.5 + 1e-5);
+                crosses_ordinary_outline |= crosses;
+                if rear_depth > 0.3 {
+                    assert!(
+                        xs.iter().all(|&x| x <= 48.5 + 1e-5)
+                            || xs.iter().all(|&x| x >= 51.5 - 1e-5),
+                        "rear selection triangle crosses the foreground stroke: {xs:?}"
+                    );
+                }
+            }
+            if rear_depth <= 0.3 {
                 assert!(
-                    xs.iter().all(|&x| x <= 48.5 + 1e-5) || xs.iter().all(|&x| x >= 51.5 - 1e-5),
-                    "selection triangle crosses the foreground stroke: {xs:?}"
+                    crosses_ordinary_outline,
+                    "visible selection was clipped at depth {rear_depth}"
                 );
             }
         }
@@ -3007,6 +3505,7 @@ mod tests {
                 let display = ketchup_core::DisplaySettings {
                     section_cuts: section,
                     section_height: 0.75,
+                    shadow_antialiasing: false,
                     fog: true,
                     ..Default::default()
                 };
