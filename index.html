@@ -33,18 +33,15 @@
       html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: var(--background); font-family: system-ui, sans-serif; }
       canvas { position: absolute; inset: 0; width: 100%; height: 100%; outline: none; }
       #loading { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; text-align: center; color: var(--ink); background: var(--background); }
-      .loading-mark { position: relative; display: grid; place-items: center; width: 112px; height: 112px; margin-bottom: 18px; perspective: 480px; }
-      .loading-logo { position: relative; width: 72px; height: 72px; border-radius: 15.75px; background: #d94836; perspective: 480px; }
-      .loading-letter { display: block; width: 100%; height: 100%; transform-origin: center; animation: loading-turn 2s linear 2s infinite; }
-      .loading-contour { position: absolute; inset: -4px; width: calc(100% + 8px); height: calc(100% + 8px); overflow: visible; fill: none; stroke: var(--ink); stroke-width: 4; stroke-linecap: round; }
-      .loading-contour rect { stroke-dasharray: 24 76; animation: loading-trace 1.3s linear infinite; }
+      #loading img { width: 72px; height: 72px; margin-bottom: 18px; }
+      .loading-progress { width: 200px; height: 4px; margin-top: 12px; overflow: hidden; border-radius: 2px; background: color-mix(in srgb, var(--ink) 15%, transparent); }
+      .loading-progress::after { content: ""; display: block; width: 40%; height: 100%; border-radius: inherit; background: var(--accent); animation: loading-progress 1.3s ease-in-out infinite; }
       #loading strong { font-size: 32px; letter-spacing: -1.5px; }
       #loading strong span { color: var(--accent); }
       #loading p { font-size: 14px; opacity: .7; max-width: 420px; line-height: 1.6; padding: 0 24px; }
-      @keyframes loading-turn { to { transform: rotateY(360deg); } }
-      @keyframes loading-trace { to { stroke-dashoffset: -100; } }
+      @keyframes loading-progress { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
       @media (prefers-reduced-motion: reduce) {
-        .loading-letter, .loading-contour rect { animation: none; }
+        .loading-progress::after { animation: none; width: 100%; }
       }
     </style>
   </head>
@@ -87,26 +84,10 @@
       })();
     </script>
     <div id="loading">
-      <div class="loading-mark" role="progressbar" aria-labelledby="loading-label">
-        <div class="loading-logo">
-          <svg class="loading-letter" viewBox="0 0 128 128" aria-hidden="true">
-            <!-- Keep the K artwork from logo.svg separate from its stationary tile. -->
-            <polygon fill="#FFE0CD" points="28,39 43,30 57,30 42,39"/>
-            <polygon fill="#F2A38B" points="42,39 57,30 57,51 42,60"/>
-            <polygon fill="#FFE0CD" points="62,39 77,30 95,30 80,39"/>
-            <polygon fill="#F2A38B" points="80,39 95,30 70,57 55,66"/>
-            <polygon fill="#FFE0CD" points="55,66 70,57 98,88 83,97"/>
-            <polygon fill="#F2A38B" points="42,73 57,64 57,88 42,97"/>
-            <polygon fill="#FFF9F2" points="28,39 42,39 42,60 62,39 80,39 55,66 83,97 64,97 42,73 42,97 28,97"/>
-          </svg>
-          <svg class="loading-contour" viewBox="0 0 128 128" aria-hidden="true">
-            <!-- Match the outer silhouette in assets/branding/logo.svg exactly. -->
-            <rect width="128" height="128" rx="28" pathLength="100" />
-          </svg>
-        </div>
-      </div>
+      <img src="assets/branding/logo.svg" alt="" width="72" height="72" />
       <strong>KetchUp<span>.</span></strong>
       <p id="loading-label" role="status">Loading KetchUp…</p>
+      <div class="loading-progress" role="progressbar" aria-labelledby="loading-label"></div>
     </div>
   </body>
 </html>
