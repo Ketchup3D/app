@@ -2235,7 +2235,7 @@ impl KetchupApp {
                         let field = ui.add_enabled(
                             available,
                             egui::TextEdit::singleline(&mut self.length_input)
-                                .desired_width(if self.tool == Tool::Rectangle { 150. } else { 106. })
+                                .desired_width(if self.tool == Tool::Rectangle { 300. } else { 212. })
                                 .font(egui::TextStyle::Monospace)
                                 .hint_text(hint)
                                 .char_limit(precision::MAX_INPUT_LEN)
