@@ -372,6 +372,7 @@ mod tests {
         assert!(app.doc.model.hidden.is_empty());
         app.undo(&ctx, false);
         assert_eq!(app.doc.model, before);
+        app.selected = BTreeSet::from([a, b]);
         app.set_selection_tag_membership(&ctx, first, true).unwrap();
         assert_eq!(app.doc.model.entity_tags.get(&a), Some(&first));
         assert_eq!(app.doc.model.entity_tags.get(&b), Some(&first));

@@ -243,7 +243,7 @@ fn short_steps_keep_the_group_width_and_cut_direction_even_when_selected_alone()
             assert!(pdf.contains("(38 mm x 30 cm)"));
             assert!(pdf.contains("(20 cm)"));
             if group_stock {
-                assert!(pdf.contains("Custom stock: 38 mm x 30 cm"));
+                assert!(pdf.contains("Material: Catalog oak"));
                 assert!(pdf.contains("- 30 cm x 20 cm"));
             }
         }
@@ -702,8 +702,8 @@ fn cut_list_sorts_by_group_then_descending_quantity_and_cut_length() {
             remaining = tail;
         }
         if group_stock {
-            for (index, length) in [70, 50, 90, 60, 80].into_iter().enumerate() {
-                assert!(pdf.contains(&format!("P{:03} x1 - 89 mm x {length} cm", index + 1)));
+            for (index, (length, quantity)) in [(70,1), (50,3), (90,2), (60,2), (80,4)].into_iter().enumerate() {
+                assert!(pdf.contains(&format!("P{:03} x{quantity} - 89 mm x {length} cm", index + 1)));
             }
         }
     }
