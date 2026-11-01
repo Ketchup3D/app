@@ -1,0 +1,7 @@
+# Geometry in metres; a complete polygon using relative vertex indices.
+o Unit_panel
+v 0 0 0
+v 1 0 0
+v 1 1 0
+v 0 1 0
+f -4 -3 -2 -1

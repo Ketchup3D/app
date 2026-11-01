@@ -45,6 +45,8 @@ pub(super) struct InspectorPreferences {
     camera: Option<CameraPreferences>,
     viewports: viewports::Preferences,
     screenshot: crate::screenshots::Settings,
+    import_format: String,
+    export_stl: bool,
     sections: std::collections::BTreeMap<String, bool>,
     scroll_positions: std::collections::BTreeMap<String, [f32; 2]>,
 }
@@ -73,6 +75,8 @@ impl Default for InspectorPreferences {
             camera: None,
             viewports: viewports::Preferences::default(),
             screenshot: Default::default(),
+            import_format: "skp".into(),
+            export_stl: false,
             sections: Default::default(),
             scroll_positions: Default::default(),
         }
@@ -352,6 +356,13 @@ impl KetchupApp {
         self.general_settings = preferences.general.clone();
         self.general_settings.normalize();
         preferences.tools.restore(self);
+        self.project.import_format =
+            if ["skp", "stl", "obj", "dxf"].contains(&preferences.import_format.as_str()) {
+                preferences.import_format.clone()
+            } else {
+                "skp".into()
+            };
+        self.project.export_stl = preferences.export_stl;
         self.time_estimates = preferences.time_estimates.clone();
         self.time_estimates.sanitize();
         self.finish_product_filters = preferences.finish_product_filters.clone();
@@ -453,6 +464,8 @@ impl KetchupApp {
             camera: Some(CameraPreferences::capture(&self.doc.camera)),
             viewports: self.viewports.capture(&self.doc.camera),
             screenshot: self.screenshot.settings.clone(),
+            import_format: self.project.import_format.clone(),
+            export_stl: self.project.export_stl,
             sections: ctx.data_mut(|data| {
                 data.get_temp_mut_or_default::<SectionMemory>(section_memory_id())
                     .0
@@ -677,6 +690,33 @@ mod preference_tests {
     struct SavedPreferences {
         values: std::collections::BTreeMap<String, String>,
         flushed: bool,
+    }
+
+    #[test]
+    fn exchange_choices_survive_reload_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        app.project.import_format = "dxf".into();
+        app.project.export_stl = true;
+        storage.flushed = false;
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        assert!(app.dirty_since.is_none());
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!(restored.project.import_format, "dxf");
+        assert!(restored.project.export_stl);
+        let old: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.import_format, "skp");
+        assert!(!old.export_stl);
+        let mut invalid = old;
+        invalid.import_format = "unsupported".into();
+        eframe::set_value(&mut storage, PREFERENCE_KEY, &invalid);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!(restored.project.import_format, "skp");
     }
 
     #[test]

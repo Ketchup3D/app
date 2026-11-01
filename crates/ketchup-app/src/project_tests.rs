@@ -459,15 +459,53 @@ fn cutting_plan_export_failure_preserves_project_selection_and_history() {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(
-        app.project
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("No visible three-dimensional parts with assigned stock materials"))
-    );
+    assert!(app.project.error.as_deref().is_some_and(|error| {
+        error.contains("No visible three-dimensional parts with assigned stock materials")
+    }));
     assert_eq!(app.doc.model, before);
     assert_eq!(app.selected, BTreeSet::from([edge]));
     assert_eq!(app.project.path, Some("original.ketchup".into()));
     assert!(app.project.modified);
     assert!(app.doc.history.undo_label().is_none());
+}
+
+#[test]
+fn exchange_formats_use_atomic_import_and_undo_redo() {
+    for (extension, bytes) in [
+        (
+            "stl",
+            include_bytes!("../tests/fixtures/triangle-mm.stl").as_slice(),
+        ),
+        ("obj", b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".as_slice()),
+        (
+            "dxf",
+            include_bytes!("../tests/fixtures/profile-mm.dxf").as_slice(),
+        ),
+    ] {
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.project.import_format = extension.into();
+        app.project.path = Some("existing.ketchup".into());
+        let before = app.doc.model.clone();
+        let imported = crate::mesh_exchange::import(bytes, extension, "Part").unwrap();
+        let result = crate::project_files::prepare_import(before.clone(), &imported);
+        deliver(&mut app, result, &ctx);
+        let after = app.doc.model.clone();
+        assert!(!app.selected.is_empty());
+        assert_eq!(app.doc.history.undo_label(), Some("Import geometry"));
+        assert_eq!(app.project.path, Some("existing.ketchup".into()));
+        app.undo(&ctx, false);
+        assert_eq!(app.doc.model, before);
+        app.undo(&ctx, true);
+        assert_eq!(app.doc.model, after);
+        let selection = app.selected.clone();
+        deliver(
+            &mut app,
+            crate::mesh_exchange::import(b"bad", extension, "Bad")
+                .and_then(|m| crate::project_files::prepare_import(after.clone(), &m)),
+            &ctx,
+        );
+        assert_eq!(app.doc.model, after);
+        assert_eq!(app.selected, selection);
+    }
 }

@@ -361,11 +361,15 @@ fn open_pdf(path: &std::path::Path) -> Result<(), String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn import(ctx: &eframe::egui::Context, model: ketchup_core::Model) -> Pending {
+pub fn import(
+    ctx: &eframe::egui::Context,
+    model: ketchup_core::Model,
+    extension: String,
+) -> Pending {
     run(ctx, move || {
         let Some(path) = rfd::FileDialog::new()
-            .set_title("Import SketchUp model")
-            .add_filter("SketchUp model", &["skp"])
+            .set_title("Import geometry (STL: mm; OBJ: metres; DXF: declared units or mm)")
+            .add_filter("Geometry", &[extension.as_str()])
             .pick_file()
         else {
             return Ok(Outcome::Cancelled);
@@ -373,31 +377,39 @@ pub fn import(ctx: &eframe::egui::Context, model: ketchup_core::Model) -> Pendin
         if std::fs::metadata(&path).map_err(|e| e.to_string())?.len()
             > crate::interchange::MAX_SKP_BYTES as u64
         {
-            return Err("SketchUp import is limited to 64 MiB per file".into());
+            return Err("Geometry import is limited to 64 MiB per file".into());
         }
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         let name = path
             .file_stem()
             .and_then(|n| n.to_str())
             .unwrap_or("SketchUp import");
-        crate::interchange::import_skp(&bytes, name)
-            .and_then(|imported| prepare_import(model, &imported))
+        (if extension == "skp" {
+            crate::interchange::import_skp(&bytes, name)
+        } else {
+            crate::mesh_exchange::import(&bytes, &extension, name)
+        })
+        .and_then(|imported| prepare_import(model, &imported))
     })
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn import(ctx: &eframe::egui::Context, model: ketchup_core::Model) -> Pending {
+pub fn import(
+    ctx: &eframe::egui::Context,
+    model: ketchup_core::Model,
+    extension: String,
+) -> Pending {
     let (sender, receiver) = mpsc::channel();
     let ctx = ctx.clone();
     wasm_bindgen_futures::spawn_local(async move {
         let result = if let Some(file) = rfd::AsyncFileDialog::new()
-            .set_title("Import SketchUp model")
-            .add_filter("SketchUp model", &["skp"])
+            .set_title("Import geometry (STL: mm; OBJ: metres; DXF: declared units or mm)")
+            .add_filter("Geometry", &[extension.as_str()])
             .pick_file()
             .await
         {
             if file.inner().size() > crate::interchange::MAX_SKP_BYTES as f64 {
-                Err("SketchUp import is limited to 64 MiB per file".into())
+                Err("Geometry import is limited to 64 MiB per file".into())
             } else {
                 match wasm_bindgen_futures::JsFuture::from(file.inner().array_buffer()).await {
                     Ok(buffer) => {
@@ -406,14 +418,22 @@ pub fn import(ctx: &eframe::egui::Context, model: ketchup_core::Model) -> Pendin
                             .file_stem()
                             .and_then(|n| n.to_str())
                             .unwrap_or("SketchUp import");
-                        crate::interchange::import_skp_async(
-                            &js_sys::Uint8Array::new(&buffer).to_vec(),
-                            name,
-                        )
-                        .await
+                        (if extension == "skp" {
+                            crate::interchange::import_skp_async(
+                                &js_sys::Uint8Array::new(&buffer).to_vec(),
+                                name,
+                            )
+                            .await
+                        } else {
+                            crate::mesh_exchange::import(
+                                &js_sys::Uint8Array::new(&buffer).to_vec(),
+                                &extension,
+                                name,
+                            )
+                        })
                         .and_then(|imported| prepare_import(model, &imported))
                     }
-                    Err(_) => Err("The browser could not read this SketchUp file".into()),
+                    Err(_) => Err("The browser could not read this geometry file".into()),
                 }
             }
         } else {
@@ -426,30 +446,35 @@ pub fn import(ctx: &eframe::egui::Context, model: ketchup_core::Model) -> Pendin
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn export(ctx: &eframe::egui::Context, name: String, contents: String) -> Pending {
+pub fn export(ctx: &eframe::egui::Context, name: String, contents: Vec<u8>, stl: bool) -> Pending {
     run(ctx, move || {
+        let extension = if stl { "stl" } else { "obj" };
         let Some(path) = rfd::FileDialog::new()
-            .set_title("Export Wavefront OBJ")
-            .add_filter("Wavefront OBJ", &["obj"])
-            .set_file_name(exchange_name(&name, "obj"))
+            .set_title("Export geometry")
+            .add_filter("Geometry", &[extension])
+            .set_file_name(exchange_name(&name, extension))
             .save_file()
         else {
             return Ok(Outcome::Cancelled);
         };
-        write(&extension_path(path, "obj")?, contents.as_bytes())?;
+        write(&extension_path(path, extension)?, &contents)?;
         Ok(Outcome::Exported)
     })
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn export(ctx: &eframe::egui::Context, name: String, contents: String) -> Pending {
+pub fn export(ctx: &eframe::egui::Context, name: String, contents: Vec<u8>, stl: bool) -> Pending {
     let (sender, receiver) = mpsc::channel();
-    let result = download(&exchange_name(&name, "obj"), &contents)
-        .map(|_| Outcome::Exported)
-        .map_err(|e| {
-            e.as_string()
-                .unwrap_or_else(|| "The browser could not download this OBJ file".into())
-        });
+    let result = download_bytes(
+        &exchange_name(&name, if stl { "stl" } else { "obj" }),
+        &contents,
+        "application/octet-stream",
+    )
+    .map(|_| Outcome::Exported)
+    .map_err(|e| {
+        e.as_string()
+            .unwrap_or_else(|| "The browser could not download this OBJ file".into())
+    });
     let _ = sender.send(result);
     ctx.request_repaint();
     receiver

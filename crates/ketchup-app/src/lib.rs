@@ -7,6 +7,7 @@ mod estimate_pdf;
 mod icons;
 mod inspector_table;
 mod interchange;
+mod mesh_exchange;
 mod modal;
 mod picking;
 mod project_files;

@@ -1965,19 +1965,29 @@ impl KetchupApp {
                             }
                             ui.separator();
                             ui.menu_button("Import", |ui| {
-                                if ui.button("Import SketchUp (.skp)…")
-                                    .on_hover_text("Add SketchUp geometry as editable groups. Keeps placement, face holes, and solid colors. Textures and annotations are omitted. Maximum file size: 64 MiB.")
-                                    .clicked() {
-                                    self.import_model(&ctx);
-                                    ui.close();
+                                for (extension, label, help) in [
+                                    ("skp", "SketchUp (.skp)…", "Editable groups, holes and solid colors. No textures or annotations."),
+                                    ("stl", "STL (.stl; millimetres)…", "ASCII or binary. Geometry only; coordinates interpreted as millimetres, Z up."),
+                                    ("obj", "Wavefront OBJ (.obj; metres)…", "Faces and lines, including negative vertex indices. Metres, Z up. No materials, textures or group hierarchy."),
+                                    ("dxf", "DXF 2D (.dxf)…", "Text DXF: LINE, straight LWPOLYLINE, ARC and CIRCLE in XY. Curves approximated with up to 96 segments per circle. No blocks, bulges or widths. Declared units; unitless files use millimetres."),
+                                ] {
+                                    if ui.selectable_label(self.project.import_format == extension, label).on_hover_text(help).clicked() && !self.project.blocked() {
+                                        self.project.import_format = extension.into();
+                                        self.import_model(&ctx);
+                                        ui.close();
+                                    }
                                 }
                             });
                             ui.menu_button("Export", |ui| {
-                                if ui.button("Export Wavefront OBJ (.obj)…")
-                                    .on_hover_text("Export visible edges and triangulated faces in metres, with Z up.")
-                                    .clicked() {
-                                    self.export_model(&ctx);
-                                    ui.close();
+                                for (stl, label, help) in [
+                                    (false, "Wavefront OBJ (.obj)…", "Visible edges and triangulated faces in metres, Z up. Geometry only."),
+                                    (true, "STL (.stl; millimetres)…", "Binary STL of visible faces in millimetres, Z up. No edges or materials. Ensure solids are closed before printing; no automatic repair."),
+                                ] {
+                                    if ui.selectable_label(self.project.export_stl == stl, label).on_hover_text(help).clicked() && !self.project.blocked() {
+                                        self.project.export_stl = stl;
+                                        self.export_model(&ctx);
+                                        ui.close();
+                                    }
                                 }
                             });
                             ui.separator();

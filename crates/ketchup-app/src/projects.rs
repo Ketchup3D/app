@@ -23,6 +23,8 @@ pub(super) enum Operation {
 
 pub(super) struct Project {
     pub path: Option<PathBuf>,
+    pub import_format: String,
+    pub export_stl: bool,
     pub modified: bool,
     pub pending: Option<project_files::Pending>,
     pub operation: Operation,
@@ -38,6 +40,8 @@ impl Default for Project {
     fn default() -> Self {
         Self {
             path: None,
+            import_format: "skp".into(),
+            export_stl: false,
             modified: false,
             pending: None,
             operation: Operation::default(),
@@ -140,18 +144,30 @@ impl KetchupApp {
             return;
         }
         self.project.operation = Operation::Import;
-        self.project.pending = Some(project_files::import(ctx, self.doc.model.clone()));
+        self.project.pending = Some(project_files::import(
+            ctx,
+            self.doc.model.clone(),
+            self.project.import_format.clone(),
+        ));
     }
 
     pub(super) fn export_model(&mut self, ctx: &egui::Context) {
         if self.project.blocked() {
             return;
         }
-        match crate::interchange::export_obj(&self.doc.model) {
+        match if self.project.export_stl {
+            crate::mesh_exchange::export_stl(&self.doc.model)
+        } else {
+            crate::interchange::export_obj(&self.doc.model).map(String::into_bytes)
+        } {
             Ok(contents) => {
                 self.project.operation = Operation::Export;
-                self.project.pending =
-                    Some(project_files::export(ctx, self.doc.name.clone(), contents));
+                self.project.pending = Some(project_files::export(
+                    ctx,
+                    self.doc.name.clone(),
+                    contents,
+                    self.project.export_stl,
+                ));
             }
             Err(error) => self.project.error = Some(error),
         }
@@ -265,9 +281,17 @@ impl KetchupApp {
                 let before = std::mem::replace(&mut self.doc.model, *model);
                 self.set_tool(Tool::Select);
                 self.selected = selected;
-                self.finish_edit("Import SketchUp", before, ctx);
+                self.finish_edit(
+                    if self.project.import_format == "skp" {
+                        "Import SketchUp"
+                    } else {
+                        "Import geometry"
+                    },
+                    before,
+                    ctx,
+                );
                 self.fit(ctx);
-                self.say(ctx, "SketchUp geometry imported as editable groups");
+                self.say(ctx, "Geometry imported as editable groups");
             }
             Ok(Outcome::Exported) => self.say(
                 ctx,
@@ -276,8 +300,8 @@ impl KetchupApp {
                     (Operation::CuttingPlan, false) => "Cutting plan PDF saved and opened",
                     (Operation::Screenshot, true) => "Screenshot download started",
                     (Operation::Screenshot, false) => "Screenshot exported",
-                    (_, true) => "OBJ download started",
-                    (_, false) => "OBJ exported",
+                    (_, true) => "Geometry download started",
+                    (_, false) => "Geometry exported",
                 },
             ),
             Ok(Outcome::Cancelled) => self.project.after_save = None,
@@ -344,8 +368,8 @@ impl KetchupApp {
                             ui.label(match self.project.operation {
                                 Operation::Open => "Opening project…",
                                 Operation::Save => "Saving project…",
-                                Operation::Import => "Importing SketchUp model…",
-                                Operation::Export => "Exporting OBJ…",
+                                Operation::Import => "Importing geometry…",
+                                Operation::Export => "Exporting geometry…",
                                 Operation::CuttingPlan => "Preparing cutting plan PDF…",
                                 Operation::Screenshot => "Exporting screenshot…",
                             });
