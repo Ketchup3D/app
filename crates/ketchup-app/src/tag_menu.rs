@@ -84,6 +84,10 @@ impl KetchupApp {
         }
         let can_assign =
             !self.selected.is_empty() && !self.doc.model.selection_protected(&self.selected);
+        if tags.is_empty() {
+            crate::empty_state::EmptyState::new("No tags yet",
+                "Create a tag above to organize objects and control their visibility.").show(ui);
+        }
         if !tags.is_empty() {
             ui.add_space(6.);
             let scroll = sidebar::restored_scroll_area(

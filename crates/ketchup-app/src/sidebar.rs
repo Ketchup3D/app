@@ -4008,8 +4008,8 @@ impl KetchupApp {
             }
         }
         if definitions.is_empty() {
-            ui.text_label(RichText::new("No components yet").color(Palette::for_ui(ui).muted));
-            ui.text_label("Select geometry and choose Make Component from the context menu.");
+            crate::empty_state::EmptyState::new("No components yet",
+                "Select geometry and choose Create Component from the Edit menu.").show(ui);
         } else {
             ui.add(
                 egui::TextEdit::singleline(&mut self.component_filter)
@@ -4027,9 +4027,8 @@ impl KetchupApp {
                     .then(a.0.cmp(&b.0))
             });
             if rows.is_empty() {
-                ui.text_label(
-                    RichText::new("No matching components").color(Palette::for_ui(ui).muted),
-                );
+                crate::empty_state::EmptyState::new("No matching components",
+                    "Try another name or clear the search to see all components.").show(ui);
             }
             for (id, name, count) in rows {
                 ui.push_id(id, |ui| {
@@ -4321,8 +4320,7 @@ impl KetchupApp {
 
 impl KetchupApp {
     fn history_contents(&mut self, ui: &mut egui::Ui) {
-        ui.text_label("Hover to preview an edit. Click to restore that state.");
-        ui.weak("Up to 100 edits are saved with this project. Editing an earlier state replaces later edits.");
+
         let current = self.doc.history.position();
         let labels: Vec<String> = self.doc.history.attributed_labels().map(|(label, author, timestamp)| {
             let who = author.map(|a| format!("{} ({})", a.name, if a.kind == "guest" { "Guest" } else if a.verified { "Server-verified account" } else { "Unverified" })).unwrap_or_else(|| "Unknown author".into());
@@ -4330,9 +4328,12 @@ impl KetchupApp {
             format!("{label} · {who}{when}")
         }).collect();
         if labels.is_empty() {
-            ui.weak("No modifications yet.");
+            crate::empty_state::EmptyState::new("No modifications yet.",
+                "Changes to your project will appear here. Make an edit to start its history.").show(ui);
             return;
         }
+        ui.text_label("Hover to preview an edit. Click to restore that state.");
+        ui.weak("Up to 100 edits are saved with this project. Editing an earlier state replaces later edits.");
         let latest = labels.len();
         let mut target = None;
         let mut preview = None;

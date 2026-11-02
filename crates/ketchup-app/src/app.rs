@@ -2188,14 +2188,12 @@ impl KetchupApp {
                         });
                         Self::app_bar_menu(ui, "Generate", |ui| {
                             ui.visuals_mut().override_text_color = Some(colors.ink);
-                            ui.menu_button("Woodworking", |ui| {
-                                if ui.add_enabled(!self.project.blocked(), egui::Button::new("Prepare cutting plan…"))
-                                    .on_hover_text("Summarize matching parts and export finished cutting dimensions for the selection or whole project.")
-                                    .clicked() {
-                                    self.prepare_cutting_plan();
-                                    ui.close();
-                                }
-                            });
+                            if ui.add_enabled(!self.project.blocked(), egui::Button::new("Prepare cutting plan…"))
+                                .on_hover_text("Summarize matching parts and export finished cutting dimensions for the selection or whole project.")
+                                .clicked() {
+                                self.prepare_cutting_plan();
+                                ui.close();
+                            }
                             if ui.add_enabled(!self.project.blocked(), egui::Button::new("Screenshot")).clicked() {
                                 self.screenshot.open = true;
                                 ui.close();
@@ -2713,13 +2711,8 @@ impl KetchupApp {
             .filter(|id| self.doc.model.objects.contains_key(id))
             .collect();
         if objects.is_empty() {
-            ui.text_label(
-                RichText::new(
-                    "Select a group or component to edit its material, sanding, and finishing.",
-                )
-                .small()
-                .color(Palette::for_ui(ui).muted),
-            );
+            crate::empty_state::EmptyState::new("No objects selected",
+                "Select a group or component to edit its material, sanding, and finishing.").show(ui);
             return;
         }
         let first = self.doc.model.objects[&objects[0]].stock_material_id;
@@ -2787,7 +2780,6 @@ impl KetchupApp {
     }
 
     fn entity_info_contents(&mut self, ui: &mut egui::Ui) {
-        let colors = Palette::for_ui(ui);
         if !self.selected.is_empty()
             && let Some(size) = self
                 .solid_volume_cache
@@ -2862,17 +2854,8 @@ impl KetchupApp {
             ui.add_space(8.);
         }
         if self.selected.is_empty() {
-            ui.text_label(
-                RichText::new("Nothing selected")
-                    .strong()
-                    .color(colors.muted),
-            );
-            ui.text_label(
-                RichText::new("Select an entity to see its details.")
-                    .small()
-                    .color(colors.muted),
-            );
-            ui.add_space(4.);
+            crate::empty_state::EmptyState::new("Nothing selected",
+                "Select an entity to see its details.").show(ui);
         } else {
             self.face_cache.update(&self.doc.model);
             let entities = self.doc.model.expand_entities(&self.selected);

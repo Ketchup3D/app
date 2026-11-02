@@ -4970,7 +4970,7 @@ fn view_sidebar_buttons_set_projection_and_all_standard_views_without_resizing()
 }
 
 #[test]
-fn generate_menu_is_next_to_edit_and_woodworking_opens_cancellable_scope_dialog() {
+fn generate_menu_opens_cutting_plan_scope_dialog_directly() {
     let mut h = Harness::new();
     let output = h.frame(vec![], egui::Modifiers::NONE);
     let edit = text_position(&output, "Edit");
@@ -4978,8 +4978,6 @@ fn generate_menu_is_next_to_edit_and_woodworking_opens_cancellable_scope_dialog(
     let help = text_position(&output, "Help");
     assert!(edit.x < generate.x && generate.x < help.x);
     h.click(generate);
-    let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(text_position(&output, "Woodworking"));
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&output, "Prepare cutting plan…"));
     assert_eq!(h.app.project.cutting_plan_selection, Some(false));

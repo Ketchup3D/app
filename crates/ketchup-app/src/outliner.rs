@@ -55,6 +55,19 @@ pub(in crate::app) struct OutlinerCache {
     summary_builds: usize,
 }
 
+// Empty tree nodes stay compact; whole empty panels use EmptyState.
+fn empty_outliner_label(ui: &mut egui::Ui, icon: &str, label: &str) {
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(10, 0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(18., 18.), Sense::hover());
+                icons::line_icon(ui.painter(), rect.center(), icon, Palette::for_ui(ui).muted);
+                ui.text_weak(label);
+            });
+        });
+}
+
 impl OutlinerCache {
     fn update(&mut self, model: &Model, revision: u64, query: &str) {
         let changed = self.revision != Some(revision);
@@ -245,17 +258,6 @@ fn matching_outliner_objects(model: &Model, query: &str) -> Option<BTreeSet<u64>
     Some(visible)
 }
 
-fn empty_outliner_label(ui: &mut egui::Ui, icon: &str, label: &str) {
-    egui::Frame::NONE
-        .inner_margin(egui::Margin::symmetric(10, 0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(18., 18.), Sense::hover());
-                icons::line_icon(ui.painter(), rect.center(), icon, Palette::for_ui(ui).muted);
-                ui.text_weak(label);
-            });
-        });
-}
 
 impl Outliner<'_> {
     fn row(&mut self, ui: &mut egui::Ui, id: u64) -> egui::Response {
@@ -1447,12 +1449,12 @@ impl KetchupApp {
             .update(&self.doc.model, revision, &self.outliner_filter);
         let roots = &self.outliner_cache.roots;
         if roots.is_empty() {
-            empty_outliner_label(ui, "geometry", "No objects or geometry yet");
+            crate::empty_state::EmptyState::new("No objects or geometry yet", "Draw geometry or import a model to see its objects here.").show(ui);
             return;
         }
         let filtered_objects = &self.outliner_cache.filtered_objects;
         if filtered_objects.as_ref().is_some_and(BTreeSet::is_empty) {
-            empty_outliner_label(ui, "outliner", "No matching objects");
+            crate::empty_state::EmptyState::new("No matching objects", "Try another name or clear the search to see all objects.").show(ui);
             return;
         }
         self.entity_cache.update(&self.doc.model);

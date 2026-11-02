@@ -1233,6 +1233,13 @@ impl KetchupApp {
             &self.selected,
             &self.general_settings.stock,
         );
+        if self.doc.model.edges.is_empty() && self.doc.model.faces.is_empty()
+            && self.doc.model.objects.is_empty()
+        {
+            crate::empty_state::EmptyState::new("No estimates yet",
+                "Draw or import objects, then assign materials to estimate time and cost.").show(ui);
+            return;
+        }
         let tasks = object_tasks(
             &self.doc.model,
             &self.estimate_cache.area.as_ref().unwrap().1,
@@ -1376,13 +1383,12 @@ impl KetchupApp {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 if area <= 0. {
-                    ui.text_label(if self.selected.is_empty() {
-                        "No visible surfaces with assigned wood materials."
-                    } else {
-                        "Select faces or groups with assigned wood materials."
-                    });
+                    crate::empty_state::EmptyState::new("No surfaces to estimate",
+                        if self.selected.is_empty() { "No visible surfaces with assigned wood materials." }
+                        else { "Select faces or groups with assigned wood materials." }).show(ui);
                 } else if tasks.is_empty() {
-                    ui.text_label("Choose sanding grits or finishes for objects in Materials.");
+                    crate::empty_state::EmptyState::new("No finishing tasks",
+                        "Choose sanding grits or finishes for objects in Materials.").show(ui);
                 } else {
                     ui.text_label(
                         RichText::new("Sequential total")
