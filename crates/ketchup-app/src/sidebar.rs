@@ -991,6 +991,7 @@ mod preference_tests {
         let mut app = KetchupApp::with_document(Document::default(), None, true);
         app.persist_inspector_changes(&ctx, Some(&mut storage), false);
         app.doc.display.section_axes = [true, true, false];
+        app.doc.display.section_planes = true;
         app.doc.display.section_offsets = [-3.5, 8.25];
         app.doc.display.section_height = 9.;
         app.doc.display.section_cuts = true;
@@ -999,6 +1000,7 @@ mod preference_tests {
         let mut restored = KetchupApp::with_document(Document::default(), None, true);
         restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
         assert_eq!(restored.doc.display.section_axes, [true, true, false]);
+        assert!(restored.doc.display.section_planes);
         assert_eq!(restored.doc.display.section_offsets, [-3.5, 8.25]);
         assert_eq!(restored.doc.display.section_height, 9.);
         assert!(restored.doc.display.section_cuts);
@@ -1619,6 +1621,28 @@ mod preference_tests {
         }
         let old: DisplaySettings = serde_json::from_str("{}").unwrap();
         assert!(old.group_emphasis);
+    }
+
+    #[test]
+    fn group_names_save_without_model_edits_and_default_off() {
+        let old: DisplaySettings = serde_json::from_str("{}").unwrap();
+        assert!(!old.group_names);
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        for enabled in [true, false] {
+            app.doc.display.group_names = enabled;
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.doc.display.group_names, enabled);
+            restored.new_model(&ctx);
+            assert_eq!(restored.doc.display.group_names, enabled);
+        }
     }
 
     #[test]
@@ -4255,8 +4279,14 @@ impl KetchupApp {
         let d = &mut self.doc.display;
         for (value, label) in [
             (&mut d.axes, "Axes"),
-            (&mut d.guides, "Guides"),
             (&mut d.grid, "Grid"),
+            (&mut d.guides, "Guides"),
+        ] {
+            Self::menu_checkbox(ui, value, label);
+        }
+        ui.separator();
+        for (value, label) in [
+            (&mut d.group_names, "Group names"),
             (&mut d.dimensions, "Dimensions"),
         ] {
             Self::menu_checkbox(ui, value, label);

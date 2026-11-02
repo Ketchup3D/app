@@ -346,7 +346,38 @@ option!(option_profiles, "profiles", "Profiles");
 option!(option_depth_cue, "depth_cue", "Depth cue");
 option!(option_endpoints, "endpoints", "Endpoints");
 option!(option_extensions, "extensions", "Extensions");
-option!(option_section_planes, "section_planes", "Section planes");
+#[test]
+fn section_axes_control_plane_visibility() {
+    fn has_plane_control(shape: &egui::Shape) -> bool {
+        match shape {
+            egui::Shape::Text(text) => text.galley.job.text == "Section planes",
+            egui::Shape::Vec(shapes) => shapes.iter().any(has_plane_control),
+            _ => false,
+        }
+    }
+    let mut h = options_workspace();
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "Sections"));
+    for (label, axes) in [
+        ("Z · horizontal", [false, false, false]),
+        ("X · vertical", [true, false, false]),
+        ("Y · vertical", [true, true, false]),
+        ("X · vertical", [false, true, false]),
+        ("Y · vertical", [false, false, false]),
+    ] {
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        assert!(!output
+            .shapes
+            .iter()
+            .any(|shape| has_plane_control(&shape.shape)));
+        h.click(text_position(&output, label));
+        assert_eq!(h.app.doc.display.section_axes, axes);
+        assert_eq!(
+            h.app.doc.display.section_planes,
+            axes.iter().any(|&axis| axis)
+        );
+    }
+}
 option!(option_section_cuts, "section_cuts", "Section cuts");
 option!(option_section_fill, "section_fill", "Section fill");
 option!(option_shadows, "shadows", "Display shadows");
@@ -881,14 +912,13 @@ fn paint_target_buttons_apply_to_a_face_or_whole_group_with_one_undo_step() {
     assert_eq!(h.app.hover, Some(group));
     h.click(at);
     assert_eq!(h.app.doc.model.face_colors.len(), 6);
-    assert!(
-        h.app
-            .doc
-            .model
-            .face_colors
-            .values()
-            .all(|color| *color == h.app.paint_color)
-    );
+    assert!(h
+        .app
+        .doc
+        .model
+        .face_colors
+        .values()
+        .all(|color| *color == h.app.paint_color));
     assert_eq!(h.app.doc.history.undo_label(), Some("Paint group"));
     let painted = h.app.doc.model.clone();
     h.app.undo(&h.ctx, false);

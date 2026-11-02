@@ -260,7 +260,6 @@ impl KetchupApp {
                 Self::menu_style(ui.style_mut());
                 ui.set_width(208.);
                 let d = &mut self.doc.display;
-                Self::menu_checkbox(ui, &mut d.section_planes, "Section planes");
                 Self::menu_checkbox(ui, &mut d.section_cuts, "Section cuts");
                 Self::menu_checkbox(ui, &mut d.section_fill, "Section fill");
                 ui.separator();
@@ -279,10 +278,16 @@ impl KetchupApp {
                         {
                             table.row(ui, ("section_axis", axis), |column, cell| {
                                 if column == 0 {
-                                    cell.checkbox(&mut d.section_axes[axis], label)
+                                    if cell
+                                        .checkbox(&mut d.section_axes[axis], label)
                                         .on_hover_text(
                                             "Keeps geometry on the negative side of this axis.",
-                                        );
+                                        )
+                                        .changed()
+                                    {
+                                        d.section_planes =
+                                            d.section_axes.iter().any(|&enabled| enabled);
+                                    }
                                 } else {
                                     let offset = if axis == 2 {
                                         &mut d.section_height

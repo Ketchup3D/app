@@ -54,6 +54,8 @@ pub struct DisplaySettings {
     pub hidden_geometry: bool,
     pub hidden_objects: bool,
     pub group_emphasis: bool,
+    /// Show group names at their projected bounds centers.
+    pub group_names: bool,
     pub face_style: FaceStyle,
     pub x_ray: bool,
     pub edges: bool,
@@ -107,6 +109,7 @@ impl Default for DisplaySettings {
             hidden_geometry: false,
             hidden_objects: false,
             group_emphasis: true,
+            group_names: false,
             face_style: FaceStyle::Materials,
             x_ray: false,
             edges: true,

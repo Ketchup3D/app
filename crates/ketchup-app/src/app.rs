@@ -4323,6 +4323,39 @@ impl KetchupApp {
         self.paint_fasteners(&p,rect,model);
         self.paint_joinery(&p, rect);
         let screen = |point: DVec3| view.project(point).map(|v| rect.min + pv(v));
+        if display.group_names {
+            for object in model.objects.values().filter(|object| {
+                matches!(object.kind, ketchup_core::ObjectKind::Group)
+                    && model.parent(object.id) == model.edit_context
+                    && !object.name.trim().is_empty()
+                    && entities.get(object.id).displayed(display)
+            }) {
+                let vertices = model.selection_vertices(&object.entities);
+                let mut bounds: Option<(DVec3, DVec3)> = None;
+                for id in vertices {
+                    if let Some(vertex) = model.vertices.get(&id) {
+                        let point = vertex.position;
+                        bounds = Some(bounds.map_or((point, point), |(lo, hi)| {
+                            (lo.min(point), hi.max(point))
+                        }));
+                    }
+                }
+                if let Some(position) = bounds.and_then(|(lo, hi)| screen((lo + hi) * 0.5)) {
+                    if rect.contains(position) {
+                        let is_selected = selected.contains(&object.id);
+                        let foreground = if is_selected { Color32::WHITE } else { colors.ink };
+                        let background = if is_selected { ACCENT } else { colors.paper };
+                        let galley = p.layout_no_wrap(
+                            object.name.clone(), egui::FontId::proportional(13.), foreground,
+                        );
+                        let label = egui::Rect::from_center_size(position, galley.size());
+                        p.rect_filled(label.expand2(egui::vec2(5., 3.)), 3., background);
+                        p.galley(label.min, galley, foreground);
+                    }
+                }
+            }
+        }
+
         if let Some((lo, hi)) = self.face_cache.context_bounds(model, entities) {
             let padding = ((hi - lo).max_element() * 0.04).max(0.05);
             let lo = lo - DVec3::splat(padding);
