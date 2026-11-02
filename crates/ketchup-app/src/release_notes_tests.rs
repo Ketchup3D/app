@@ -33,7 +33,7 @@ fn navigating_release_notes_resizes_the_modal_in_both_directions() {
         text_position(&output, release["title"].as_str().unwrap());
         let rect = bounds(&h);
         assert!(
-            modal_position(&h.ctx, "release_notes").is_none(),
+            crate::modal::modal_position(&h.ctx, egui::Id::unique("release_notes")).is_none(),
             "Navigation must not count as dragging the dialog"
         );
         assert!(

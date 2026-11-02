@@ -13,7 +13,7 @@ struct OpenModalPosition {
     position: Option<egui::Pos2>,
 }
 
-fn modal_position(ctx: &egui::Context, id: egui::Id) -> Option<egui::Pos2> {
+pub(crate) fn modal_position(ctx: &egui::Context, id: egui::Id) -> Option<egui::Pos2> {
     let frame = ctx.cumulative_frame_nr();
     ctx.data_mut(|data| {
         let state = data.get_temp_mut_or_default::<OpenModalPosition>(id.with("open_position"));

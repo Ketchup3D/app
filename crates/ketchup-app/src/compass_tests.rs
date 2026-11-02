@@ -1,4 +1,5 @@
 use super::*;
+use ketchup_core::Projection;
 
 #[test]
 fn compass_shift_matches_orbit_pan_and_can_toggle_during_drag() {
