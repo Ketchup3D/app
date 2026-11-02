@@ -13,6 +13,12 @@ pub(super) struct Measurement {
 impl KetchupApp {
     pub(super) fn measurement_plane(&self) -> Option<(DVec3, DVec3)> {
         let m = self.measurement.as_ref()?;
+        if self.tool == Tool::Text && !m.points.is_empty() {
+            return Some((
+                m.points[0],
+                (self.doc.camera.target - self.doc.camera.eye()).normalize(),
+            ));
+        }
         (self.tool == Tool::Protractor && m.points.len() == 2).then(|| (m.points[0], m.normal))
     }
 

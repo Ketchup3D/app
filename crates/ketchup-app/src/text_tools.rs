@@ -12,48 +12,56 @@ pub(super) struct TextEditor {
 impl KetchupApp {
     pub(super) fn update_text_pointer(&mut self, pos: Pos2) {
         self.prepare_picking();
-        if let Some(m) = self.measurement.as_mut().filter(|m| !m.points.is_empty()) {
-            // Place on a camera-facing plane through the attachment. The stored
-            // offset stays in model space while the glyphs always face the view.
-            let point = m.points[0];
-            let normal = (self.doc.camera.target - self.doc.camera.eye()).normalize();
-            let ray = self
-                .doc
-                .camera
-                .ray(dv(pos - self.viewport.min), dv(self.viewport.size()));
-            let denominator = ray.direction.dot(normal);
-            if let Some(axis) = self.lock {
-                // Keep label placement on the chosen world axis through its
-                // attachment. The attachment itself remains on the geometry.
-                let direction = axis.vector();
-                m.offset = direction * m.offset.dot(direction);
-                if let Some(target) = ray.axis(point, direction) {
-                    m.offset = target - point;
-                }
-            } else if denominator.abs() > 1e-8 {
-                let t = (point - ray.origin).dot(normal) / denominator;
-                if t > 0. {
-                    m.offset = ray.origin + ray.direction * t - point;
+        let start = self
+            .measurement
+            .as_ref()
+            .and_then(|m| m.points.first().copied());
+        self.snap = self.infer_snap(pos, start, self.lock, self.doc.snap_to_axes);
+        if let Some(point) = start {
+            // Keep free label placement on a camera-facing plane, while allowing
+            // geometry, axis locks, reference inference, and grid snapping.
+            if self.lock.is_none() && self.snap.is_none_or(|snap| snap.kind == Inference::Plane) {
+                let normal = (self.doc.camera.target - self.doc.camera.eye()).normalize();
+                let ray = self
+                    .doc
+                    .camera
+                    .ray(dv(pos - self.viewport.min), dv(self.viewport.size()));
+                let denominator = ray.direction.dot(normal);
+                if denominator.abs() > 1e-8 {
+                    let t = (point - ray.origin).dot(normal) / denominator;
+                    if t > 0. {
+                        self.snap = Some(Snap {
+                            point: ray.origin + ray.direction * t,
+                            kind: Inference::Plane,
+                        });
+                    }
                 }
             }
-            self.snap = None;
+            self.update_drawing_inference(pos);
+            self.apply_grid_snap();
+            if let Some(snap) = self.snap {
+                self.measurement.as_mut().unwrap().offset = snap.point - point;
+            }
         } else {
-            self.snap = ketchup_core::inference::infer_with_targets(
-                &self.doc.model,
-                &self.doc.camera,
-                dv(self.viewport.size()),
-                dv(pos - self.viewport.min),
-                None,
-                None,
-                true,
-                false,
-                Some(
-                    &self
-                        .picking_cache
-                        .snap_query(&self.face_cache, &self.entity_cache),
-                ),
-                self.snap_targets(),
-            );
+            // Text must still attach to geometry when geometry snapping is off.
+            if !self.doc.snap_to_geometry {
+                self.snap = ketchup_core::inference::infer_with_targets(
+                    &self.doc.model,
+                    &self.doc.camera,
+                    dv(self.viewport.size()),
+                    dv(pos - self.viewport.min),
+                    None,
+                    None,
+                    true,
+                    false,
+                    Some(
+                        &self
+                            .picking_cache
+                            .snap_query(&self.face_cache, &self.entity_cache),
+                    ),
+                    self.snap_targets(),
+                );
+            }
             // Leader text starts on geometry, not on the drawing plane.
             if self
                 .snap

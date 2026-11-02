@@ -4514,8 +4514,10 @@ impl KetchupApp {
             && self.paste_preview.is_none()
             && !self.navigating()
             && p.ctx().input(|i| i.pointer.hover_pos()).is_some_and(|pos| rect.contains(pos));
-        if self.tool.is_drawing() || move_anchor {
-            if let Some(start) = self.line_start.or(self.drawing.as_ref().map(|d| d.origin)).filter(|_| !move_anchor) {
+        if self.tool.is_drawing() || self.tool == Tool::Text || move_anchor {
+            if let Some(start) = self.line_start.or(self.drawing.as_ref().map(|d| d.origin)).or_else(|| {
+                (self.tool == Tool::Text).then(|| self.measurement.as_ref()?.points.first().copied()).flatten()
+            }).filter(|_| !move_anchor) {
                 if let Some(point) = screen(start) {
                     p.circle_filled(point, 3.5, colors.paper);
                     p.circle_stroke(point, 3.5, Stroke::new(1.5, colors.ink));

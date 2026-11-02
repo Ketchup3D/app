@@ -165,3 +165,31 @@ fn shift_enter_keeps_the_text_editor_open_for_multiline_labels() {
         "First line\nSecond line"
     );
 }
+
+#[test]
+fn text_pointer_keeps_geometry_feedback_and_snaps_label_placement() {
+    let mut h = Harness::new();
+    h.app
+        .doc
+        .model
+        .add_edge(DVec3::ZERO, DVec3::X * 4.)
+        .unwrap();
+    h.app.set_tool(Tool::Text);
+    let origin = h.at(DVec3::ZERO);
+    h.app.update_text_pointer(origin);
+    assert_eq!(h.app.snap.unwrap().point, DVec3::ZERO);
+    assert!(matches!(
+        h.app.snap.unwrap().kind,
+        Inference::Origin | Inference::Endpoint
+    ));
+    h.click(origin);
+    let endpoint = h.at(DVec3::X * 4.);
+    h.app.update_text_pointer(endpoint);
+    assert_eq!(h.app.snap.unwrap().point, DVec3::X * 4.);
+    assert_eq!(h.app.measurement.as_ref().unwrap().offset, DVec3::X * 4.);
+    h.app.lock = Some(Axis::Z);
+    h.app.update_text_pointer(h.at(DVec3::new(1., 2., 3.)));
+    let snap = h.app.snap.unwrap();
+    assert!(snap.point.x.abs() < 1e-7 && snap.point.y.abs() < 1e-7);
+    assert_eq!(h.app.measurement.as_ref().unwrap().offset, snap.point);
+}
