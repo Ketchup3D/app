@@ -4,6 +4,43 @@ use ketchup_core::{Camera, CameraView, DVec2, DVec3, Face, Model};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Shared reference geometry fade, measured along the camera's forward axis.
+pub(crate) struct ReferenceFade {
+    eye: DVec3,
+    forward: DVec3,
+    pub origin_depth: f64,
+}
+
+impl ReferenceFade {
+    pub fn new(camera: &Camera) -> Self {
+        let eye = camera.eye();
+        let forward = (camera.target - eye).normalize();
+        let depth = (-eye).dot(forward);
+        Self {
+            eye,
+            forward,
+            origin_depth: if depth > 0.005 {
+                depth
+            } else {
+                camera.distance
+            },
+        }
+    }
+
+    pub fn depth(&self, point: DVec3) -> f64 {
+        (point - self.eye).dot(self.forward)
+    }
+
+    pub fn opacity(depth: f64, origin_depth: f64) -> f32 {
+        (origin_depth / depth).clamp(0., 1.) as f32
+    }
+
+    pub fn axis_length(&self) -> f64 {
+        // End below one alpha step, even when the origin is far off screen.
+        self.eye.length() + self.origin_depth * 256.
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
@@ -11,6 +48,23 @@ struct Vertex {
     color: [u8; 4],
     lateral: f32,
     shadow_color: [u8; 4],
+}
+
+// A face slope applies only on the face side of its boundary. Extending
+// the plane across the silhouette can pull a rear object's stroke forward.
+#[derive(Clone, Copy)]
+struct EdgeSurface {
+    gradient: DVec2,
+    inward: DVec2,
+}
+
+impl EdgeSurface {
+    fn unbounded(gradient: DVec2) -> Self {
+        Self {
+            gradient,
+            inward: DVec2::ZERO,
+        }
+    }
 }
 
 // Compare document data because callers can edit Model collections directly.
@@ -51,7 +105,7 @@ pub struct SceneCache {
     occlusion: Occlusion,
     selection_occlusion: Occlusion,
     annotation_occluders: Vec<[DVec3; 3]>,
-    edge_surfaces: BTreeMap<(u64, u64), Vec<DVec2>>,
+    edge_surfaces: BTreeMap<(u64, u64), Vec<EdgeSurface>>,
     buffers: BufferPool,
     gpu_buffers: GpuBufferPool,
     retained: Option<Arc<SceneCallback>>,
@@ -97,7 +151,7 @@ pub struct Mesh {
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
     triangle_ranges: Vec<std::ops::Range<u32>>,
-    edge_surfaces: BTreeMap<(u64, u64), Vec<DVec2>>,
+    edge_surfaces: BTreeMap<(u64, u64), Vec<EdgeSurface>>,
     occlusion: Occlusion,
     size: DVec2,
     pixels_per_point: f64,
@@ -218,14 +272,34 @@ impl Mesh {
             gradient
         });
         let Some(gradient) = gradient else { return };
-        for ring in std::iter::once(&face.vertices).chain(face.holes.iter()) {
+        let mut position_offset = 0;
+        for (ring_index, ring) in std::iter::once(&face.vertices)
+            .chain(face.holes.iter())
+            .enumerate()
+        {
+            let projected: Option<Vec<_>> = cached.positions
+                [position_offset..position_offset + ring.len()]
+                .iter()
+                .map(|&point| self.view.project(point))
+                .collect();
+            position_offset += ring.len();
+            let winding = projected.as_ref().map_or(0., |points| {
+                let area: f64 = (0..points.len())
+                    .map(|i| points[i].perp_dot(points[(i + 1) % points.len()]))
+                    .sum();
+                area.signum() * if ring_index == 0 { 1. } else { -1. }
+            });
             for i in 0..ring.len() {
                 let a = ring[i];
                 let b = ring[(i + 1) % ring.len()];
+                let inward = projected.as_ref().map_or(DVec2::ZERO, |points| {
+                    let direction = points[(i + 1) % points.len()] - points[i];
+                    DVec2::new(-direction.y, direction.x).normalize_or_zero() * winding
+                });
                 self.edge_surfaces
                     .entry((a.min(b), a.max(b)))
                     .or_default()
-                    .push(gradient);
+                    .push(EdgeSurface { gradient, inward });
             }
         }
     }
@@ -269,7 +343,7 @@ impl Mesh {
         color: Color32,
         extensions: bool,
         endpoints: bool,
-        surfaces: &[DVec2],
+        surfaces: &[EdgeSurface],
     ) {
         let Some((a, b)) = self.section_line(a, b) else {
             return;
@@ -311,7 +385,7 @@ impl Mesh {
         b: DVec3,
         width: f64,
         color: Color32,
-        surfaces: &[DVec2],
+        surfaces: &[EdgeSurface],
     ) {
         let depths = [a.z, b.z];
         let a = a.truncate();
@@ -325,16 +399,17 @@ impl Mesh {
         // fwidth fringe so it softens the edge without eating into its width.
         let fringe = (normal.x.abs() + normal.y.abs()) / self.pixels_per_point;
         let n = normal * (width + fringe) * 0.5;
-        // Shared creases need a center seam: the nearer incident plane can
-        // change on either side, but the edge itself keeps its true depth.
-        let (strip, indices): (&[(usize, f64)], &[u32]) = if surfaces.len() > 1 {
-            (
-                &[(0, 1.), (0, 0.), (1, 1.), (1, 0.), (0, -1.), (1, -1.)],
-                &[0, 1, 2, 2, 1, 3, 1, 4, 3, 3, 4, 5],
-            )
-        } else {
-            (&[(0, 1.), (0, -1.), (1, 1.), (1, -1.)], &[0, 1, 2, 2, 1, 3])
-        };
+        // Bounded faces and shared creases need a center seam. Each half
+        // follows only the faces on that side; the axis keeps its true depth.
+        let (strip, indices): (&[(usize, f64)], &[u32]) =
+            if surfaces.len() > 1 || surfaces.iter().any(|surface| surface.inward != DVec2::ZERO) {
+                (
+                    &[(0, 1.), (0, 0.), (1, 1.), (1, 0.), (0, -1.), (1, -1.)],
+                    &[0, 1, 2, 2, 1, 3, 1, 4, 3, 3, 4, 5],
+                )
+            } else {
+                (&[(0, 1.), (0, -1.), (1, 1.), (1, -1.)], &[0, 1, 2, 2, 1, 3])
+            };
         if self.clip_stroke_footprints && depths.iter().all(|&z| z > 0. && z < 1.) {
             // Clipping just the centerline leaves corners of a wide or oblique
             // selection strip protruding across the foreground edge. Clip each
@@ -343,11 +418,7 @@ impl Mesh {
                 .iter()
                 .map(|&(endpoint, lateral)| {
                     let offset = n * lateral;
-                    let depth_offset = surfaces
-                        .iter()
-                        .map(|g| g.dot(offset))
-                        .reduce(f64::min)
-                        .unwrap_or(0.);
+                    let depth_offset = surface_depth_offset(offset, surfaces);
                     ([a, b][endpoint] + offset).extend(depths[endpoint] + depth_offset)
                 })
                 .collect();
@@ -415,11 +486,7 @@ impl Mesh {
                 .iter()
                 .map(|&(endpoint, lateral)| {
                     let offset = n * lateral;
-                    let depth_offset = surfaces
-                        .iter()
-                        .map(|g| g.dot(offset))
-                        .reduce(f64::min)
-                        .unwrap_or(0.);
+                    let depth_offset = surface_depth_offset(offset, surfaces);
                     ([a, b][endpoint] + offset).extend(depths[endpoint] + depth_offset)
                 })
                 .collect();
@@ -457,9 +524,50 @@ impl Mesh {
     }
     /// Reference axes have world depth, but remain visible reference geometry
     /// when model section cuts and fog are enabled.
-    pub fn axis_line(&mut self, a: DVec3, b: DVec3, width: f64, color: Color32) {
-        if let Some((a, b)) = self.view.segment_depth(a, b) {
-            self.line(a, b, width, color);
+    pub fn axis_line(&mut self, camera: &Camera, a: DVec3, b: DVec3, width: f64, color: Color32) {
+        let fade = ReferenceFade::new(camera);
+        let inverse = camera.matrix(self.size).inverse();
+        let depths = [fade.depth(a), fade.depth(b)];
+        let mut cuts = vec![0., 1.];
+        // Match the grid's short depth bands, anchoring full opacity at origin
+        // depth. This also gives parallel views a smooth reciprocal-depth fade.
+        if (depths[1] - depths[0]).abs() > 1e-12 {
+            let mut depth = fade.origin_depth;
+            while depth < fade.origin_depth * 257. {
+                let t = (depth - depths[0]) / (depths[1] - depths[0]);
+                if t > 0. && t < 1. {
+                    cuts.push(t);
+                }
+                depth *= 1.05;
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        for pair in cuts.windows(2) {
+            let Some((start, end)) = self
+                .view
+                .segment_depth(a.lerp(b, pair[0]), a.lerp(b, pair[1]))
+            else {
+                continue;
+            };
+            // Recover depth AFTER viewport/near clipping so opacity stays stable
+            // as a vanishing point or the camera crosses a viewport boundary.
+            let opacity = [start, end].map(|p| {
+                let world = inverse
+                    * glam::DVec4::new(
+                        p.x / self.size.x * 2. - 1.,
+                        1. - p.y / self.size.y * 2.,
+                        p.z,
+                        1.,
+                    );
+                ReferenceFade::opacity(fade.depth(world.truncate() / world.w), fade.origin_depth)
+            });
+            let first = self.vertices.len();
+            self.line(start, end, width, color);
+            // Ordinary axis strokes have two vertices at each endpoint. Keep
+            // their existing depth and antialias footprint; vary only color.
+            for (i, vertex) in self.vertices[first..].iter_mut().enumerate() {
+                vertex.color = color.gamma_multiply(opacity[i / 2]).to_array();
+            }
         }
     }
     /// Keep projected depth after centerline clipping so the complete stroke
@@ -647,7 +755,16 @@ impl Mesh {
                     vertex.shadow_color = shadow_color;
                 }
             }
-            for &triangle in &shadow.shaded {
+            // Replace receivers in the mask with their nonoverlapping lit and
+            // shaded partitions. Testing an overlay against the original face
+            // fights its independently rounded depth, especially in isometric
+            // exports with many small shadow triangles.
+            for (triangle, coverage) in shadow
+                .lit
+                .iter()
+                .map(|&triangle| (triangle, [0, 0, 0, 255]))
+                .chain(shadow.shaded.iter().map(|&triangle| (triangle, [255; 4])))
+            {
                 let (polygon, len) = self.display.section_triangle(triangle);
                 for i in 1..len.saturating_sub(1) {
                     self.view.for_each_triangle_depth(
@@ -658,9 +775,9 @@ impl Mesh {
                                     position: [
                                         (p.x / self.size.x * 2. - 1.) as f32,
                                         (1. - p.y / self.size.y * 2.) as f32,
-                                        (p.z.clamp(0., 1.) as f32).next_down().max(0.),
+                                        p.z.clamp(0., 1.) as f32,
                                     ],
-                                    color: [255; 4],
+                                    color: coverage,
                                     lateral: 0.,
                                     shadow_color: [0; 4],
                                 });
@@ -1501,14 +1618,19 @@ fn depth_gradient([a, b, c]: [DVec3; 3]) -> Option<DVec2> {
     gradient.is_finite().then_some(gradient)
 }
 
-fn stroke_depth(depth: f64, offset: DVec2, surfaces: &[DVec2]) -> f32 {
+fn surface_depth_offset(offset: DVec2, surfaces: &[EdgeSurface]) -> f64 {
+    surfaces
+        .iter()
+        .filter(|surface| surface.inward.dot(offset) >= -1e-12)
+        .map(|surface| surface.gradient.dot(offset))
+        .reduce(f64::min)
+        .unwrap_or(0.)
+}
+
+fn stroke_depth(depth: f64, offset: DVec2, surfaces: &[EdgeSurface]) -> f32 {
     // Match the nearest incident surface across the strip, without moving
     // unrelated faces or giving free edges a slope-dependent allowance.
-    let offset = surfaces
-        .iter()
-        .map(|g| g.dot(offset))
-        .reduce(f64::min)
-        .unwrap_or(0.);
+    let offset = surface_depth_offset(offset, surfaces);
     // One representable step covers rounding between independently projected
     // triangles and strokes without a world-distance or slope-dependent bias.
     ((depth + offset).clamp(0., 1.) as f32).next_down().max(0.)
@@ -1641,11 +1763,9 @@ fn create_pipeline_with_samples(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
             // Only opaque stroke cores contribute depth; fringes blend later.
-            depth_write_enabled: Some(!matches!(pass, PipelinePass::Edges | PipelinePass::MaskShadow)),
+            depth_write_enabled: Some(pass != PipelinePass::Edges),
             depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: Default::default(),
-            // Faces retain their actual depth. Only their own boundary strips
-            // follow the surface slope; unrelated hidden edges get no allowance.
             bias: Default::default(),
         }),
         multisample: wgpu::MultisampleState {
@@ -2200,13 +2320,58 @@ mod tests {
         assert_eq!(callback.shadow_range.start, original.indices.len() as u32);
     }
 
+    #[test]
+    fn shadow_mask_partitions_include_lit_occluders_at_their_original_depth() {
+        for projection in [
+            ketchup_core::Projection::Perspective,
+            ketchup_core::Projection::Parallel,
+        ] {
+            let mut camera = Camera {
+                projection,
+                ..Default::default()
+            };
+            camera.set_standard_view(ketchup_core::StandardView::Iso);
+            let [a, b, c] = [
+                DVec3::new(-2., -2., 0.),
+                DVec3::new(2., -2., 0.),
+                DVec3::new(0., 2., 0.),
+            ];
+            let midpoint = (a + b) * 0.5;
+            let shadow = crate::shadows::FaceShadow {
+                lit: vec![[a, midpoint, c]],
+                shaded: vec![[midpoint, b, c]],
+            };
+            let mut mesh = Mesh::new(&camera, DVec2::new(640., 480.));
+            mesh.display.shadow_antialiasing = true;
+            mesh.shadow_face(&[[a, b, c]], &shadow, Color32::WHITE, Color32::GRAY);
+            assert_eq!(mesh.shadow_vertices.len(), 6);
+            for (vertices, (triangle, coverage)) in mesh.shadow_vertices.chunks_exact(3).zip([
+                (shadow.lit[0], [0, 0, 0, 255]),
+                (shadow.shaded[0], [255; 4]),
+            ]) {
+                for (vertex, point) in vertices.iter().zip(triangle) {
+                    let projected = mesh.view.project_depth(point).unwrap();
+                    assert_eq!(
+                        vertex.position[2], projected.z as f32,
+                        "mask depth must not be offset"
+                    );
+                    assert_eq!(
+                        vertex.color, coverage,
+                        "lit pieces must also occlude rear shadows"
+                    );
+                }
+            }
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     #[ignore = "Requires a GPU adapter; verifies only shadow pixels change through the shadow mask resolve"]
     fn shadow_antialiasing_smooths_shadows_without_smoothing_silhouettes() {
         use egui_wgpu::CallbackTrait;
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        eprintln!("Shadow mask backend: {:?}", adapter.get_info().backend);
         let (device, queue) =
             pollster::block_on(adapter.request_device(&Default::default())).unwrap();
         for format in [
@@ -2248,7 +2413,7 @@ mod tests {
                     ]
                     .map(|position| Vertex {
                         position,
-                        color: [0, 0, 0, 255],
+                        color: if enabled { [255; 4] } else { [0, 0, 0, 255] },
                         lateral: 0.,
                         shadow_color: [0; 4],
                     }),
@@ -2269,6 +2434,71 @@ mod tests {
             let hard = make_callback(false);
             let smooth = make_callback(true);
             let other_pane = make_callback(true);
+            // The mask must not compare a partition against its own receiver,
+            // even if independent projection rounds it behind the original.
+            let mut rounded = make_callback(true);
+            for vertex in &mut rounded.vertices[4..] {
+                vertex.position[2] = 0.5_f32.next_up();
+            }
+            let mut hidden = make_callback(true);
+            // A separate, unshadowed foreground face still hides rear masks.
+            for vertex in &mut hidden.vertices[..4] {
+                vertex.shadow_color = [0; 4];
+            }
+            for vertex in &mut hidden.vertices[4..] {
+                vertex.position[2] = 0.51;
+            }
+            // Exercise actual orthographic depth normalization with thousands
+            // of fragments on a sloped receiver, rather than a flat overlay.
+            let mut fragmented_mesh = Mesh::new(
+                &Camera {
+                    projection: ketchup_core::Projection::Parallel,
+                    ..Default::default()
+                },
+                DVec2::splat(64.),
+            );
+            fragmented_mesh.display.shadow_antialiasing = true;
+            let receiver = make_callback(true);
+            fragmented_mesh.vertices = receiver.vertices[..4].to_vec();
+            fragmented_mesh.indices = vec![0, 1, 2, 0, 2, 3];
+            fragmented_mesh.triangle_ranges = vec![0..6];
+            let depth =
+                |x: f32, y: f32| (1e-7 + (0.19 * f64::from(x) + 0.13 * f64::from(y)) * 1e-8) as f32;
+            for vertex in &mut fragmented_mesh.vertices {
+                vertex.position[2] = depth(vertex.position[0], vertex.position[1]);
+            }
+            for x in 0..48 {
+                for y in 0..48 {
+                    let x0 = -0.8 + 1.6 * x as f32 / 48.;
+                    let x1 = -0.8 + 1.6 * (x + 1) as f32 / 48.;
+                    let y0 = -0.8 + 1.6 * y as f32 / 48.;
+                    let y1 = -0.8 + 1.6 * (y + 1) as f32 / 48.;
+                    for [x, y] in [[x0, y0], [x1, y0], [x1, y1], [x0, y0], [x1, y1], [x0, y1]] {
+                        fragmented_mesh.shadow_vertices.push(Vertex {
+                            position: [x, y, depth(x, y)],
+                            color: [255; 4],
+                            lateral: 0.,
+                            shadow_color: [0; 4],
+                        });
+                    }
+                }
+            }
+            fragmented_mesh.normalize_parallel_depth();
+            let fragmented = fragmented_mesh.into_callback();
+            // A lit receiver partition must erase rear shadow coverage even
+            // when it is drawn after that coverage in the same mask pass.
+            let mut lit_foreground = make_callback(true);
+            for index in [0, 1, 2, 0, 2, 3] {
+                let mut vertex = lit_foreground.vertices[index];
+                vertex.position[2] = 0.49;
+                vertex.color = [0, 0, 0, 255];
+                vertex.shadow_color = [0; 4];
+                lit_foreground
+                    .indices
+                    .push(lit_foreground.vertices.len() as u32);
+                lit_foreground.vertices.push(vertex);
+            }
+            lit_foreground.shadow_range.end = lit_foreground.indices.len() as u32;
             let texture = |format, usage| {
                 device.create_texture(&wgpu::TextureDescriptor {
                     label: None,
@@ -2297,7 +2527,16 @@ mod tests {
             let depth_view = depth.create_view(&Default::default());
             // Repeated frames also exercise the retained resolve texture.
             let mut baseline_silhouette = None;
-            for callback in [&hard, &smooth, &other_pane, &smooth] {
+            for (callback, visible_shadow) in [
+                (&hard, true),
+                (&smooth, true),
+                (&other_pane, true),
+                (&smooth, true),
+                (&rounded, true),
+                (&hidden, false),
+                (&fragmented, true),
+                (&lit_foreground, false),
+            ] {
                 let readback = device.create_buffer(&wgpu::BufferDescriptor {
                     label: None,
                     size: 256 * 64,
@@ -2376,10 +2615,21 @@ mod tests {
                     .unwrap();
                 receive.recv().unwrap().unwrap();
                 let mapped = readback.slice(..).get_mapped_range().unwrap();
-                assert!(
-                    mapped.chunks_exact(4).any(|pixel| pixel[0] == 0),
-                    "shadow must render"
-                );
+                if visible_shadow {
+                    assert!(mapped.chunks_exact(4).any(|pixel| pixel[0] == 0),
+                        "coplanar shadow must render, including after a rounding step");
+                }
+                let center = &mapped[(32 * 64 + 32) * 4..(32 * 64 + 32) * 4 + 4];
+                assert!(if visible_shadow { center[0] < 8 } else { center[0] > 248 },
+                    "coplanar rounding must not erase shadows or expose hidden ones: {center:?}");
+                if std::ptr::eq(callback, &fragmented) {
+                    for y in 10..54 {
+                        for x in 10..54 {
+                            assert!(mapped[(y * 64 + x) * 4] < 8,
+                                "fragmented isometric shadow must have no lit holes at {x},{y}");
+                        }
+                    }
+                }
                 let silhouette: Vec<_> = mapped.chunks_exact(4).map(|p| p[1]).collect();
                 if let Some(baseline) = &baseline_silhouette {
                     assert_eq!(&silhouette, baseline);
@@ -2390,7 +2640,7 @@ mod tests {
                     mapped
                         .chunks_exact(4)
                         .any(|pixel| pixel[0] > 0 && pixel[0] < 255),
-                    callback.antialiasing,
+                    callback.antialiasing && visible_shadow,
                     "AA must resolve partial shadow coverage"
                 );
             }
@@ -2568,8 +2818,11 @@ mod tests {
                 let mut mesh = Mesh::new(&Camera::default(), size);
                 let a = DVec2::new(500., 400.);
                 let b = a + DVec2::new(angle.cos(), angle.sin()) * 100.;
-                let surfaces: &[DVec2] = if shared {
-                    &[DVec2::new(0.002, 0.), DVec2::new(-0.003, 0.)]
+                let surfaces: &[EdgeSurface] = if shared {
+                    &[
+                        EdgeSurface::unbounded(DVec2::new(0.002, 0.)),
+                        EdgeSurface::unbounded(DVec2::new(-0.003, 0.)),
+                    ]
                 } else {
                     &[]
                 };
@@ -2725,6 +2978,180 @@ mod tests {
         assert_ne!(
             third.gpu_buffers.get().unwrap().vertices,
             second.gpu_buffers.get().unwrap().vertices
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "Requires a GPU adapter; verifies incident face depth outside its silhouette"]
+    fn rear_face_boundary_does_not_hide_foreground_selection_outside_the_face() {
+        use wgpu::util::DeviceExt;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(include_str!("edges.wgsl").into()),
+        });
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let pipelines = [PipelinePass::EdgeDepth, PipelinePass::Edges]
+            .map(|pass| create_pipeline(&device, &shader, format, pass));
+        let size = wgpu::Extent3d {
+            width: 64,
+            height: 64,
+            depth_or_array_layers: 1,
+        };
+        let texture = |format, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let color = texture(
+            format,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let depth = texture(
+            wgpu::TextureFormat::Depth32Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        let color_view = color.create_view(&Default::default());
+        let depth_view = depth.create_view(&Default::default());
+
+        let camera = Camera::default();
+        let viewport = DVec2::splat(64.);
+        let inverse = camera.matrix(viewport).inverse();
+        let unproject = |p: DVec3| {
+            let q = inverse * glam::DVec4::new(p.x / 32. - 1., 1. - p.y / 32., p.z, 1.);
+            q.truncate() / q.w
+        };
+        // A rear triangle exists only to the RIGHT of its vertical boundary.
+        // Its depth slopes toward the eye if extrapolated LEFT, outside the face.
+        let points = [
+            DVec3::new(32., 8., 0.6),
+            DVec3::new(34., 8., 0.9),
+            DVec3::new(32., 56., 0.6),
+        ]
+        .map(unproject);
+        let mut model = Model::default();
+        let boundary = model.add_edge(points[0], points[2]).unwrap();
+        model.add_edge(points[2], points[1]).unwrap();
+        model.add_edge(points[1], points[0]).unwrap();
+        let mut faces = FaceCache::default();
+        faces.update(&model);
+        let mut mesh = Mesh::new(&camera, viewport);
+        for face in model.faces.values() {
+            mesh.face_edges(face, faces.get(face.id));
+            for &triangle in &faces.get(face.id).triangles {
+                mesh.world_triangle(&camera, triangle, Color32::WHITE);
+            }
+        }
+        assert_eq!(model.faces.len(), 1, "exercise a real incident face");
+        mesh.styled_edge(
+            &model.edges[&boundary],
+            &model,
+            1.8,
+            Color32::BLACK,
+            false,
+            false,
+        );
+        mesh.begin_selected_edges();
+        mesh.line(
+            DVec3::new(8., 32., 0.55),
+            DVec3::new(56., 32., 0.55),
+            3.,
+            Color32::RED,
+        );
+        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256 * 64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_vertex_buffer(0, vertices.slice(..));
+            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+            let faces = create_pipeline(&device, &shader, format, PipelinePass::Faces);
+            pass.set_pipeline(&faces);
+            for range in &mesh.triangle_ranges {
+                pass.draw_indexed(range.clone(), 0, 0..1);
+            }
+            let edge_start = mesh.triangle_ranges.last().map_or(0, |range| range.end);
+            for pipeline in &pipelines {
+                pass.set_pipeline(pipeline);
+                pass.draw_indexed(edge_start..mesh.indices.len() as u32, 0, 0..1);
+            }
+        }
+        encoder.copy_texture_to_buffer(
+            color.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(64),
+                },
+            },
+            size,
+        );
+        queue.submit([encoder.finish()]);
+        let (send, receive) = std::sync::mpsc::channel();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                send.send(result).unwrap();
+            });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(30)),
+            })
+            .unwrap();
+        receive.recv().unwrap().unwrap();
+        let mapped = readback.slice(..).get_mapped_range().unwrap();
+
+        let sample = &mapped[(32 * 256 + 31 * 4)..(32 * 256 + 31 * 4 + 4)];
+        assert_eq!(
+            sample,
+            [255, 0, 0, 255],
+            "rear boundary must not advance beyond its face silhouette"
         );
     }
 
@@ -3466,7 +3893,10 @@ mod tests {
                 Color32::BLACK,
                 false,
                 true,
-                &[DVec2::new(0., 0.1), DVec2::new(0., -0.1)],
+                &[
+                    EdgeSurface::unbounded(DVec2::new(0., 0.1)),
+                    EdgeSurface::unbounded(DVec2::new(0., -0.1)),
+                ],
             );
             assert_eq!(mesh.vertices.len(), count);
         }
@@ -3559,7 +3989,9 @@ mod tests {
         assert!((gradient - DVec2::new(0.002, 0.001)).length() < 1e-12);
         for offset in [DVec2::new(-3., -2.), DVec2::new(3., 2.)] {
             let surface_depth = (0.5 + gradient.dot(offset)) as f32;
-            assert!(stroke_depth(0.5, offset, &[gradient]) <= surface_depth);
+            assert!(
+                stroke_depth(0.5, offset, &[EdgeSurface::unbounded(gradient)]) <= surface_depth
+            );
             // A free edge just behind the surface must stay hidden. Previously
             // the face's slope bias exposed it for every stroke width/DPI.
             assert!(stroke_depth(f64::from(surface_depth) + 0.0001, offset, &[]) > surface_depth);
@@ -3577,7 +4009,10 @@ mod tests {
                     DVec3::new(500., 500., 0.5),
                     width,
                     Color32::BLACK,
-                    &[DVec2::new(0.002, 0.), DVec2::new(-0.003, 0.)],
+                    &[
+                        EdgeSurface::unbounded(DVec2::new(0.002, 0.)),
+                        EdgeSurface::unbounded(DVec2::new(-0.003, 0.)),
+                    ],
                 );
                 let seam: Vec<_> = mesh.vertices.iter().filter(|v| v.lateral == 0.).collect();
                 assert_eq!(seam.len(), 2);
@@ -3620,6 +4055,25 @@ mod tests {
                 let a = ring[i];
                 let b = ring[(i + 1) % ring.len()];
                 assert_eq!(mesh.edge_surfaces[&(a.min(b), a.max(b))].len(), 1);
+                let surface = mesh.edge_surfaces[&(a.min(b), a.max(b))][0];
+                let midpoint = mesh
+                    .view
+                    .project((model.vertices[&a].position + model.vertices[&b].position) * 0.5)
+                    .unwrap();
+                assert!(
+                    cache
+                        .get(face.id)
+                        .hit(mesh.view.ray(midpoint + surface.inward * 0.25))
+                        .is_some(),
+                    "face-side allowance must point into material, including at holes"
+                );
+                assert!(
+                    cache
+                        .get(face.id)
+                        .hit(mesh.view.ray(midpoint - surface.inward * 0.25))
+                        .is_none(),
+                    "silhouette-side allowance must not extrapolate into empty space"
+                );
             }
         }
         assert!(depth_gradient([DVec3::ZERO, DVec3::X, DVec3::X * 2.]).is_none());
@@ -4009,5 +4463,55 @@ mod display_tests {
             mesh.fog_color(Color32::WHITE, DVec3::ZERO),
             Color32::from_rgb(100, 120, 140)
         );
+    }
+}
+
+#[cfg(test)]
+mod reference_axis_tests {
+    use super::*;
+
+    #[test]
+    fn axes_fade_without_changing_projected_depth_or_direction_colors() {
+        for projection in [
+            ketchup_core::Projection::Perspective,
+            ketchup_core::Projection::Parallel,
+        ] {
+            for distance in [0.1, 15., 1000.] {
+                for size in [DVec2::new(1200., 800.), DVec2::new(400., 900.)] {
+                    let camera = Camera {
+                        projection,
+                        distance,
+                        ..Default::default()
+                    };
+                    let fade = ReferenceFade::new(&camera);
+                    let direction = (camera.target - camera.eye()).normalize();
+                    // A diagonal receding reference line remains visible over a
+                    // useful depth range in both projection modes.
+                    let side = direction.cross(DVec3::Z).normalize();
+                    let a = DVec3::ZERO;
+                    let b = a + (direction + side * 0.1) * distance * 8.;
+                    for color in [Color32::RED, Color32::GREEN, Color32::BLUE] {
+                        let mut faded = Mesh::new(&camera, size);
+                        faded.axis_line(&camera, a, b, 1.1, color);
+                        assert!(!faded.vertices.is_empty());
+                        let alpha: Vec<_> = faded.vertices.iter().map(|v| v.color[3]).collect();
+                        assert!(alpha.windows(2).all(|v| v[0] >= v[1]));
+                        assert!(alpha.last().unwrap() < alpha.first().unwrap());
+                        for v in &faded.vertices {
+                            assert!(v.position.iter().all(|x| x.is_finite()));
+                            for channel in 0..3 {
+                                if color[channel] == 0 {
+                                    assert_eq!(v.color[channel], 0);
+                                }
+                            }
+                        }
+                    }
+                    assert!(
+                        ReferenceFade::opacity(fade.depth(DVec3::ZERO), fade.origin_depth) >= 0.999
+                    );
+                    assert!(fade.axis_length() > camera.eye().length() + distance * 200.);
+                }
+            }
+        }
     }
 }

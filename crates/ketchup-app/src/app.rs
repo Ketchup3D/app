@@ -4024,14 +4024,16 @@ impl KetchupApp {
                 .into_iter()
                 .filter(|_| display.axes)
             {
-                let v = axis.vector() * camera.distance * 80.;
+                let v = axis.vector() * renderer::ReferenceFade::new(camera).axis_length();
                 mesh.axis_line(
+                    camera,
                     -v,
                     DVec3::ZERO,
                     0.85,
                     self.axis_color(axis).gamma_multiply(0.35),
                 );
                 mesh.axis_line(
+                    camera,
                     DVec3::ZERO,
                     v,
                     1.1,

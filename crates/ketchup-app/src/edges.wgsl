@@ -63,13 +63,16 @@ fn fragment_main(input: EdgeVertex) -> @location(0) vec4<f32> {
 @group(0) @binding(1) var shadow_sampler: sampler;
 
 @fragment
-fn fragment_mask_base() -> @location(0) vec4<f32> {
+fn fragment_mask_base(input: EdgeVertex) -> @location(0) vec4<f32> {
+    // Shadow receivers are replaced by their lit/shaded partitions in the
+    // coverage pass. Never put their overlapping original depth in this mask.
+    if input.shadow_color.a > 0.0 { discard; }
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
 }
 
 @fragment
-fn fragment_mask_shadow() -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0);
+fn fragment_mask_shadow(input: EdgeVertex) -> @location(0) vec4<f32> {
+    return input.color;
 }
 
 @fragment

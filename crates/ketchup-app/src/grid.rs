@@ -54,7 +54,7 @@ fn distance_opacity(depth: f64, origin_depth: f64) -> f32 {
     // horizon is proportional to 1 / view depth. This is therefore a LINEAR
     // screen-space fade: 1 at the origin, 0 at the actual infinite horizon.
     // No finite world-space fog distance defines where the fade should end.
-    (origin_depth / depth).clamp(0., 1.) as f32
+    crate::renderer::ReferenceFade::opacity(depth, origin_depth)
 }
 
 pub(super) fn visible_lines(
@@ -69,13 +69,7 @@ pub(super) fn visible_lines(
     let perspective = camera.projection == ketchup_core::Projection::Perspective;
     let eye = camera.eye();
     let forward = (camera.target - eye).normalize();
-    let world_origin_depth = (-eye).dot(forward);
-    // Keep navigation useful when the world origin is behind the camera.
-    let origin_depth = if world_origin_depth > 0.005 {
-        world_origin_depth
-    } else {
-        camera.distance
-    };
+    let origin_depth = crate::renderer::ReferenceFade::new(camera).origin_depth;
     let focal = size.y / (2. * (camera.fov * 0.5).tan());
     let slope = (camera.fov * 0.5).tan() * (size.x / size.y).max(1.);
     let infinite = display.grid_infinite;
