@@ -52,10 +52,50 @@ impl Default for Preferences {
     }
 }
 
+#[derive(Default)]
+struct TouchZoom {
+    contacts: BTreeMap<(egui::TouchDeviceId, egui::TouchId), (Pos2, Option<u64>)>,
+    owner: Option<u64>,
+    captured: bool,
+    baseline: Option<(f32, Pos2)>,
+}
+
+impl TouchZoom {
+    fn pair(&self) -> Option<(f32, Pos2)> {
+        if self.contacts.len() != 2 { return None; }
+        let mut contacts = self.contacts.iter();
+        let (a_id, a) = contacts.next()?;
+        let (b_id, b) = contacts.next()?;
+        (a_id.0 == b_id.0 && a.1.is_some() && a.1 == b.1 && a.1 == self.owner)
+            .then_some((a.0.distance(b.0), a.0 + (b.0 - a.0) * 0.5))
+    }
+
+    fn motion(&mut self) -> (Vec2, f64, Option<Pos2>) {
+        let Some((distance, center)) = self.pair() else {
+            self.baseline = None;
+            return (Vec2::ZERO, 0., None);
+        };
+        let (old_distance, old_center) = *self.baseline.get_or_insert((distance, center));
+        let translation = center - old_center;
+        let separation = (distance - old_distance).abs();
+        // Compare complete contact snapshots, never individual finger events:
+        // otherwise parallel movement briefly looks like a pinch. Accumulate
+        // sub-threshold movement so slow deliberate gestures still work.
+        let zooming = old_distance > 1. && distance > 1.
+            && separation > 2.0_f32.max(old_distance * 0.01).max(translation.length() * 0.3);
+        let panning = translation.length() > 2.0_f32.max(separation * 0.35);
+        if zooming || panning { self.baseline = Some((distance, center)); }
+        (if panning { translation } else { Vec2::ZERO },
+            if zooming { (distance as f64 / old_distance as f64).ln() / 0.002 } else { 0. },
+            Some(center))
+    }
+}
+
 pub(super) struct Workspace {
     layout: Layout,
     active: u64,
     next_id: u64,
+    touch_zoom: TouchZoom,
     cameras: BTreeMap<u64, Camera>,
     scene_caches: BTreeMap<u64, renderer::SceneCache>,
     names: BTreeMap<u64, String>,
@@ -69,6 +109,7 @@ impl Default for Workspace {
             layout: Layout::default(),
             active: 0,
             next_id: 1,
+            touch_zoom: TouchZoom::default(),
             cameras: BTreeMap::new(),
             scene_caches: BTreeMap::new(),
             names: BTreeMap::new(),
@@ -301,6 +342,7 @@ impl Workspace {
             return Self::default();
         }
         let mut workspace = Self {
+            touch_zoom: TouchZoom::default(),
             layout: preferences.layout.clone(),
             active: preferences.active,
             next_id: preferences.next_id.max(
@@ -581,6 +623,102 @@ impl KetchupApp {
         }
     }
 
+    // Read raw contacts before synthesized pointer events can reach modeling tools.
+    // Capture lasts until every finger lifts, including cancellation and 2 -> 1.
+    fn touch_viewport_zoom(&mut self, ctx: &egui::Context, views: &[(u64, Rect, egui::Response)]) -> bool {
+        let allowed = ctx.input(|i| i.focused)
+            && !self.project.blocked() && !self.screenshot.open
+            && !self.settings_open
+            && !self.help && !self.about && !self.release_notes.open
+            && self.object_creation.is_none() && self.object_rename.is_none()
+            && self.viewports.renaming.is_none() && self.text_editor.is_none()
+            && self.viewports.dragging.is_none();
+        #[cfg(not(target_arch = "wasm32"))]
+        let allowed = allowed && !self.updates.open;
+        let state = &mut self.viewports.touch_zoom;
+        let mut suppress = state.captured;
+
+        for event in ctx.input(|i| i.events.clone()) {
+            let egui::Event::Touch { device_id, id, phase, pos, .. } = event else { continue; };
+            let key = (device_id, id);
+            let old_count = state.contacts.len();
+            match phase {
+                egui::TouchPhase::Start => {
+                    let view = views.iter().find(|(_, rect, response)|
+                        allowed && response.enabled() && rect.contains(pos)
+                    ).map(|(id, _, _)| *id);
+                    state.contacts.insert(key, (pos, view));
+                    if state.contacts.len() >= 2 {
+                        state.captured |= state.contacts.values().any(|(_, view)| view.is_some());
+                        if state.owner.is_none() && state.contacts.len() == 2 {
+                            let mut contacts = state.contacts.values();
+                            let a = contacts.next().unwrap();
+                            let b = contacts.next().unwrap();
+                            if a.1 == b.1 { state.owner = a.1; }
+                        }
+                    }
+                }
+                egui::TouchPhase::Move => {
+                    if let Some(contact) = state.contacts.get_mut(&key) { contact.0 = pos; }
+                }
+                egui::TouchPhase::End | egui::TouchPhase::Cancel => {
+                    state.contacts.remove(&key);
+                }
+            }
+            if state.contacts.len() != old_count {
+                // Rebase after every membership change, including 3 -> 2.
+                state.baseline = state.pair();
+            }
+            suppress |= state.captured;
+        }
+        if !allowed {
+            // Keep swallowing a captured sequence, but never resume it after a modal/focus change.
+            state.owner = None;
+            state.baseline = None;
+            if !ctx.input(|i| i.focused) {
+                state.contacts.clear();
+            }
+        }
+        let (pan, scroll, anchor) = if allowed { state.motion() } else { (Vec2::ZERO, 0., None) };
+        let owner = state.owner;
+        if state.contacts.is_empty() {
+            state.owner = None;
+            state.captured = false;
+        }
+        if suppress {
+            self.gesture = None;
+            self.section_drag = None;
+            if self.tool == Tool::Freehand { self.drawing = None; }
+            self.viewport_pointer = None;
+            self.hover = None;
+            self.flip_hover = None;
+            self.drawing_orbit_pivot = None;
+            if pan != Vec2::ZERO {
+                if let Some(owner) = owner {
+                    if let Some((_, rect, _)) = views.iter().find(|(id, _, _)| *id == owner) {
+                        self.activate_viewport(owner);
+                        self.viewport = *rect;
+                        // Match Shift+Orbit's direction, sensitivity and viewport scale.
+                        self.doc.camera.pan(dv(pan) * self.general_settings.pan_speed, rect.height() as f64);
+                        self.changed(ctx);
+                    }
+                }
+            }
+            if allowed && scroll.abs() > 1e-9 {
+                if let (Some(owner), Some(anchor)) = (owner, anchor) {
+                    if let Some((_, rect, _)) = views.iter().find(|(id, _, _)| *id == owner) {
+                        self.activate_viewport(owner);
+                        self.viewport = *rect;
+                        self.doc.camera.zoom(scroll * self.general_settings.zoom_speed,
+                            dv(anchor - rect.min), dv(rect.size()));
+                        self.changed(ctx);
+                    }
+                }
+            }
+        }
+        suppress
+    }
+
     pub(super) fn viewport_workspace(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if !ui.is_enabled() {
@@ -623,7 +761,16 @@ impl KetchupApp {
             }
             views.push((pane.selected, rect, response));
         }
-        if self.gesture.is_none() && self.section_drag.is_none() {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(canvas) = web_sys::window().and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("ketchup-canvas")) {
+            let scale = ctx.pixels_per_point() / web_sys::window().map(|w| w.device_pixel_ratio() as f32).unwrap_or(1.);
+            let rects: Vec<[f32; 4]> = views.iter().filter(|(_, _, r)| r.enabled())
+                .map(|(_, r, _)| [r.min.x * scale, r.min.y * scale, r.max.x * scale, r.max.y * scale]).collect();
+            let _ = canvas.set_attribute("data-model-viewports", &serde_json::to_string(&rects).unwrap_or_default());
+        }
+        let touch_navigation = self.touch_viewport_zoom(&ctx, &views);
+        if !touch_navigation && self.gesture.is_none() && self.section_drag.is_none() {
             if let Some(id) = activate {
                 if self.viewports.active != id {
                     ctx.request_repaint();
@@ -636,8 +783,8 @@ impl KetchupApp {
                 views.iter().find(|(id, _, _)| *id == self.viewports.active)
             {
                 self.viewport = *rect;
-                self.viewport_input(&ctx, response);
-                if !ctx
+                if !touch_navigation { self.viewport_input(&ctx, response); }
+                if !touch_navigation && !ctx
                     .input(|i| i.pointer.hover_pos())
                     .is_some_and(|pos| self.compass_contains(pos))
                 {
@@ -690,7 +837,7 @@ impl KetchupApp {
                     ACCENT,
                 );
             }
-            if *id == self.viewports.active { self.fastener_face_handles(ui,*rect); }
+            if *id == self.viewports.active && !touch_navigation { self.fastener_face_handles(ui,*rect); }
             self.paint_shared_presence(ui, *rect);
             self.paint_compass(ui, response);
             self.paint_section_handles(ui, response, *id == self.viewports.active);
@@ -767,3 +914,7 @@ impl KetchupApp {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "viewport_tests.rs"]
 mod tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "touch_navigation_tests.rs"]
+mod touch_navigation_tests;

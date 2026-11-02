@@ -53,6 +53,33 @@
       (() => {
         const workspace = document.getElementById("ketchup-workspace");
         const canvas = document.getElementById("ketchup-canvas");
+        // Cancel browser gestures only for contacts that begin in a model pane.
+        // Keep egui's event propagation and sidebar/text-input gestures intact.
+        const modelTouches = new Set();
+        const inModelPane = (touch) => {
+          const bounds = canvas.getBoundingClientRect();
+          const x = (touch.clientX - bounds.left) * canvas.clientWidth / bounds.width;
+          const y = (touch.clientY - bounds.top) * canvas.clientHeight / bounds.height;
+          const rects = JSON.parse(canvas.getAttribute("data-model-viewports") || "[]");
+          return rects.some(([left, top, right, bottom]) =>
+            x >= left && x <= right && y >= top && y <= bottom);
+        };
+        canvas.addEventListener("touchstart", (event) => {
+          for (const touch of event.changedTouches) {
+            if (inModelPane(touch)) modelTouches.add(touch.identifier);
+          }
+          if (modelTouches.size) event.preventDefault();
+        }, { capture: true, passive: false });
+        canvas.addEventListener("touchmove", (event) => {
+          if (modelTouches.size) event.preventDefault();
+        }, { capture: true, passive: false });
+        for (const type of ["touchend", "touchcancel"]) {
+          canvas.addEventListener(type, (event) => {
+            if (modelTouches.size) event.preventDefault();
+            for (const touch of event.changedTouches) modelTouches.delete(touch.identifier);
+          }, { capture: true, passive: false });
+        }
+        window.addEventListener("blur", () => modelTouches.clear());
         // Keep these in sync with KetchupApp::keyboard in app.rs. eframe only
         // cancels a subset of browser shortcuts, even with should_prevent_default.
         const commandKeys = new Set(["a", "f", "n", "o", "s", "y", "z"]);
