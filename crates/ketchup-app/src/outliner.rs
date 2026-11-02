@@ -45,6 +45,8 @@ struct Outliner<'a> {
 // position or disclosure state. Reuse them while interacting with the scene.
 #[derive(Default)]
 pub(in crate::app) struct OutlinerCache {
+    source: renderer::ModelSnapshot,
+    entities: renderer::EntityCache,
     revision: Option<u64>,
     roots: BTreeSet<u64>,
     paint: std::collections::BTreeMap<u64, OutlinerPaint>,
@@ -1217,6 +1219,24 @@ mod tests {
     }
 
     #[test]
+    fn expanded_geometry_renders_selected_text() {
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let id = app.doc.model.add_text(DVec3::ZERO, DVec3::Y, "Beam label").unwrap();
+        app.selected.insert(id);
+        let ctx = egui::Context::default();
+        ctx.memory_mut(|memory| memory.set_everything_is_visible(true));
+        let output = ctx.run_test_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600., 900.))),
+                ..Default::default()
+            },
+            |ui| app.outliner_contents(ui),
+        );
+        assert!(!output.shapes.is_empty());
+        assert_eq!(app.selected, BTreeSet::from([id]));
+    }
+
+    #[test]
     fn tree_renders_nested_components_and_inherited_hidden_geometry() {
         let (mut app, group, _, edge) = nested_model();
         app.doc.model.hidden.insert(group);
@@ -1411,7 +1431,7 @@ mod tests {
 }
 
 impl KetchupApp {
-    pub(super) fn outliner_contents(&mut self, ui: &mut egui::Ui) {
+    pub(in crate::app) fn outliner_contents(&mut self, ui: &mut egui::Ui) {
         use egui::AtomExt as _;
 
         let search = ui
@@ -1444,7 +1464,7 @@ impl KetchupApp {
             search.scroll_to_me(Some(egui::Align::Center));
             self.focus_outliner_search = false;
         }
-        let revision = self.render_model.update(&self.doc.model);
+        let revision = self.outliner_cache.source.update(&self.doc.model);
         self.outliner_cache
             .update(&self.doc.model, revision, &self.outliner_filter);
         let roots = &self.outliner_cache.roots;
@@ -1457,7 +1477,7 @@ impl KetchupApp {
             crate::empty_state::EmptyState::new("No matching objects", "Try another name or clear the search to see all objects.").show(ui);
             return;
         }
-        self.entity_cache.update(&self.doc.model);
+        self.outliner_cache.entities.update(&self.doc.model);
         let hover_id = ui.scope_id().with("outliner_drag_hover");
         let mut tree = Outliner {
             model: &self.doc.model,
@@ -1465,7 +1485,7 @@ impl KetchupApp {
             paint: &self.outliner_cache.paint,
             filtered_objects: filtered_objects.as_ref(),
             selected: &self.selected,
-            entities: &self.entity_cache,
+            entities: &self.outliner_cache.entities,
             action: None,
             toggle_visibility: None,
             hover: None,

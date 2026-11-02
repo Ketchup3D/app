@@ -1068,13 +1068,10 @@ fn paint_line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
             face_icon(p, c, color.gamma_multiply(0.15), color);
         }
         "text" => {
-            p.text(
-                c,
-                egui::Align2::CENTER_CENTER,
-                "T",
-                egui::FontId::proportional(16.),
-                color,
-            );
+            // Cached icons are tessellated without a font atlas.
+            p.line_segment([c + egui::vec2(-5., -6.), c + egui::vec2(5., -6.)], s);
+            p.line_segment([c + egui::vec2(0., -6.), c + egui::vec2(0., 6.)], s);
+            p.line_segment([c + egui::vec2(-3., 6.), c + egui::vec2(3., 6.)], s);
         }
         "dimension" | "units" => {
             let at = |x: f32, y: f32| c + egui::vec2(x, y);
@@ -1335,6 +1332,22 @@ mod tool_mesh_tests {
             count += 1;
         });
         assert!(count >= Tool::ALL.len());
+    }
+
+    #[test]
+    fn text_icon_can_be_cached_without_initialized_fonts() {
+        let ctx = egui::Context::default();
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        line_icon(&painter, egui::pos2(30., 30.), "text", Color32::WHITE);
+        ctx.data_mut(|data| {
+            let cache = data.get_temp_mut_or_default::<IconMeshCache>(egui::Id::unique(
+                "static_icon_mesh_cache",
+            ));
+            assert_eq!(cache.entries.len(), 1);
+            assert!(!cache.entries[0].1.is_empty());
+            assert!(cache.entries[0].1.iter().flat_map(|mesh| &mesh.vertices)
+                .all(|vertex| vertex.uv == egui::epaint::WHITE_UV));
+        });
     }
 
     #[test]
