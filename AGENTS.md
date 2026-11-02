@@ -44,3 +44,7 @@ All current and future right-sidebar tables use `crate::inspector_table::Inspect
 # Application language
 
 All user-facing application text must be in English, even when the user requests features or changes in French. This includes section titles, menus, controls, tooltips, notifications, and errors. Use “Automatic Fasteners” for the automatic fastener section. Preserve stable internal preference keys and saved-project compatibility when translating visible text.
+
+# PDF export header
+
+All PDF exports, current and future, must use the shared header in `crates/ketchup-app/src/pdf_header.rs`, based on Time & Cost Estimates: the bundled KetchUp logo and brand, report type, project name, generation date, and separator on every page. Keep body content below `body_top`; preserve page size, orientation, readability and existing transparency. Do not introduce a separate PDF header implementation.

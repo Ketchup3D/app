@@ -8,6 +8,7 @@ mod cutting_plan;
 mod environment;
 mod empty_state;
 mod estimate_pdf;
+mod pdf_header;
 mod icons;
 mod inspector_table;
 mod interchange;
@@ -39,3 +40,6 @@ mod system_info;
 
 #[cfg(test)]
 mod test_ui;
+
+#[cfg(test)]
+mod pdf_qa_tests;

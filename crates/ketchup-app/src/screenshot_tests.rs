@@ -147,7 +147,7 @@ fn pdf_contains_physical_pages_lossless_images_and_valid_xref_offsets() {
     assert!(text.starts_with("%PDF-1.4"));
     assert!(text.contains("/Count 2"));
     assert_eq!(text.matches("/MediaBox [0 0 612.0000 792.0000]").count(), 2);
-    assert_eq!(text.matches("/Subtype /Image").count(), 4);
+    assert_eq!(text.matches("/Subtype /Image").count(), 5); // Two views, two alpha masks, shared logo.
     assert_eq!(text.matches("/ColorSpace /DeviceGray").count(), 2);
     assert!(text.contains("/SMask 6 0 R"));
     assert!(text.contains("/SMask 10 0 R"));
@@ -182,9 +182,85 @@ fn standard_cameras_are_fitted_without_changing_the_source_camera_or_model() {
             assert!(p.x >= 0. && p.x <= 640. && p.y >= 0. && p.y <= 480.);
         }
     }
-    assert_eq!(view_camera(&model, &current, 0, [640, 480]), current);
+    let fitted_current = view_camera(&model, &current, 0, [640, 480]);
+    assert_eq!(fitted_current.yaw, current.yaw);
+    assert_eq!(fitted_current.pitch, current.pitch);
+    assert_eq!(fitted_current.projection, current.projection);
+    assert_eq!(fitted_current.fov, current.fov);
     assert_eq!(model, before);
     assert_eq!(current, Camera::default());
+}
+
+#[test]
+fn every_view_fills_its_own_area_in_portrait_and_landscape() {
+    let mut model = Model::default();
+    for point in [
+        DVec3::new(80., 0., 0.),
+        DVec3::new(0., 3., 0.),
+        DVec3::new(0., 0., 10.),
+    ] {
+        model.add_edge(DVec3::ZERO, point).unwrap();
+    }
+    for projection in [Projection::Parallel, Projection::Perspective] {
+        let current = Camera {
+            projection,
+            target: DVec3::splat(100.),
+            distance: 1000.,
+            ..Default::default()
+        };
+        for size in [[640, 480], [300, 900], [1200, 250]] {
+            let viewport = DVec2::new(f64::from(size[0]), f64::from(size[1]));
+            for view in 0..8 {
+                let camera = view_camera(&model, &current, view, size);
+                assert!(camera.valid());
+                let mut lo = DVec2::splat(f64::INFINITY);
+                let mut hi = DVec2::splat(f64::NEG_INFINITY);
+                for vertex in model.vertices.values() {
+                    let point = camera.project(vertex.position, viewport).unwrap();
+                    lo = lo.min(point);
+                    hi = hi.max(point);
+                }
+                assert!(
+                    lo.cmpge(viewport * 0.04 - DVec2::splat(1e-6)).all(),
+                    "view {view}: {lo:?}"
+                );
+                assert!(
+                    hi.cmple(viewport * 0.96 + DVec2::splat(1e-6)).all(),
+                    "view {view}: {hi:?}"
+                );
+                let fill = ((hi - lo) / viewport).max_element();
+                assert!(
+                    (fill - 0.92).abs() < 1e-6,
+                    "view {view} should fill one dimension: {fill}"
+                );
+                if camera.projection == Projection::Parallel {
+                    assert!(((lo + hi) * 0.5 - viewport * 0.5).length() < 1e-6);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fitting_ignores_hidden_geometry_and_keeps_empty_views_valid() {
+    let mut model = Model::default();
+    model.add_edge(DVec3::ZERO, DVec3::new(5., 3., 2.)).unwrap();
+    let current = Camera::default();
+    let cameras: Vec<_> = (0..8)
+        .map(|view| view_camera(&model, &current, view, [640, 480]))
+        .collect();
+    let hidden = model
+        .add_edge(DVec3::splat(1000.), DVec3::splat(2000.))
+        .unwrap();
+    model.hidden.insert(hidden);
+    for (view, expected) in cameras.iter().enumerate() {
+        assert_eq!(&view_camera(&model, &current, view, [640, 480]), expected);
+        assert!(view_camera(&Model::default(), &current, view, [640, 480]).valid());
+    }
+    assert_eq!(
+        view_camera(&Model::default(), &current, 0, [640, 480]),
+        current
+    );
 }
 
 #[test]

@@ -75,12 +75,6 @@ impl<'a> Pdf<'a> {
             x += width * size / 1000.;
         }
     }
-    fn line(&mut self, y: f64) {
-        let _ = writeln!(
-            self.page,
-            "0.80 0.83 0.80 RG 0.5 w {LEFT} {y:.2} m {RIGHT} {y:.2} l S"
-        );
-    }
     fn panel(&mut self, x: f64, bottom: f64, width: f64, height: f64, fill: &str) {
         let _ = writeln!(
             self.page,
@@ -114,19 +108,10 @@ impl<'a> Pdf<'a> {
         if !self.page.is_empty() {
             self.pages.push(std::mem::take(&mut self.page));
         }
-        self.page.push_str("q 32 0 0 32 42 768 cm /Logo Do Q\n");
-        self.text(85., 785., 17., "KetchUp");
-        self.text(85., 770., 10., "Time & Cost Estimates");
-        let mut header_y = 785.;
-        for line in self.wrap(&self.header_name, 245., 20.) {
-            self.text(RIGHT - self.width(&line, 20.), header_y, 20., &line);
-            header_y -= 24.;
-        }
-        let date = self.header_date.clone();
-        self.text(RIGHT - self.width(&date, 9.), header_y + 6., 9., &date);
-        let separator_y = (header_y - 16.).min(748.);
-        self.line(separator_y);
-        self.y = separator_y - 31.;
+        let header=crate::pdf_header::layout(&self.header_name,"Time & Cost Estimates",&self.header_date,[595.,842.],|text,size|self.width(text,size));
+        self.page.push_str(&header.graphics);
+        for text in header.text {self.text(text.x,text.y,text.size,&text.value);}
+        self.y=header.body_top;
     }
     fn ensure(&mut self, height: f64) {
         if self.y - height < BOTTOM {
@@ -286,18 +271,7 @@ impl<'a> Pdf<'a> {
             .collect::<Vec<_>>()
             .join(" ");
         let cid_map: Vec<u8> = cids.iter().flat_map(|(gid, _)| gid.to_be_bytes()).collect();
-        let image =
-            image::load_from_memory(include_bytes!("../../../assets/branding/icon-256.png"))
-                .map_err(|error| format!("Could not load the KetchUp logo: {error}"))?
-                .to_rgba8();
-        let rgb: Vec<u8> = image
-            .pixels()
-            .flat_map(|pixel| {
-                let a = u32::from(pixel[3]);
-                [0, 1, 2]
-                    .map(|channel| ((u32::from(pixel[channel]) * a + 255 * (255 - a)) / 255) as u8)
-            })
-            .collect();
+        let rgb = crate::pdf_header::logo_rgb();
         let mut objects = vec![
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
             format!("<< /Type /Pages /Count {count} /Kids [{}] >>", (0..count).map(|i| format!("{} 0 R", 14+i*2)).collect::<Vec<_>>().join(" ")).into_bytes(),
@@ -351,7 +325,7 @@ fn stream(attributes: &str, bytes: &[u8]) -> Vec<u8> {
 }
 
 // Both targets label the date explicitly as UTC, independent of host timezone.
-fn generation_date() -> Result<String, String> {
+pub(crate) fn generation_date() -> Result<String, String> {
     #[cfg(not(target_arch = "wasm32"))]
     let days = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

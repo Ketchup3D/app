@@ -1,6 +1,20 @@
 use super::*;
 use ketchup_core::DisplaySettings;
 
+/// Resolve scene appearance once for interactive and offscreen viewports.
+pub(super) fn effective_display(display: &DisplaySettings, model: &Model, dark: bool) -> DisplaySettings {
+    let mut effective = crate::environment::for_theme(display, dark);
+    if display.group_emphasis && model.edit_context.is_some_and(|id| model.contains_entity(&id)) {
+        if effective.face_style == ketchup_core::FaceStyle::Wireframe {
+            effective.face_style = ketchup_core::FaceStyle::Shaded;
+        }
+        effective.x_ray = false;
+        effective.shadows = false;
+        effective.section_fill = false;
+    }
+    effective
+}
+
 /// A soft upper-left key light travels with the view, keeping depth legible as
 /// the camera orbits. Prepare its basis once per frame rather than per face.
 pub(super) struct FaceLighting {

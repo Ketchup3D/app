@@ -182,9 +182,9 @@ pub(crate) fn view_camera(model: &Model, current: &Camera, view: usize, size: [u
         camera.set_standard_view(standard);
         camera.projection = Projection::Parallel;
     }
-    let mut bounds: Option<(DVec3, DVec3)> = None;
+    let mut points = Vec::new();
     let mut include = |p: DVec3| {
-        bounds = Some(bounds.map_or((p, p), |(lo, hi)| (lo.min(p), hi.max(p))));
+        points.push(p);
     };
     for edge in model.edges.values().filter(|e| !model.is_hidden(e.id)) {
         let (a, b) = model.points(edge);
@@ -206,10 +206,64 @@ pub(crate) fn view_camera(model: &Model, current: &Camera, view: usize, size: [u
             include(p);
         }
     }
-    if view != 0 {
-        camera.fit(bounds, DVec2::new(size[0] as f64, size[1] as f64));
-    }
+    fit_content(&mut camera, &points, size);
     camera
+}
+
+/// Fit this view's actual extents rather than a sphere around the 3D bounds.
+/// Reserve four percent on each side for strokes and annotation glyphs; the
+/// capture viewport separately reserves space for the view title and margins.
+fn fit_content(camera: &mut Camera, points: &[DVec3], size: [u32; 2]) {
+    let Some(&origin) = points.first() else {
+        return;
+    };
+    let right = camera.right();
+    let up = camera.up();
+    let forward = (camera.target - camera.eye()).normalize();
+    let points: Vec<_> = points
+        .iter()
+        .map(|&point| {
+            let point = point - origin;
+            DVec3::new(point.dot(right), point.dot(up), point.dot(forward))
+        })
+        .collect();
+    let (lo, hi) = points.iter().fold(
+        (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
+        |(lo, hi), &point| (lo.min(point), hi.max(point)),
+    );
+    let mut center = (lo + hi) * 0.5;
+    let aspect = (f64::from(size[0].max(1)) / f64::from(size[1].max(1))).max(0.01);
+    let tan_y = (camera.fov * 0.5).tan() * 0.92;
+    let tan_x = tan_y * aspect;
+    let distance = if camera.projection == Projection::Parallel {
+        ((hi.y - lo.y) / (2. * tan_y)).max((hi.x - lo.x) / (2. * tan_x))
+    } else {
+        // At depth z, each point must fit inside the perspective frustum:
+        // |x - center.x| <= tan_x * (distance + z), and likewise for y.
+        // Intersect these constraints to fit even deep or off-center models
+        // without changing the current viewing angle or clipping near points.
+        let mut lower = DVec2::splat(f64::NEG_INFINITY);
+        let mut upper = DVec2::splat(f64::INFINITY);
+        let tangent = DVec2::new(tan_x, tan_y);
+        for point in &points {
+            let depth = point.z - center.z;
+            lower = lower.max(point.truncate() - tangent * depth);
+            upper = upper.min(point.truncate() + tangent * depth);
+        }
+        let xy = (lower + upper) * 0.5;
+        center.x = xy.x;
+        center.y = xy.y;
+        ((lower - upper) / (2. * tangent))
+            .max_element()
+            .max(center.z - lo.z + 0.01)
+    };
+    camera.distance = distance.clamp(0.05, 1e6);
+    if camera.projection == Projection::Parallel {
+        // Depth does not affect orthographic scale. Move the eye in front of
+        // deep geometry without adding empty space to its projected bounds.
+        center.z = center.z.min(lo.z + camera.distance - 0.01);
+    }
+    camera.target = origin + right * center.x + up * center.y + forward * center.z;
 }
 
 pub(crate) fn compose(settings: &Settings, views: &[RgbaImage], size: [u32; 2]) -> Vec<RgbaImage> {
@@ -249,7 +303,11 @@ pub(crate) fn unpremultiply(rgba: &mut [u8]) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn encode(settings: &Settings, pages: &[RgbaImage]) -> Result<Export, String> {
+    encode_with_title(settings,pages,"Model views")
+}
+pub(crate) fn encode_with_title(settings: &Settings, pages: &[RgbaImage], title:&str) -> Result<Export, String> {
     settings.validate()?;
     if settings.format == Format::Jpeg {
         return Err("JPEG cannot preserve transparency. Choose PNG, WebP or PDF.".into());
@@ -268,7 +326,7 @@ pub(crate) fn encode(settings: &Settings, pages: &[RgbaImage]) -> Result<Export,
             extension: "pdf",
             #[cfg(target_arch = "wasm32")]
             mime: "application/pdf",
-            bytes: pdf(settings.paper_mm(), pages),
+            bytes: pdf(settings.paper_mm(), pages, title),
         });
     }
     let encode_image = |image: &RgbaImage| -> Result<Vec<u8>, String> {
@@ -313,14 +371,18 @@ pub(crate) fn encode(settings: &Settings, pages: &[RgbaImage]) -> Result<Export,
 }
 
 /// Lossless RGB images with alpha masks and physical page dimensions in PDF points.
-fn pdf(mm: [f64; 2], pages: &[RgbaImage]) -> Vec<u8> {
+fn pdf(mm: [f64; 2], pages: &[RgbaImage], title:&str) -> Vec<u8> {
     let [w, h] = mm.map(|v| v * 72. / 25.4);
     let mut objects: Vec<Vec<u8>> = vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(), Vec::new()];
+    let logo_id=3+pages.len()*4;
+    let font_id=logo_id+1;
+    let date=crate::estimate_pdf::generation_date().unwrap_or_else(|_| "Date unavailable".into());
+    let header=crate::pdf_header::layout(title,"Model Views",&date,[w,h],crate::pdf_header::base_width);
     let mut kids = Vec::new();
     for page in pages {
         let id = objects.len() + 1;
         kids.push(format!("{id} 0 R"));
-        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w:.4} {h:.4}] /Resources << /XObject << /View {} 0 R >> >> /Contents {} 0 R >>", id + 1, id + 2).into_bytes());
+        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w:.4} {h:.4}] /Resources << /Font << /FH {font_id} 0 R >> /XObject << /Logo {logo_id} 0 R /View {} 0 R >> >> /Contents {} 0 R >>", id + 1, id + 2).into_bytes());
         let rgb = DynamicImage::ImageRgba8(page.clone()).to_rgb8();
         let alpha = image::GrayImage::from_fn(page.width(), page.height(), |x, y| {
             image::Luma([page.get_pixel(x, y)[3]])
@@ -331,7 +393,17 @@ fn pdf(mm: [f64; 2], pages: &[RgbaImage]) -> Vec<u8> {
             3,
             Some(id + 3),
         ));
-        let commands = format!("q {w:.4} 0 0 {h:.4} 0 0 cm /View Do Q\n");
+        let scale=((w-84.)/f64::from(page.width())).min((header.body_top-42.).max(1.)/f64::from(page.height()));
+        let image_w=f64::from(page.width())*scale;
+        let image_h=f64::from(page.height())*scale;
+        let x=(w-image_w)*0.5;
+        let y=42.+(header.body_top-42.-image_h).max(0.)*0.5;
+        let mut commands=header.graphics.clone();
+        for text in &header.text {
+            use std::fmt::Write;
+            let _=writeln!(commands,"0.15 0.20 0.17 rg BT /FH {} Tf 1 0 0 1 {:.3} {:.3} Tm ({}) Tj ET",text.size,text.x,text.y,crate::pdf_header::literal(&text.value));
+        }
+        commands.push_str(&format!("q {image_w:.4} 0 0 {image_h:.4} {x:.4} {y:.4} cm /View Do Q\n"));
         objects.push(
             format!(
                 "<< /Length {} >>\nstream\n{commands}endstream",
@@ -346,6 +418,8 @@ fn pdf(mm: [f64; 2], pages: &[RgbaImage]) -> Vec<u8> {
             None,
         ));
     }
+    objects.push(crate::pdf_header::logo_hex_object().into_bytes());
+    objects.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec());
     objects[1] = format!(
         "<< /Type /Pages /Count {} /Kids [{}] >>",
         pages.len(),

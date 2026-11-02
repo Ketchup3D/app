@@ -3938,17 +3938,7 @@ impl KetchupApp {
         let camera = &self.doc.camera;
         let view = camera.view(size);
         let p = ui.painter().with_clip_rect(rect);
-        let mut themed_display =
-            crate::environment::for_theme(&self.doc.display, ui.visuals().dark_mode);
-        if emphasize_group {
-            // These overrides last only for this frame; the saved style stays intact.
-            if themed_display.face_style == ketchup_core::FaceStyle::Wireframe {
-                themed_display.face_style = ketchup_core::FaceStyle::Shaded;
-            }
-            themed_display.x_ray = false;
-            themed_display.shadows = false;
-            themed_display.section_fill = false;
-        }
+        let themed_display = display_scene::effective_display(&self.doc.display, model, ui.visuals().dark_mode);
         let display = &themed_display;
         if background {
             crate::environment::paint(&p, rect, camera, display, ui.visuals().dark_mode, self.doc.display.shadows);

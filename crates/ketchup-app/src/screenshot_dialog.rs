@@ -132,6 +132,7 @@ impl KetchupApp {
                         &dialog.previews,
                         dialog.capture.is_some(),
                         dialog.exporting,
+                        &source.name,
                     );
                 });
                 let colors = Palette::for_ui(ui);
@@ -221,7 +222,7 @@ fn screenshot_controls(
                         egui::Checkbox::new(&mut settings.views[i], *label),
                     )
                     .on_hover_text(if i == 0 {
-                        "Keep the current camera and framing."
+                        "Fit visible content using the current viewing angle and projection."
                     } else {
                         "Fit the visible model in parallel projection."
                     });
@@ -295,6 +296,13 @@ fn screenshot_group_divider(ui: &mut egui::Ui) {
     ui.add_space(10.);
 }
 
+fn preview_paper_rect(viewport: Rect, settings: &Settings) -> Rect {
+    let [width, height] = settings.paper_mm().map(|v| v as f32);
+    let available = (viewport.size() - Vec2::splat(32.)).max(Vec2::ZERO);
+    let scale = (available.x / width).min(available.y / height);
+    Rect::from_center_size(viewport.center(), egui::vec2(width, height) * scale)
+}
+
 fn screenshot_preview(
     ui: &mut egui::Ui,
     page: &mut usize,
@@ -302,6 +310,7 @@ fn screenshot_preview(
     previews: &[egui::TextureHandle],
     rendering: bool,
     exporting: bool,
+    project_name: &str,
 ) {
     let colors = Palette::for_ui(ui);
     let bounds = ui.max_rect();
@@ -320,6 +329,9 @@ fn screenshot_preview(
                     "Individual views"
                 });
             });
+            let [width, height] = settings.paper_mm();
+            ui.text_weak(format!("{width:.0} × {height:.0} mm · {}",
+                if settings.landscape { "Landscape" } else { "Portrait" }));
             if !settings.combined {
                 ui.horizontal_wrapped(|ui| {
                     for (index, &view) in settings.selected().iter().enumerate() {
@@ -330,10 +342,32 @@ fn screenshot_preview(
         });
     let viewport = Rect::from_min_max(egui::pos2(bounds.left(), ui.cursor().top()), bounds.max);
     let painter = ui.painter().with_clip_rect(viewport);
+    let paper = preview_paper_rect(viewport, settings);
+    painter.rect_filled(paper.translate(egui::vec2(0., 3.)), 0., Color32::from_black_alpha(24));
+    painter.rect_filled(paper, 0., Color32::WHITE);
+    let pdf_header = (settings.format == Format::Pdf).then(|| {
+        let points = settings.paper_mm().map(|v| v * 72. / 25.4);
+        let date = crate::estimate_pdf::generation_date().unwrap_or_default();
+        let header = crate::pdf_header::layout(project_name,"Model Views",&date,points,crate::pdf_header::base_width);
+        let scale = paper.width() / points[0] as f32;
+        crate::brand_mark::paint(&painter,Rect::from_min_size(paper.min+Vec2::splat(42.*scale),Vec2::splat(32.*scale)));
+        for text in &header.text {
+            painter.text(egui::pos2(paper.left()+text.x as f32*scale,paper.bottom()-text.y as f32*scale),
+                Align2::LEFT_BOTTOM,&text.value,FontId::proportional(text.size as f32*scale),Color32::from_rgb(38,51,43));
+        }
+        let y=paper.bottom()-(header.body_top+31.)as f32*scale;
+        painter.hline(paper.left()+42.*scale..=paper.right()-42.*scale,y,Stroke::new(0.5*scale,Color32::from_gray(210)));
+        (header,points,scale)
+    });
     if let Some(texture) = previews.get((*page).min(previews.len().saturating_sub(1))) {
-        let scale = (viewport.width() / texture.size_vec2().x)
-            .min(viewport.height() / texture.size_vec2().y);
-        let image = Rect::from_center_size(viewport.center(), texture.size_vec2() * scale);
+        let image = if let Some((header,[w,_],scale))=&pdf_header {
+            let aspect=f64::from(texture.size_vec2().x/texture.size_vec2().y);
+            let width=(w-84.).min((header.body_top-42.).max(1.)*aspect);
+            let height=width/aspect;
+            let x=(w-width)*0.5;
+            let y=42.+(header.body_top-42.-height).max(0.)*0.5;
+            Rect::from_min_size(egui::pos2(paper.left()+x as f32*scale,paper.bottom()-(y+height)as f32*scale),egui::vec2(width as f32,height as f32)* *scale)
+        } else { paper };
         painter.image(
             texture.id(),
             image,
@@ -354,15 +388,31 @@ fn screenshot_preview(
                 "Preview unavailable"
             },
             FontId::proportional(14.),
-            colors.muted,
+            Color32::from_gray(100),
         );
     }
+    painter.rect_stroke(paper, 0., Stroke::new(1., Color32::from_gray(180)), egui::StrokeKind::Inside);
     if rendering {
-        egui::Spinner::new().color(colors.muted).paint_at(
+        egui::Spinner::new().color(Color32::from_gray(100)).paint_at(
             ui,
             Rect::from_center_size(viewport.center() - egui::vec2(0., 30.), Vec2::splat(22.)),
         );
     }
+}
+
+// Preserve the viewport's effective shadows, materials, theme and fog colors.
+// Export hides editing aids without silently choosing a different render style.
+fn capture_document(doc: &Document, dark: bool) -> Document {
+    let mut source = doc.clone();
+    source.display = display_scene::effective_display(&doc.display, &doc.model, dark);
+    source.model.edit_context = None;
+    source.selection.clear();
+    source.selection_context = None;
+    source.display.axes = false;
+    source.display.grid = false;
+    source.display.guides = false;
+    source.display.group_emphasis = false;
+    source
 }
 
 struct Readback {
@@ -418,20 +468,13 @@ impl Capture {
         renderer::install_resources(device, format, &mut renderer);
         let ctx = egui::Context::default();
         apply(&ctx);
-        ctx.set_theme(egui::ThemePreference::Light);
-        ctx.set_visuals(egui::Visuals::light());
+        ctx.set_visuals(parent.global_style().visuals.clone());
         let scale = (page_size[0] as f32 / settings.pixels()[0] as f32
             * settings.dpi.clamp(72, 300) as f32
             / 96.)
             .max(0.1);
         ctx.set_pixels_per_point(scale);
-        let mut source = doc.clone();
-        source.model.edit_context = None;
-        // Keep modeling aids out of screenshot previews and their exports.
-        source.display.axes = false;
-        source.display.grid = false;
-        source.display.guides = false;
-        source.display.background = [255; 3];
+        let source = capture_document(doc, parent.global_style().visuals.dark_mode);
         let current = source.camera.clone();
         let mut app = KetchupApp::with_document(source, None, true);
         app.doc.display.group_emphasis = false;
@@ -634,6 +677,85 @@ fn texture_descriptor(size: wgpu::Extent3d) -> wgpu::TextureDescriptor<'static> 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    #[test]
+    fn preview_paper_matches_orientation_and_keeps_a_visible_margin() {
+        let viewport=Rect::from_min_size(Pos2::ZERO,egui::vec2(640.,480.));
+        for landscape in [false,true] {
+            let settings=Settings{landscape,..Default::default()};
+            let paper=preview_paper_rect(viewport,&settings);
+            let [w,h]=settings.paper_mm();
+            assert!((f64::from(paper.width()/paper.height())-w/h).abs()<1e-5);
+            assert!(paper.center().distance(viewport.center())<1e-4);
+            assert!(viewport.shrink(15.).contains_rect(paper));
+        }
+    }
+    #[test]
+    fn capture_preserves_viewport_rendering_settings_without_exporting_selection() {
+        let mut doc=Document::default();
+        doc.display.shadows=true;doc.display.shadow_antialiasing=true;
+        doc.display.fog=true;doc.display.background=[36,42,48];
+        doc.selection.insert(123);
+        let captured=capture_document(&doc,true);
+        let expected=display_scene::effective_display(&doc.display,&doc.model,true);
+        assert_eq!(captured.display.shadows,expected.shadows);
+        assert_eq!(captured.display.shadow_antialiasing,expected.shadow_antialiasing);
+        assert_eq!(captured.display.background,expected.background);
+        assert_eq!(captured.display.sun_angle,expected.sun_angle);
+        assert!(captured.selection.is_empty());
+        assert!(!captured.display.axes && !captured.display.grid);
+        assert!(doc.selection.contains(&123));
+    }
+
+
+    #[test]
+    #[ignore = "Requires GPU; verifies an isometric shadow interior does not stripe"]
+    fn antialiased_isometric_shadow_has_uniform_interior() {
+        let mut tested=0;
+        for backend in [wgpu::Backends::PRIMARY,wgpu::Backends::GL] {
+        let mut descriptor=wgpu::InstanceDescriptor::new_without_display_handle();descriptor.backends=backend;
+        let instance=wgpu::Instance::new(descriptor);
+        let Ok(adapter)=pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else {eprintln!("Backend {backend:?} unavailable");continue;};
+        eprintln!("Shadow capture backend: {:?}",adapter.get_info().backend);tested+=1;
+        let (device,queue)=pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let ctx=egui::Context::default();apply(&ctx);ctx.set_visuals(egui::Visuals::light());
+        let mut doc=Document::default();
+        for (min,max) in [(DVec3::new(-3.,-3.,-0.2),DVec3::new(3.,3.,0.)),(DVec3::ZERO,DVec3::new(1.,1.,1.))] {
+            let mut body=Model::default();
+            let p=[min,DVec3::new(max.x,min.y,min.z),DVec3::new(max.x,max.y,min.z),DVec3::new(min.x,max.y,min.z)];
+            for i in 0..4 {body.add_edge(p[i],p[(i+1)%4]).unwrap();}
+            let face=*body.faces.keys().next().unwrap();
+            let normal=ketchup_core::faces::plane(&body,&body.faces[&face].vertices).unwrap().normal;
+            body.push_pull(face,(max.z-min.z)/normal.z).unwrap();
+            let ids=doc.model.paste_entities(&body,DVec3::ZERO);
+            doc.model.make_object(&ids,false,"Shadow fixture").unwrap();
+        }
+        doc.display.shadows=true;doc.display.shadow_antialiasing=true;
+        doc.display.shadow_darkness=0.7;doc.display.sun_angle=135.;doc.display.sun_elevation=45.;
+        doc.display.edges=false;doc.display.profiles=false;doc.display.fog=false;
+        let mut settings=Settings{views:[false;8],paper:Paper::A5,dpi:96,..Default::default()};settings.views[7]=true;
+        for export in [false,true] {
+            let mut capture=Capture::new(&device,&queue,&ctx,&doc,&settings,export).unwrap();
+            device.poll(wgpu::PollType::Wait{submission_index:None,timeout:Some(Duration::from_secs(30))}).unwrap();
+            let pages=capture.poll(&ctx).unwrap().unwrap();let page=&pages[0];
+            let scale=(capture.page_size[0] as f32/settings.pixels()[0] as f32*settings.dpi as f32/96.).max(0.1);
+            let logical=egui::vec2(page.width() as f32,page.height() as f32)/scale;
+            let scene=Rect::from_min_max(egui::pos2(16.,36.),logical.to_pos2()-Vec2::splat(16.));
+            let camera=screenshots::view_camera(&doc.model,&doc.camera,7,[scene.width() as u32,scene.height() as u32]);
+            let mut samples=Vec::new();
+            for i in 0..16 {for j in 0..16 {
+                let point=DVec3::new(1.2+i as f64*0.02,-0.5+j as f64*0.02,0.);
+                let pixel=(scene.min+pv(camera.project(point,dv(scene.size())).unwrap())).to_vec2()*scale;
+                let rgba=page.get_pixel(pixel.x.round()as u32,pixel.y.round()as u32);
+                assert_eq!(rgba[3],255);samples.push(rgba[0]);
+            }}
+            std::fs::create_dir_all("/tmp/ketchup-shadow-qa").unwrap();
+            page.save(format!("/tmp/ketchup-shadow-qa/isometric-{}.png",if export{"export"}else{"preview"})).unwrap();
+            let lo=*samples.iter().min().unwrap();let hi=*samples.iter().max().unwrap();
+            assert!(hi-lo<=5,"shadow stripes in export={export}: {lo}..{hi}");
+        }
+        }
+        assert!(tested>0);
+    }
 
     #[test]
     #[ignore = "Requires a GPU adapter; verifies every visible isometric face in preview and export"]

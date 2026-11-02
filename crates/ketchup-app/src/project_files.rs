@@ -587,7 +587,7 @@ pub fn export_screenshots(
     pages: Vec<image::RgbaImage>,
 ) -> Pending {
     run(ctx, move || {
-        let export = crate::screenshots::encode(&settings, &pages)?;
+        let export = crate::screenshots::encode_with_title(&settings, &pages, &name)?;
         let Some(path) = rfd::FileDialog::new()
             .set_title("Export screenshot")
             .add_filter("Screenshot", &[export.extension])
@@ -612,7 +612,7 @@ pub fn export_screenshots(
     pages: Vec<image::RgbaImage>,
 ) -> Pending {
     let (sender, receiver) = mpsc::channel();
-    let result = crate::screenshots::encode(&settings, &pages).and_then(|export| {
+    let result = crate::screenshots::encode_with_title(&settings, &pages, &name).and_then(|export| {
         download_bytes(
             &exchange_name(&format!("{name} - screenshot"), export.extension),
             &export.bytes,

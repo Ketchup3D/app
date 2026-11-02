@@ -804,6 +804,7 @@ struct Pdf {
     y: f64,
     name: String,
     scope: String,
+    date: String,
 }
 impl Pdf {
     fn new(name: &str, scope: &str) -> Self {
@@ -813,6 +814,7 @@ impl Pdf {
             y: 0.,
             name: name.into(),
             scope: scope.into(),
+            date: crate::estimate_pdf::generation_date().unwrap_or_else(|_| "Date unavailable".into()),
         };
         pdf.new_page();
         pdf
@@ -821,16 +823,14 @@ impl Pdf {
         if !self.page.is_empty() {
             self.pages.push(std::mem::take(&mut self.page));
         }
-        self.y = 800.;
-        let name: String = self.name.chars().take(84).collect();
-        self.text(42., self.y, 10., &name);
-        if !self.scope.is_empty() {
-            self.y -= 20.;
-            self.text(42., self.y, 9., &self.scope.clone());
+        let header=crate::pdf_header::layout(&self.name,"Cutting Plan",&self.date,[595.,842.],crate::pdf_header::base_width);
+        self.page.push_str(&header.graphics);
+        for text in header.text {
+            use std::fmt::Write;
+            let _=writeln!(self.page,"0.15 0.20 0.17 rg BT /F2 {} Tf 1 0 0 1 {:.3} {:.3} Tm ({}) Tj ET",text.size,text.x,text.y,crate::pdf_header::literal(&text.value));
         }
-        self.y -= 24.;
-        self.line(self.y);
-        self.y -= 28.;
+        self.y=header.body_top;
+        if !self.scope.is_empty(){self.text(42.,self.y,9.,&self.scope.clone());self.y-=22.;}
     }
     fn ensure(&mut self, height: f64) {
         if self.y - height < 48. {
@@ -932,6 +932,8 @@ impl Pdf {
             "<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>"
                 .to_owned(),
         ];
+        let logo_id=4+count*2;
+        let header_font_id=logo_id+1;
         for (i, page) in self.pages.iter_mut().enumerate() {
             use std::fmt::Write;
             let _ = writeln!(
@@ -939,12 +941,14 @@ impl Pdf {
                 "0.4 g BT /F1 8 Tf 42 28 Td (Finished sizes - verify before cutting) Tj ET BT /F1 8 Tf 463 28 Td (Page {} / {count}) Tj ET",
                 i + 1
             );
-            objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>", 5 + i * 2));
+            objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 {header_font_id} 0 R >> /XObject << /Logo {logo_id} 0 R >> >> /Contents {} 0 R >>", 5 + i * 2));
             objects.push(format!(
                 "<< /Length {} >>\nstream\n{page}endstream",
                 page.len()
             ));
         }
+        objects.push(crate::pdf_header::logo_hex_object());
+        objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into());
         let mut bytes = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
         for (i, object) in objects.iter().enumerate() {
