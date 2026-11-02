@@ -6,6 +6,7 @@ use std::{path::PathBuf, sync::mpsc::TryRecvError};
 pub(super) enum Action {
     New,
     Open,
+    Recent(usize),
     #[cfg(not(target_arch = "wasm32"))]
     RestartForUpdate,
 }
@@ -23,6 +24,7 @@ pub(super) enum Operation {
 
 pub(super) struct Project {
     pub path: Option<PathBuf>,
+    pub recent: Vec<RecentProject>,
     pub import_format: String,
     pub export_stl: bool,
     pub modified: bool,
@@ -40,6 +42,7 @@ impl Default for Project {
     fn default() -> Self {
         Self {
             path: None,
+            recent: Vec::new(),
             import_format: "skp".into(),
             export_stl: false,
             modified: false,
@@ -56,6 +59,35 @@ impl Default for Project {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(super) struct RecentProject {
+    name: String,
+    path: Option<PathBuf>,
+    server: Option<(String, String)>,
+    browser_file: Option<String>,
+    #[serde(default)]
+    browser_identity: Option<String>,
+}
+
+impl RecentProject {
+    fn same_identity(&self, other: &Self) -> bool {
+        if let Some(path) = &self.path { return other.path.as_ref() == Some(path); }
+        if let Some(file) = &self.browser_file {
+            return other.path.is_none() && other.browser_file.as_ref() == Some(file) && self.browser_identity == other.browser_identity && self.server == other.server;
+        }
+        other.path.is_none() && other.browser_file.is_none() && self.server == other.server
+    }
+    fn description(&self) -> String {
+        let location = if let Some(path) = &self.path { path.display().to_string() }
+        else if let Some(file) = &self.browser_file { format!("Browser file: {file} (browser hides the full path; reselect to open)") }
+        else { String::new() };
+        if let Some((server, id)) = &self.server {
+            let url = format!("{}/share/{id}", server.trim_end_matches('/'));
+            if location.is_empty() { url } else { format!("{location}\n{url}") }
+        } else { location }
+    }
+}
+
 impl Project {
     pub fn blocked(&self) -> bool {
         self.pending.is_some()
@@ -66,6 +98,51 @@ impl Project {
 }
 
 impl KetchupApp {
+    pub(super) fn remember_recent_project(&mut self, browser_file: Option<(String, String)>) {
+        let path = self.project.path.clone().map(|path| {
+            #[cfg(not(target_arch = "wasm32"))]
+            { std::fs::canonicalize(&path).unwrap_or(path) }
+            #[cfg(target_arch = "wasm32")]
+            { path }
+        });
+        let server = self.doc.shared_project.as_ref().map(|link|
+            (link.server.trim_end_matches('/').to_owned(), link.id.clone()));
+        if path.is_none() && server.is_none() && browser_file.is_none() { return; }
+        let (browser_file, browser_identity) = browser_file.map_or((None, None), |(name, identity)| (Some(name), Some(identity)));
+        let entry = RecentProject { name: self.doc.name.clone(), path, server, browser_file, browser_identity };
+        self.project.recent.retain(|old| !entry.same_identity(old));
+        self.project.recent.insert(0, entry);
+        self.project.recent.truncate(10);
+    }
+
+    pub(super) fn recent_projects_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.menu_button("Recent Projects", |ui| {
+            if self.project.recent.is_empty() { ui.label("No recent projects"); }
+            let mut chosen = None;
+            for (index, entry) in self.project.recent.iter().enumerate() {
+                let detail = entry.description();
+                let mut label = egui::text::LayoutJob::default();
+                label.append(&entry.name, 0., egui::TextFormat {
+                    font_id: egui::TextStyle::Button.resolve(ui.style()),
+                    color: ui.visuals().text_color(),
+                    ..Default::default()
+                });
+                label.append(&format!("\n{detail}"), 0., egui::TextFormat {
+                    font_id: egui::TextStyle::Small.resolve(ui.style()),
+                    color: ui.visuals().weak_text_color(),
+                    ..Default::default()
+                });
+                if ui.add(egui::Button::new(label).wrap()).on_hover_text(detail).clicked() {
+                    chosen = Some(index);
+                }
+            }
+            if let Some(index) = chosen {
+                self.request_project(Action::Recent(index), ctx);
+                ui.close();
+            }
+        });
+    }
+
     pub(super) fn replace_project(
         &mut self,
         mut doc: Document,
@@ -138,6 +215,30 @@ impl KetchupApp {
             Action::Open => {
                 self.project.operation = Operation::Open;
                 self.project.pending = Some(project_files::open(ctx));
+            }
+            Action::Recent(index) => {
+                let Some(entry) = self.project.recent.get(index).cloned() else { return; };
+                if let Some(path) = entry.path {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.project.operation = Operation::Open;
+                        self.project.pending = Some(project_files::open_path(ctx, path));
+                        return;
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = path;
+                }
+                if entry.browser_file.is_some() {
+                    self.say(ctx, &format!("Reselect {} to reopen this browser file", entry.name));
+                    self.perform_project(Action::Open, ctx);
+                } else if let Some((server, id)) = entry.server {
+                    if server.trim_end_matches('/') != self.account.server.trim_end_matches('/') {
+                        self.project.error = Some(format!("This project belongs to {server}. Connect to that server in Account before opening it."));
+                    } else {
+                        self.sharing.preferences.invitation = id;
+                        self.sharing.preferences.open = true;
+                    }
+                }
             }
             #[cfg(not(target_arch = "wasm32"))]
             Action::RestartForUpdate => self.restart_for_update(ctx),
@@ -269,9 +370,14 @@ impl KetchupApp {
         let operation = self.project.operation;
         self.project.operation = Operation::Open;
         let snapshot = self.project.snapshot.take();
+        let (result, browser_file) = match result {
+            Ok(Outcome::BrowserOpened(doc, name, identity)) => (Ok(Outcome::Opened(doc, None)), Some((name, identity))),
+            other => (other, None),
+        };
         match result {
             Ok(Outcome::Opened(doc, path)) => {
                 self.replace_project(*doc, path, ctx);
+                self.remember_recent_project(browser_file);
                 self.say(ctx, "Project opened");
             }
             Ok(Outcome::Saved(path)) => {
@@ -326,6 +432,7 @@ impl KetchupApp {
                     (_, false) => "Geometry exported",
                 },
             ),
+            Ok(Outcome::BrowserOpened(..)) => unreachable!(),
             Ok(Outcome::Cancelled) => self.project.after_save = None,
             Err(error) => {
                 self.project.after_save = None;
@@ -460,5 +567,40 @@ impl KetchupApp {
                 self.project.error = None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod recent_tests {
+    use super::*;
+
+    #[test]
+    fn recent_projects_deduplicate_move_to_front_and_cap_at_ten() {
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        for index in 0..12 {
+            app.project.path = Some(format!("project-{index}.ketchup").into());
+            app.remember_recent_project(None);
+        }
+        assert_eq!(app.project.recent.len(), 10);
+        app.project.path = Some("project-5.ketchup".into());
+        app.remember_recent_project(None);
+        assert_eq!(app.project.recent.len(), 10);
+        assert!(app.project.recent[0].path.as_ref().unwrap().ends_with("project-5.ketchup"));
+        assert_ne!(app.project.recent[0].description(), app.project.recent[1].description());
+    }
+
+    #[test]
+    fn browser_and_server_sources_are_distinct() {
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.remember_recent_project(Some(("model.ketchup".into(), "model.ketchup:100:1".into())));
+        app.remember_recent_project(Some(("model.ketchup".into(), "model.ketchup:100:1".into())));
+        assert_eq!(app.project.recent.len(), 1);
+        app.doc.shared_project = Some(ketchup_core::SharedProject {
+            server: "https://example.test".into(), id: "project".into(),
+            revision: 1, server_updated_at: 0, file_updated_at: 0,
+        });
+        app.remember_recent_project(None);
+        assert_eq!(app.project.recent.len(), 2);
+        assert!(app.project.recent[1].description().contains("reselect"));
     }
 }

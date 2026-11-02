@@ -74,6 +74,8 @@ pub(super) struct Sharing {
     notifications: Vec<AccessRequest>,
     socket: Option<crate::realtime::Socket>,
     socket_ready: bool,
+    socket_actor: Option<ketchup_core::HistoryAuthor>,
+    access_confirmed: bool,
     ticket_pending: Option<Receiver<Result<ApiReply, String>>>,
     socket_requests:
         std::collections::BTreeMap<u64, std::sync::mpsc::Sender<Result<ApiReply, String>>>,
@@ -95,6 +97,7 @@ pub(super) struct Sharing {
     desired: BTreeSet<u64>,
     confirmed: BTreeSet<u64>,
     frame_document: Option<Document>,
+    frame_selection: Option<BTreeSet<u64>>,
     save_after_check: Option<bool>,
     save_ready: Option<bool>,
     force_read: bool,
@@ -118,6 +121,8 @@ impl Default for Sharing {
 
             socket: None,
             socket_ready: false,
+            socket_actor: None,
+            access_confirmed: false,
             ticket_pending: None,
             socket_requests: Default::default(),
             socket_outbox: vec![],
@@ -139,6 +144,7 @@ impl Default for Sharing {
             desired: BTreeSet::new(),
             confirmed: BTreeSet::new(),
             frame_document: None,
+            frame_selection: None,
             save_after_check: None,
             save_ready: None,
             force_read: false,
@@ -220,6 +226,9 @@ impl KetchupApp {
         path: &str,
         body: Option<Value>,
     ) {
+        if !self.account.sharing_available() {
+            return;
+        }
         self.sharing.request_started = ctx.input(|i| i.time);
         self.sharing.pending = Some(Pending {
             kind,
@@ -259,11 +268,10 @@ impl KetchupApp {
         }
     }
     pub(super) fn start_sharing(&mut self, ctx: &egui::Context) {
-        self.sharing.preferences.open = true;
-        if !self.account.has_server() {
-            self.sharing.error = Some("Configure Ketchup Server before sharing.".into());
+        if !self.account.sharing_available() {
             return;
         }
+        self.sharing.preferences.open = true;
         if self.doc.shared_project.is_some() {
             self.sharing.force_read = true;
             return;
@@ -306,7 +314,9 @@ impl KetchupApp {
         self.sharing.avatar_pending = None;
         self.sharing.presence_sample_time = f64::NEG_INFINITY;
         self.sharing.frame_document = None;
+        self.sharing.frame_selection = None;
         self.sharing.lock_conflict = false;
+        self.sharing.access_confirmed = false;
         self.sharing.active = None;
         self.sharing.pending = None;
         self.sharing.baseline = None;
@@ -320,6 +330,7 @@ impl KetchupApp {
     }
     fn apply_shared_remote(&mut self, ctx: &egui::Context, remote: &Remote) -> Result<(), String> {
         self.sharing.frame_document = None;
+        self.sharing.frame_selection = None;
         let document = remote
             .document
             .as_ref()
@@ -359,7 +370,7 @@ impl KetchupApp {
         self.sharing.confirmed.retain(|id| {
             self.doc.model.entity_in_context(*id) == Some(*id) && !self.doc.model.is_hidden(*id)
         });
-        self.selected = self.sharing.confirmed.clone();
+        self.selected = self.sharing.desired.clone();
         self.doc.selection = self.sharing.desired.clone();
         self.doc.selection_context = self.doc.model.edit_context;
         if previous_selection != self.sharing.desired {
@@ -378,10 +389,48 @@ impl KetchupApp {
         remote: Remote,
         kind: Kind,
     ) -> Result<(), String> {
+        if !matches!(remote.role.as_str(), "owner" | "edit" | "view" | "none") {
+            return Err("Invalid server access response".into());
+        }
+        if !matches!(&kind, Kind::Create)
+            && self
+                .sharing
+                .active
+                .as_ref()
+                .is_some_and(|id| id != &remote.id)
+        {
+            return Err("The access response belongs to another project".into());
+        }
+        // This role is authoritative server metadata, independent of whether the
+        // accompanying geometry can be loaded. Model validation and a fresh
+        // confirmed lease remain mandatory before any edit is authorized.
+        self.sharing.access_confirmed = true;
+        self.sharing.role = remote.role.clone();
+        self.sharing.remote = Some(remote.clone());
         self.sharing.presence_sample_time = self.sharing.request_started;
         let incoming = remote.document.as_ref().map(remote_content);
+        if remote.role != "none" && remote.document.is_none() {
+            self.sharing.baseline = None;
+            self.sharing.confirmed.clear();
+            self.sharing.last_ack = f64::NEG_INFINITY;
+            return Err(format!(
+                "The server confirmed {} access but did not provide the project data",
+                remote.role
+            ));
+        }
         if let Some(document) = &remote.document {
-            let acknowledged = Document::from_json(&document.to_string())?;
+            let acknowledged = match Document::from_json(&document.to_string()) {
+                Ok(document) => document,
+                Err(error) => {
+                    self.sharing.baseline = None;
+                    self.sharing.confirmed.clear();
+                    self.sharing.last_ack = f64::NEG_INFINITY;
+                    return Err(format!(
+                        "The server confirmed {} access, but the project data could not be loaded: {error}",
+                        remote.role
+                    ));
+                }
+            };
             self.doc.history.merge_attribution(&acknowledged.history);
             self.doc.project_author = acknowledged.project_author;
         }
@@ -439,10 +488,15 @@ impl KetchupApp {
                 if current_link != self.doc.shared_project {
                     self.persist_shared_state();
                 }
+                if invitation {
+                    self.remember_recent_project(None);
+                }
                 if let Kind::Sync { selection, .. } = &kind {
                     self.sharing.selection_dirty = *selection != self.sharing.desired;
                     self.sharing.confirmed = selection.clone();
-                    self.selected = selection.clone();
+                    // This reply may acknowledge an older click. Keep the latest
+                    // local intent visible while its own lease is in flight.
+                    self.selected = self.sharing.desired.clone();
                     self.sharing.last_ack = self.sharing.request_started;
                 }
                 if let Some(save_as) = self.sharing.save_after_check.take() {
@@ -466,7 +520,11 @@ impl KetchupApp {
         Ok(())
     }
     pub(super) fn poll_sharing(&mut self, ctx: &egui::Context) {
-        if !self.account.has_server() {
+        if !self.account.sharing_available() {
+            if self.sharing.active.is_some() || self.sharing.socket.is_some() {
+                self.close_realtime("Server unavailable");
+                self.release_shared_selection(ctx);
+            }
             return;
         }
         if self.sharing.guest.is_none() {
@@ -484,6 +542,7 @@ impl KetchupApp {
             self.sharing.notifications.clear();
             self.sharing.remote = None;
             self.sharing.role = "none".into();
+            self.sharing.access_confirmed = false;
             if !restore_selection {
                 self.sharing.desired.clear();
             }
@@ -494,6 +553,10 @@ impl KetchupApp {
             self.sharing.last_ack = f64::NEG_INFINITY;
         }
         self.pump_realtime(ctx, now);
+        if !self.account.sharing_available() {
+            self.release_shared_selection(ctx);
+            return;
+        }
         if let Some(pending) = &self.sharing.pending {
             let result = match pending.receiver.try_recv() {
                 Ok(result) => Some(result),
@@ -510,6 +573,7 @@ impl KetchupApp {
                         if !(200..300).contains(&reply.status) {
                             if reply.status == 401 || reply.status == 403 {
                                 self.sharing.role = "none".into();
+                                self.sharing.access_confirmed = false;
                                 self.sharing.confirmed.clear();
                                 self.selected.clear();
                                 self.sharing.last_ack = f64::NEG_INFINITY;
@@ -589,7 +653,10 @@ impl KetchupApp {
                 {
                     self.sharing.force_read = false;
                     self.sharing_request(ctx, Kind::Read, &format!("/api/projects/{id}"), None);
-                } else if self.sharing.conflict.is_none() && self.sharing.role != "none" {
+                } else if self.sharing.conflict.is_none()
+                    && self.sharing.role != "none"
+                    && self.sharing.baseline.is_some()
+                {
                     let content = shared_content(&self.doc);
                     let dirty = self
                         .sharing
@@ -629,7 +696,7 @@ impl KetchupApp {
         }
     }
     pub(super) fn shared_save_check(&mut self, ctx: &egui::Context, save_as: bool) -> bool {
-        if self.doc.shared_project.is_none() {
+        if !self.account.sharing_available() || self.doc.shared_project.is_none() {
             return false;
         }
         if self.sharing.conflict.is_some() {
@@ -645,24 +712,45 @@ impl KetchupApp {
         true
     }
     pub(super) fn shared_selection_to_remember(&self) -> Option<&BTreeSet<u64>> {
-        (self.doc.shared_project.is_some() && self.sharing.active.is_some())
+        (self.account.sharing_available() && self.doc.shared_project.is_some() && self.sharing.active.is_some())
             .then_some(&self.sharing.desired)
     }
     pub(super) fn shared_edit_allowed(&self, ctx: &egui::Context) -> bool {
-        self.doc.shared_project.is_none()
+        !self.account.sharing_available() || self.doc.shared_project.is_none()
             || (matches!(self.sharing.role.as_str(), "owner" | "edit")
                 && self.sharing.conflict.is_none()
                 && self.sharing.baseline.is_some()
                 && ctx.input(|i| i.time) - self.sharing.last_ack < 10.
-                && self.selected == self.sharing.confirmed
+                // Creation, grouping and deletion can change selection as a
+                // result of an authorized edit. Check its starting selection.
+                && self.sharing.frame_selection.as_ref().unwrap_or(&self.selected)
+                    == &self.sharing.confirmed
                 && self.sharing.desired == self.sharing.confirmed)
+    }
+    pub(super) fn shared_edit_block_reason(&self, ctx: &egui::Context) -> &'static str {
+        if !matches!(self.sharing.role.as_str(), "owner" | "edit") {
+            "Editing access has not been confirmed. Check your account and File → Share."
+        } else if self.sharing.conflict.is_some() {
+            "Resolve the project version conflict in File → Share before editing."
+        } else if self.sharing.access_confirmed
+            && self.sharing.socket_ready
+            && self.sharing.baseline.is_none()
+        {
+            "The server confirmed editing access, but project data is unavailable. Review the error in File → Share."
+        } else if self.sharing.baseline.is_none()
+            || ctx.input(|i| i.time) - self.sharing.last_ack >= 10.
+        {
+            "Waiting for the server connection before editing. Your editing access is unchanged."
+        } else {
+            "Waiting for the server to confirm the object's selection lock."
+        }
     }
     pub(super) fn shared_fastener_edit_allowed(
         &self,
         ctx: &egui::Context,
         pair: &BTreeSet<u64>,
     ) -> bool {
-        self.doc.shared_project.is_none()
+        !self.account.sharing_available() || self.doc.shared_project.is_none()
             || (matches!(self.sharing.role.as_str(), "owner" | "edit")
                 && self.sharing.conflict.is_none()
                 && self.sharing.baseline.is_some()
@@ -671,15 +759,15 @@ impl KetchupApp {
                 && self.sharing.desired == self.sharing.confirmed)
     }
     pub(super) fn sharing_before_frame(&mut self, ctx: &egui::Context) {
-        if self.doc.shared_project.is_some() {
+        if self.account.sharing_available() && self.doc.shared_project.is_some() {
             if ctx.input(|i| i.time) - self.sharing.last_ack > 10. {
                 if !self.sharing.confirmed.is_empty() {
                     self.sharing.selection_dirty = true;
                     ctx.request_repaint();
                 }
                 self.sharing.confirmed.clear();
-                self.selected.clear();
             }
+            self.sharing.frame_selection = Some(self.selected.clone());
             self.sharing.frame_document = Some(self.doc.clone());
         }
     }
@@ -695,33 +783,70 @@ impl KetchupApp {
         {
             ctx.request_repaint();
         }
-        let selection_changed = self.selected != self.sharing.confirmed;
+        let writable = self.shared_edit_allowed(ctx);
+        // Compare with the start of this frame, not the last server lease.
+        // A pending selection is local intent, not a new click on every frame.
+        let selection_changed = self
+            .sharing
+            .frame_selection
+            .take()
+            .is_some_and(|previous| previous != self.selected);
         if selection_changed {
             self.sharing.desired = self.selected.clone();
-            self.selected = self.sharing.confirmed.clone();
             self.sharing.selection_dirty = true;
             ctx.request_repaint();
         }
-        let writable = matches!(self.sharing.role.as_str(), "owner" | "edit")
-            && self.sharing.conflict.is_none()
-            && self.sharing.baseline.is_some()
-            && ctx.input(|i| i.time) - self.sharing.last_ack < 10.
-            && !selection_changed
-            && self.sharing.desired == self.sharing.confirmed;
         if !writable && shared_content(&before) != shared_content(&self.doc) {
             self.doc.model = before.model;
             self.doc.name = before.name;
             self.doc.history = before.history;
             self.changed(ctx);
             self.persist_shared_state();
-            self.say(
-                ctx,
-                "Changes require editing approval and a confirmed selection lease.",
-            );
+            self.say(ctx, self.shared_edit_block_reason(ctx));
         }
     }
+    fn sharing_access_label(&self) -> &str {
+        if self.sharing.access_confirmed {
+            &self.sharing.role
+        } else {
+            "Waiting for server confirmation"
+        }
+    }
+    fn sharing_identity_status(&self) -> String {
+        let account = self
+            .account
+            .user
+            .as_ref()
+            .map_or("Not signed in", |user| user.name.as_str());
+        let actor = self.sharing.socket_actor.as_ref().or_else(|| {
+            self.sharing
+                .remote
+                .as_ref()
+                .and_then(|remote| remote.actor.as_ref())
+        });
+        let connection = actor
+            .map(|actor| {
+                format!(
+                    "{} ({})",
+                    actor.name,
+                    if actor.kind == "guest" {
+                        "Guest"
+                    } else {
+                        "Account"
+                    }
+                )
+            })
+            .unwrap_or_else(|| {
+                if self.sharing.socket_ready {
+                    "Connected; server identity not reported".into()
+                } else {
+                    "Not connected".into()
+                }
+            });
+        format!("Account: {account} · Sharing connection: {connection}")
+    }
     pub(super) fn share_dialog(&mut self, ctx: &egui::Context) {
-        if !self.sharing.preferences.open {
+        if !self.account.sharing_available() || !self.sharing.preferences.open {
             return;
         }
         let mut action = None;
@@ -734,12 +859,21 @@ impl KetchupApp {
                     ui.horizontal_wrapped(|ui| { ui.hyperlink(&url); if ui.button("Copy link").clicked() { ctx.copy_text(url); } });
                     if ui.button("Keep local as separate project").clicked() { action = Some(("detach".into(), String::new())); }
                     if let Some(author) = &self.doc.project_author { ui.label(format!("Original project author: {}", author.name)); }
-                    ui.label(format!("Access: {} · reference revision: {}", self.sharing.role, link.revision));
+                    let access = self.sharing_access_label();
+                    ui.label(format!("Access: {} · reference revision: {}", access, link.revision));
+                    ui.label(self.sharing_identity_status());
+                    if self.account.user.is_none() && ui.button("Sign in to your account").clicked() { action=Some(("sign_in".into(),String::new())); }
+                    if let (Some(user),Some(actor))=(&self.account.user,&self.sharing.socket_actor) {
+                        if actor.id != format!("user:{}",user.id) {
+                            ui.colored_label(ui.visuals().warn_fg_color,"The sharing connection uses a different identity. Refresh access to reconnect with your current account.");
+                        }
+                    }
+                    if ui.button("Refresh access").clicked() { action = Some(("refresh".into(),String::new())); }
                     ui.label(format!("Server timestamp: {} · file timestamp: {} (UTC epoch seconds)", link.server_updated_at, link.file_updated_at));
                     if self.sharing.role == "none" || self.sharing.role == "view" {
                         ui.horizontal(|ui| {
-                            if ui.button("Request viewing access").clicked() { action = Some(("view".to_owned(), String::new())); }
-                            if ui.button("Request editing access").clicked() { action = Some(("edit".to_owned(), String::new())); }
+                            if ui.add_enabled(self.sharing.access_confirmed, egui::Button::new("Request viewing access")).clicked() { action = Some(("view".to_owned(), String::new())); }
+                            if ui.add_enabled(self.sharing.access_confirmed, egui::Button::new("Request editing access")).clicked() { action = Some(("edit".to_owned(), String::new())); }
                         });
                     }
                     if let Some(remote) = &self.sharing.remote {
@@ -797,15 +931,36 @@ impl KetchupApp {
             self.sharing.preferences.open = false;
         }
         if let Some((action, argument)) = action {
-            if self.sharing.pending.is_some() {
+            if self.sharing.pending.is_some() && action != "refresh" && action != "sign_in" {
                 return;
             }
             self.handle_share_action(ctx, &action, &argument);
         }
     }
     fn handle_share_action(&mut self, ctx: &egui::Context, action: &str, argument: &str) {
+        if !self.account.sharing_available() {
+            return;
+        }
         match action {
             "create" => self.start_sharing(ctx),
+            "sign_in" => {
+                self.sharing.preferences.open = false;
+                self.account.open = true;
+                ctx.request_repaint();
+            }
+            "refresh" => {
+                self.close_realtime("Refreshing sharing identity");
+                self.sharing.pending = None;
+                self.sharing.socket_retry_at = 0.;
+                self.sharing.force_read = true;
+                self.sharing.access_confirmed = false;
+                self.sharing.role = "none".into();
+                self.sharing.baseline = None;
+                self.sharing.remote = None;
+                self.sharing.error = None;
+                self.account.refresh(ctx);
+                ctx.request_repaint();
+            }
             "open" | "review" => {
                 let raw = if action == "review" {
                     argument
@@ -922,6 +1077,9 @@ impl KetchupApp {
         }
     }
     pub(super) fn shared_status(&self, now: f64) -> Option<String> {
+        if !self.account.sharing_available() {
+            return None;
+        }
         self.doc.shared_project.as_ref()?;
         if self.sharing.conflict.is_some() {
             return Some("Sync conflict · File → Share".into());
@@ -962,6 +1120,7 @@ mod tests {
     fn app() -> KetchupApp {
         let mut app = KetchupApp::with_document(Document::default(), None, true);
         app.account.server = "https://sharing.example".into();
+        app.account.server_reachable = true;
         app.doc.shared_project = Some(ketchup_core::SharedProject {
             server: app.account.server.clone(),
             id: "a".repeat(48),
@@ -988,12 +1147,36 @@ mod tests {
         }
     }
     #[test]
+    fn unavailable_server_bypasses_sharing_without_removing_project_link() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.account.server_reachable = false;
+        let link = app.doc.shared_project.clone();
+        assert!(app.shared_edit_allowed(&ctx));
+        assert!(app.shared_fastener_edit_allowed(&ctx, &BTreeSet::from([1, 2])));
+        assert!(!app.shared_save_check(&ctx, false));
+        assert!(app.shared_selection_to_remember().is_none());
+        assert!(app.shared_status(0.).is_none());
+        app.start_sharing(&ctx);
+        assert!(!app.sharing.preferences.open);
+        app.sharing_before_frame(&ctx);
+        assert!(app.sharing.frame_document.is_none());
+        app.poll_sharing(&ctx);
+        assert!(app.sharing.pending.is_none());
+        assert!(app.sharing.active.is_none());
+        assert_eq!(app.doc.shared_project, link);
+        app.account.server_reachable = true;
+        assert!(!app.shared_edit_allowed(&ctx));
+    }
+
+    #[test]
     fn fastener_changes_require_current_edit_approval_and_matching_lease() {
         let ctx = egui::Context::default();
         let mut app = app();
         let pair = BTreeSet::from([1, 2]);
         assert!(!app.shared_fastener_edit_allowed(&ctx, &pair));
         app.sharing.role = "edit".into();
+        app.sharing.last_ack = ctx.input(|i| i.time);
         app.sharing.baseline = Some(shared_content(&app.doc));
         app.sharing.confirmed = pair.clone();
         app.sharing.desired = pair.clone();
@@ -1069,14 +1252,20 @@ mod tests {
         assert_eq!(app.doc.display, display);
     }
     #[test]
-    fn selection_is_not_committed_until_the_server_acknowledges_it() {
+    fn selection_stays_visible_but_editing_waits_for_the_server_lease() {
         let ctx = egui::Context::default();
         let mut app = app();
         app.sharing_before_frame(&ctx);
         app.selected.insert(42);
         app.sharing_after_frame(&ctx);
-        assert!(app.selected.is_empty());
+        assert_eq!(app.selected, BTreeSet::from([42]));
         assert!(app.sharing.desired.contains(&42));
+        assert!(app.sharing.confirmed.is_empty());
+        assert!(!app.shared_edit_allowed(&ctx));
+        app.sharing_before_frame(&ctx);
+        app.sharing_after_frame(&ctx);
+        assert_eq!(app.selected, BTreeSet::from([42]));
+        assert_eq!(app.sharing.desired, BTreeSet::from([42]));
         let remote = remote(&app, "Untitled model", 1);
         app.accept_shared_reply(
             &ctx,
@@ -1088,6 +1277,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(app.selected, BTreeSet::from([42]));
+    }
+    #[test]
+    fn delayed_selection_reply_does_not_replace_a_newer_click_or_deselection() {
+        let ctx = egui::Context::default();
+        for latest in [BTreeSet::from([43]), BTreeSet::new()] {
+            let mut app = app();
+            app.sharing.baseline = Some(shared_content(&app.doc));
+            app.sharing.desired = latest.clone();
+            app.selected = latest.clone();
+            let reply = remote(&app, "Untitled model", 1);
+            app.accept_shared_reply(
+                &ctx,
+                reply,
+                Kind::Sync {
+                    sent: None,
+                    selection: BTreeSet::from([42]),
+                },
+            )
+            .unwrap();
+            assert_eq!(app.sharing.confirmed, BTreeSet::from([42]));
+            assert_eq!(app.selected, latest);
+            assert!(app.sharing.selection_dirty);
+            app.sharing_before_frame(&ctx);
+            app.sharing_after_frame(&ctx);
+            assert_eq!(app.sharing.desired, latest);
+            assert!(!app.shared_edit_allowed(&ctx));
+        }
+    }
+    #[test]
+    fn authorized_creation_can_select_its_new_geometry_without_requiring_new_approval() {
+        let ctx = egui::Context::default();
+        for role in ["owner", "edit"] {
+            let mut app = app();
+            app.sharing.role = role.into();
+            app.sharing.last_ack = 0.;
+            app.sharing.baseline = Some(shared_content(&app.doc));
+            app.sharing_before_frame(&ctx);
+            let before = app.doc.model.clone();
+            let edge = app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+            app.selected = BTreeSet::from([edge]);
+            app.finish_edit("Add edge", before, &ctx);
+            assert!(app.doc.model.edges.contains_key(&edge));
+            app.sharing_after_frame(&ctx);
+            assert!(app.doc.model.edges.contains_key(&edge));
+            assert_eq!(app.sharing.desired, BTreeSet::from([edge]));
+        }
     }
     #[test]
     fn read_only_and_unconfirmed_edits_are_rolled_back() {
@@ -1129,7 +1364,8 @@ mod tests {
                 .shared_project
                 .is_none()
         );
-        assert!(!json.contains("token") && !json.contains("connection"));
+        // `model.connections` is a legitimate catalog, not a socket credential.
+        assert!(!json.contains("\"token\":") && !json.contains("\"connection\":"));
     }
 }
 
@@ -1413,6 +1649,7 @@ impl KetchupApp {
     fn close_realtime(&mut self, reason: &str) {
         self.sharing.socket = None;
         self.sharing.socket_ready = false;
+        self.sharing.socket_actor = None;
         self.sharing.ticket_pending = None;
         for (_, sender) in std::mem::take(&mut self.sharing.socket_requests) {
             let _ = sender.send(Err(reason.into()));
@@ -1514,6 +1751,7 @@ impl KetchupApp {
             let value = match event {
                 Ok(v) => v,
                 Err(error) => {
+                    self.account.server_reachable = false;
                     self.close_realtime(&error);
                     self.sharing.error = Some(error);
                     self.sharing.socket_retry_at = now + 1.;
@@ -1525,6 +1763,7 @@ impl KetchupApp {
             self.sharing.socket_last_message = now;
             match value["type"].as_str().unwrap_or("") {
                 "ready" => {
+                    self.sharing.socket_actor = serde_json::from_value(value["actor"].clone()).ok();
                     self.sharing.socket_ready = true;
                     self.sharing.error = None;
                     self.sharing.heartbeat_at = now + 5.;
@@ -1566,6 +1805,7 @@ impl KetchupApp {
             }
         }
         if self.sharing.socket.is_some() && now - self.sharing.socket_last_message > 15. {
+            self.account.server_reachable = false;
             self.close_realtime("WebSocket connection timed out");
             self.sharing.error = Some("WebSocket connection timed out".into());
             self.sharing.connection = ketchup_core::MaterialId::new_v4().to_string();
@@ -1672,5 +1912,129 @@ mod websocket_state_tests {
         assert_eq!(app.selected, BTreeSet::from([edge]));
         assert_eq!(app.sharing.desired, BTreeSet::from([edge]));
         assert!(!app.sharing.selection_dirty);
+    }
+}
+
+#[cfg(test)]
+mod access_status_tests {
+    use super::*;
+    fn app() -> KetchupApp {
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        // Tests never contact a configured/personal server.
+        app.account.server.clear();
+        app.doc.shared_project = Some(ketchup_core::SharedProject {
+            server: String::new(),
+            id: "a".repeat(48),
+            revision: 1,
+            server_updated_at: 100,
+            file_updated_at: 100,
+        });
+        app.sharing.active = Some("a".repeat(48));
+        app
+    }
+    fn response(app: &KetchupApp, role: &str) -> Remote {
+        Remote {
+            id: "a".repeat(48),
+            role: role.into(),
+            revision: 1,
+            updated_at: 100,
+            server_time: 100,
+            document: Some(serde_json::to_value(&app.doc).unwrap()),
+            requests: vec![],
+            locks: vec![],
+            actor: None,
+        }
+    }
+    #[test]
+    fn decoding_failure_does_not_misrepresent_confirmed_owner_access() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        assert_eq!(
+            app.sharing_access_label(),
+            "Waiting for server confirmation"
+        );
+        app.sharing.baseline = Some(shared_content(&app.doc));
+        app.sharing.last_ack = 0.;
+        let mut remote = response(&app, "owner");
+        remote.document.as_mut().unwrap()["model"]["edges"] = json!("invalid map");
+        let error = app
+            .accept_shared_reply(&ctx, remote, Kind::Read)
+            .unwrap_err();
+        assert!(error.contains("server confirmed owner access"));
+        assert_eq!(app.sharing_access_label(), "owner");
+        assert!(app.sharing.access_confirmed);
+        assert!(app.sharing.baseline.is_none());
+        // A heartbeat cannot turn an invalid/unloaded baseline into an editing grant.
+        app.sharing.last_ack = 0.;
+        app.sharing.socket_ready = true;
+        assert!(!app.shared_edit_allowed(&ctx));
+        assert!(
+            app.shared_edit_block_reason(&ctx)
+                .contains("project data is unavailable")
+        );
+        assert_eq!(app.sharing.remote.as_ref().unwrap().role, "owner");
+    }
+    #[test]
+    fn recorded_project_author_never_grants_access_to_a_guest() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.doc.project_author = Some(ketchup_core::HistoryAuthor {
+            id: "user:owner".into(),
+            name: "Original owner".into(),
+            kind: "account".into(),
+            verified: true,
+        });
+        let mut remote = response(&app, "none");
+        remote.document = None;
+        remote.actor = Some(ketchup_core::HistoryAuthor {
+            id: "guest:visitor".into(),
+            name: "Guest visitor".into(),
+            kind: "guest".into(),
+            verified: false,
+        });
+        app.accept_shared_reply(&ctx, remote, Kind::Read).unwrap();
+        assert_eq!(app.sharing_access_label(), "none");
+        assert!(!app.shared_edit_allowed(&ctx));
+        assert!(
+            app.sharing_identity_status()
+                .contains("Guest visitor (Guest)")
+        );
+        assert_eq!(app.doc.project_author.as_ref().unwrap().id, "user:owner");
+    }
+    #[test]
+    fn a_missing_document_never_reuses_a_previously_editable_baseline() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.sharing.baseline = Some(shared_content(&app.doc));
+        app.sharing.last_ack = 0.;
+        let mut remote = response(&app, "owner");
+        remote.document = None;
+        assert!(app.accept_shared_reply(&ctx, remote, Kind::Read).is_err());
+        assert_eq!(app.sharing_access_label(), "owner");
+        assert!(app.sharing.baseline.is_none());
+        assert!(!app.shared_edit_allowed(&ctx));
+    }
+    #[test]
+    fn refresh_preserves_local_work_and_selection_but_requires_new_authorization() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.doc.name = "Unsaved local work".into();
+        app.selected = BTreeSet::from([42]);
+        app.sharing.desired = app.selected.clone();
+        app.sharing.role = "owner".into();
+        app.sharing.access_confirmed = true;
+        app.sharing.baseline = Some(shared_content(&app.doc));
+        app.sharing.last_ack = 0.;
+        let before = app.doc.clone();
+        app.handle_share_action(&ctx, "refresh", "");
+        assert_eq!(app.doc, before);
+        assert_eq!(app.selected, BTreeSet::from([42]));
+        assert_eq!(app.sharing.desired, BTreeSet::from([42]));
+        assert!(app.sharing.force_read);
+        assert_eq!(
+            app.sharing_access_label(),
+            "Waiting for server confirmation"
+        );
+        assert!(!app.shared_edit_allowed(&ctx));
     }
 }

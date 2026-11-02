@@ -36,6 +36,7 @@ enum Request {
 
 pub(crate) struct Account {
     pub(crate) server: String,
+    pub(crate) server_reachable: bool,
     pub open: bool,
     pub menu_open: bool,
     confirm_logout: bool,
@@ -55,6 +56,7 @@ impl Default for Account {
         let error = server.as_ref().err().cloned();
         Self {
             server: server.unwrap_or_default(),
+            server_reachable: false,
             open: false,
             menu_open: false,
             confirm_logout: false,
@@ -73,6 +75,9 @@ impl Default for Account {
 impl Account {
     pub fn has_server(&self) -> bool {
         !self.server.is_empty()
+    }
+    pub(crate) fn sharing_available(&self) -> bool {
+        self.has_server() && self.server_reachable
     }
     pub fn start(&mut self, ctx: &egui::Context) {
         if self.server.is_empty() {
@@ -134,6 +139,7 @@ impl Account {
                     if session.authenticated && session.user.is_none() {
                         return Err("Invalid server profile".into());
                     }
+                    self.server_reachable = true;
                     self.csrf = session.csrf;
                     self.user = session.user.filter(|_| session.authenticated);
                     self.texture = None;
@@ -221,6 +227,7 @@ impl Account {
                 self.error = Some(error);
                 self.waiting = false;
                 if session_request {
+                    self.server_reachable = false;
                     self.user = None;
                     self.texture = None;
                 }
@@ -231,10 +238,12 @@ impl Account {
             self.waiting = false;
             self.error = Some("Login timed out. Continue with Google to try again.".into());
         }
-        if self.waiting && self.pending.is_none() && ctx.input(|i| i.time) >= self.next_poll {
+        if (self.waiting || !self.server_reachable) && self.has_server()
+            && self.pending.is_none() && ctx.input(|i| i.time) >= self.next_poll {
+            self.next_poll = ctx.input(|i| i.time) + 10.;
             self.refresh(ctx);
         }
-        if self.waiting {
+        if self.waiting || (!self.server_reachable && self.has_server()) {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
     }
@@ -250,6 +259,10 @@ impl Account {
         self.error = None;
     }
     pub fn avatar_menu(&mut self, avatar: &egui::Response) {
+        if !self.sharing_available() {
+            self.menu_open = false;
+            return;
+        }
         if avatar.clicked() {
             self.menu_open = !self.menu_open;
         }
@@ -343,7 +356,7 @@ impl Account {
         }
     }
     fn show_logout_confirmation(&mut self, ctx: &egui::Context) {
-        if !self.confirm_logout {
+        if !self.sharing_available() || !self.confirm_logout {
             return;
         }
         if self.user.is_none() {
@@ -390,8 +403,14 @@ impl Account {
         }
     }
     pub fn show(&mut self, ctx: &egui::Context) {
+        if !self.sharing_available() {
+            self.open = false;
+            self.menu_open = false;
+            self.confirm_logout = false;
+            return;
+        }
         self.show_logout_confirmation(ctx);
-        if !self.open || !self.has_server() {
+        if !self.open {
             return;
         }
         let response = Modal::new("account_login", 400.).show(ctx, |modal| {
@@ -445,19 +464,22 @@ impl Account {
                     );
                     #[cfg(target_arch = "wasm32")]
                     {
-                        ctx.open_url(egui::OpenUrl::new_tab(format!("{server}/auth/google")));
+                        let url = format!("{server}/auth/google?popup=1");
+                        let open = js_sys::Function::new_with_args(
+                            "url",
+                            "return !!window.open(url, 'ketchup-sign-in', 'popup,width=500,height=680');",
+                        );
+                        let opened = open
+                            .call1(&js_sys::global(), &url.as_str().into())
+                            .ok()
+                            .and_then(|result| result.as_bool())
+                            .unwrap_or(false);
+                        if !opened {
+                            ctx.open_url(egui::OpenUrl::new_tab(url));
+                        }
                         self.waiting = true;
                         self.login_deadline = ctx.input(|i| i.time) + 600.;
                     }
-                }
-                if ui
-                    .add_enabled(
-                        self.pending.is_none(),
-                        egui::Button::new("Retry connection"),
-                    )
-                    .clicked()
-                {
-                    self.refresh(ctx);
                 }
             });
         });
@@ -813,4 +835,46 @@ fn project_request(
         });
     }
     receiver
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_server_closes_account_ui_without_sending_requests() {
+        let ctx = egui::Context::default();
+        let mut account = Account::default();
+        account.server = "https://sharing.example".into();
+        account.user = Some(User {
+            id: "test".into(), name: "Test User".into(), email: String::new(),
+        });
+        account.open = true;
+        account.menu_open = true;
+        account.confirm_logout = true;
+        account.show(&ctx);
+        assert!(!account.open);
+        assert!(!account.menu_open);
+        assert!(!account.confirm_logout);
+        assert!(account.pending.is_none());
+        assert!(account.user.is_some());
+    }
+
+    #[test]
+    fn sharing_requires_a_valid_session_response_even_for_guests() {
+        let ctx = egui::Context::default();
+        let mut account = Account::default();
+        account.server = "https://sharing.example".into();
+        assert!(!account.sharing_available());
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Ok(br#"{"authenticated":false,"user":null}"#.to_vec())).unwrap();
+        account.pending = Some((Request::Session, receiver));
+        account.poll(&ctx);
+        assert!(account.sharing_available());
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Err("Server unreachable".into())).unwrap();
+        account.pending = Some((Request::Session, receiver));
+        account.poll(&ctx);
+        assert!(!account.sharing_available());
+    }
 }

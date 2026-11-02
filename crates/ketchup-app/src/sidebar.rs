@@ -53,6 +53,7 @@ pub(super) struct InspectorPreferences {
     camera: Option<CameraPreferences>,
     viewports: viewports::Preferences,
     screenshot: crate::screenshots::Settings,
+    recent_projects: Vec<projects::RecentProject>,
     import_format: String,
     export_stl: bool,
     sections: std::collections::BTreeMap<String, bool>,
@@ -90,6 +91,7 @@ impl Default for InspectorPreferences {
             camera: None,
             viewports: viewports::Preferences::default(),
             screenshot: Default::default(),
+            recent_projects: Vec::new(),
             import_format: "skp".into(),
             export_stl: false,
             sections: Default::default(),
@@ -427,6 +429,8 @@ impl KetchupApp {
         self.general_settings = preferences.general.clone();
         self.general_settings.normalize();
         preferences.tools.restore(self);
+        self.project.recent = preferences.recent_projects.clone();
+        self.project.recent.truncate(10);
         self.project.import_format =
             if ["skp", "stl", "obj", "dxf"].contains(&preferences.import_format.as_str()) {
                 preferences.import_format.clone()
@@ -554,6 +558,7 @@ impl KetchupApp {
             camera: Some(CameraPreferences::capture(&self.doc.camera)),
             viewports: self.viewports.capture(&self.doc.camera),
             screenshot: self.screenshot.settings.clone(),
+            recent_projects: self.project.recent.clone(),
             import_format: self.project.import_format.clone(),
             export_stl: self.project.export_stl,
             section_aliases: ctx.data_mut(|data| {

@@ -9,6 +9,7 @@ mod tests;
 #[derive(Debug)]
 pub enum Outcome {
     Opened(Box<Document>, Option<PathBuf>),
+    BrowserOpened(Box<Document>, String, String),
     Saved(Option<PathBuf>),
     Imported(Box<ketchup_core::Model>, std::collections::BTreeSet<u64>),
     Exported,
@@ -86,6 +87,12 @@ pub fn open(ctx: &eframe::egui::Context) -> Pending {
         else {
             return Ok(Outcome::Cancelled);
         };
+        read_project(path)
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_project(path: PathBuf) -> Result<Outcome, String> {
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         decode(&bytes).map(|mut doc| {
             if let Some(link) = &mut doc.shared_project {
@@ -98,7 +105,11 @@ pub fn open(ctx: &eframe::egui::Context) -> Pending {
             }
             Outcome::Opened(Box::new(doc), Some(path))
         })
-    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn open_path(ctx: &eframe::egui::Context, path: PathBuf) -> Pending {
+    run(ctx, move || read_project(path))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -185,7 +196,7 @@ pub fn open(ctx: &eframe::egui::Context) -> Pending {
                         link.file_updated_at = (file.inner().last_modified() / 1000.) as u64;
                     }
                     set_document_name(&mut doc, std::path::Path::new(&file.file_name()));
-                    Outcome::Opened(Box::new(doc), None)
+                    Outcome::BrowserOpened(Box::new(doc), file.file_name(), format!("{}:{}:{}", file.file_name(), file.inner().size(), file.inner().last_modified()))
                 }),
                 Err(_) => Err("The browser could not read this project".into()),
             }

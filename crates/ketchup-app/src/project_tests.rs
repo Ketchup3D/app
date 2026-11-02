@@ -258,6 +258,7 @@ fn failed_or_cancelled_file_operations_keep_current_work_and_cancel_queued_new()
         );
         assert!(app.project.modified);
         assert!(app.project.after_save.is_none());
+        assert!(app.project.recent.is_empty());
         assert!(app.project.pending.is_none());
     }
 }
@@ -510,4 +511,16 @@ fn exchange_formats_use_atomic_import_and_undo_redo() {
         assert_eq!(app.doc.model, after);
         assert_eq!(app.selected, selection);
     }
+}
+
+#[test]
+fn recent_project_uses_unsaved_changes_protection() {
+    let ctx = egui::Context::default();
+    let mut app = KetchupApp::with_document(Document::default(), None, true);
+    app.project.path = Some("example.ketchup".into());
+    app.remember_recent_project(None);
+    app.project.modified = true;
+    app.request_project(projects::Action::Recent(0), &ctx);
+    assert!(matches!(app.project.confirm, Some(projects::Action::Recent(0))));
+    assert!(app.project.pending.is_none());
 }

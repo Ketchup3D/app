@@ -625,7 +625,7 @@ impl KetchupApp {
     fn finish_edit(&mut self, label: &str, before: Model, ctx: &egui::Context) {
         if before != self.doc.model && !self.shared_edit_allowed(ctx) {
             self.doc.model = before;
-            self.say(ctx, "Editing approval and a confirmed selection are required.");
+            self.say(ctx, self.shared_edit_block_reason(ctx));
             return;
         }
         if before != self.doc.model {
@@ -664,7 +664,7 @@ impl KetchupApp {
         }
     }
     fn navigate_history(&mut self, ctx: &egui::Context, target: usize) {
-        if !self.shared_edit_allowed(ctx) { self.say(ctx, "Editing approval is required to undo or redo shared changes."); return; }
+        if !self.shared_edit_allowed(ctx) { self.say(ctx, self.shared_edit_block_reason(ctx)); return; }
         self.history_preview = None;
         self.drawing_reference = None;
         self.drawing_guide = None;
@@ -2020,7 +2020,7 @@ impl KetchupApp {
                     if self.updates.ready() && ui.button("Update ready").clicked() {
                         self.updates.open = true;
                     }
-                    if self.account.has_server() {
+                    if self.account.sharing_available() {
                         let avatar = ui.add(egui::Button::new("").min_size(egui::vec2(32., 32.))
                             .corner_radius(16).stroke(Stroke::new(1., foreground.gamma_multiply(0.65))))
                             .on_hover_text(self.account.user.as_ref().map_or("Account · Not connected", |user| user.name.as_str()));
@@ -2120,8 +2120,11 @@ impl KetchupApp {
                                     }
                                     ui.close();
                                 }
+                                if action == 1 {
+                                    self.recent_projects_menu(ui, &ctx);
+                                }
                             }
-                            if ui.button(self.share_menu_label()).clicked() { self.start_sharing(&ctx); ui.close(); }
+                            if self.account.sharing_available() && ui.button(self.share_menu_label()).clicked() { self.start_sharing(&ctx); ui.close(); }
                             ui.separator();
                             ui.menu_button("Import", |ui| {
                                 for (extension, label, help) in [
