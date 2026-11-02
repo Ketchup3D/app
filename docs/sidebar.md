@@ -1,0 +1,13 @@
+# Right sidebar and preferences
+
+[Documentation](README.md) · [Developer README](../README.md)
+
+The Model inspector has independent, collapsible Outliner, Entity Info, Components, Tags, and Display sections. Each area scrolls independently when its sections exceed its height. The current section's header stays at the top until the next section pushes it away; pinned headers can still collapse or drag their sections.
+
+The app remembers the active tool, tool-menu choices, polygon sides, Move copy mode, axis lock, snapping options, Emphasize group, shortcut search, cutting-plan scope and stock settings, screenshot settings, and all Display options across reloads and app restarts. The left and right sidebars remember their scroll positions, including the floating inspector. The Outliner remembers horizontal tree scrolling and each nested geometry list's vertical scroll position. The sidebar also remembers its visibility, width, section order, expanded/collapsed sections (including nested groups and the Outliner tree), searches, and paint settings. Changes are saved immediately in local application preferences. New projects inherit the current Display and snapping options; opening an existing project uses that project's saved display and snapping settings while keeping the Emphasize group preference. **Reset display** also updates the remembered preferences.
+
+Components lists each component definition currently used in the model, including nested components, with its instance count. Search by name, choose **Place instance**, and click in the viewport to place a linked copy. Escape cancels placement. **Make Component…** creates one from the selection.
+
+Tags supports adding, renaming, coloring, assigning, hiding, and deleting tags. Select entities and choose a tag from the assignment dropdown; **Untagged** clears the assignment. A group's or component's tag visibility applies to its descendants. Deleting a tag keeps its geometry. Tag edits support undo and redo.
+
+Display controls axes, inference guides, grid, dimensions, hidden geometry and objects, face styles, X-Ray, color by tag, edge styles, section cuts and fill, face shadows, fog, and environment colors. Sections use a horizontal plane with an adjustable height; shadows use adjustable sun direction, elevation, and darkness rather than geolocation or calendar simulation. Shadows fall only on model faces, including vertical and tilted surfaces, and respect face holes and section cuts. Display settings and tags are saved in `.ketchup` projects and local autosave. **Reset display** restores the defaults.

@@ -24,6 +24,8 @@ Whenever the user asks to push a new version tag:
 
 # Compilation checks
 
+Trunk output is saved to `/tmp/ketchup-trunk.log` (started with `trunk serve 2>&1 | tee /tmp/ketchup-trunk.log`). Read this file for the compilation check.
+
 Only at the end of each change, immediately before reporting completion, check the currently running KetchUp process, if one exists, and its associated compiler or development-server output for new compilation errors. Perform this check once per fix, not during intermediate edits. Use the existing process and logs; do not start a new build just for this check. If the output is unavailable, report that the check could not be completed.
 
 # Modal actions
