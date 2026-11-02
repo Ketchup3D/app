@@ -22,7 +22,14 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         depth_buffer: 32,
+        // Keep CPU preparation and the 3D GPU passes in flight together.
+        // eframe's one-frame GUI default misses refresh deadlines while orbiting.
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration::default()
+            .with_surface_config(eframe::egui_wgpu::SurfaceConfig::HIGH_THROUGHPUT),
         viewport,
+        persistence_path: std::env::var_os("KETCHUP_VIEWPORT_BENCHMARK")
+            .and_then(|_| std::env::var_os("KETCHUP_DATA_DIR"))
+            .map(|path| std::path::PathBuf::from(path).join("preferences.ron")),
         ..Default::default()
     };
     eframe::run_native(

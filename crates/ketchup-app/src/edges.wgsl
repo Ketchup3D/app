@@ -4,30 +4,32 @@ struct EdgeVertex {
     @location(1) lateral: f32,
     @location(2) shadow_color: vec4<f32>,
     @location(3) uv: vec2<f32>,
+    @location(4) dash_phase: f32,
 }
 
-fn edge_vertex(position: vec3<f32>, color: vec4<f32>, lateral: f32, shadow_color: vec4<f32>) -> EdgeVertex {
+fn edge_vertex(position: vec3<f32>, color: vec4<f32>, lateral: f32, shadow_color: vec4<f32>, dash_phase: f32) -> EdgeVertex {
     var output: EdgeVertex;
     output.position = vec4<f32>(position, 1.0);
     output.color = color;
     output.lateral = lateral;
+    output.dash_phase = dash_phase;
     output.shadow_color = shadow_color;
     output.uv = position.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
     return output;
 }
 
 @vertex
-fn vertex_main(@location(0) position: vec3<f32>, @location(1) color: vec4<f32>, @location(2) lateral: f32, @location(3) shadow_color: vec4<f32>) -> EdgeVertex {
-    return edge_vertex(position, color, lateral, shadow_color);
+fn vertex_main(@location(0) position: vec3<f32>, @location(1) color: vec4<f32>, @location(2) lateral: f32, @location(3) shadow_color: vec4<f32>, @location(4) dash_phase: f32) -> EdgeVertex {
+    return edge_vertex(position, color, lateral, shadow_color, dash_phase);
 }
 
 @vertex
-fn vertex_main_srgb(@location(0) position: vec3<f32>, @location(1) color: vec4<f32>, @location(2) lateral: f32, @location(3) shadow_color: vec4<f32>) -> EdgeVertex {
+fn vertex_main_srgb(@location(0) position: vec3<f32>, @location(1) color: vec4<f32>, @location(2) lateral: f32, @location(3) shadow_color: vec4<f32>, @location(4) dash_phase: f32) -> EdgeVertex {
     // Unorm8x4 preserves the original Color32 bytes. Convert on the GPU for
     // sRGB targets instead of copying and converting the entire mesh on CPU.
     let linear = select(color.rgb / 12.92, pow((color.rgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), color.rgb > vec3<f32>(0.04045));
     let shadow_linear = select(shadow_color.rgb / 12.92, pow((shadow_color.rgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), shadow_color.rgb > vec3<f32>(0.04045));
-    return edge_vertex(position, vec4<f32>(linear, color.a), lateral, vec4<f32>(shadow_linear, shadow_color.a));
+    return edge_vertex(position, vec4<f32>(linear, color.a), lateral, vec4<f32>(shadow_linear, shadow_color.a), dash_phase);
 }
 
 fn stroke_coverage(input: EdgeVertex) -> f32 {
@@ -36,7 +38,10 @@ fn stroke_coverage(input: EdgeVertex) -> f32 {
     let gradient = max(fwidth(input.lateral), 0.0001);
     let peak = min(1.0, 2.0 / gradient - 1.0);
     let coverage = clamp((1.0 - abs(input.lateral)) / gradient, 0.0, peak);
-    return coverage;
+    // The same discard mask is used for color and depth, so gaps cannot
+    // occlude other geometry. Negative phase marks ordinary solid strokes.
+    let dash = select(1.0, 0.0, input.dash_phase >= 0.0 && fract(input.dash_phase) > 0.5);
+    return coverage * dash;
 }
 
 @fragment

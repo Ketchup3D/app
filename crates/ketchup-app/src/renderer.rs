@@ -48,6 +48,7 @@ struct Vertex {
     color: [u8; 4],
     lateral: f32,
     shadow_color: [u8; 4],
+    dash_phase: f32,
 }
 
 // A face slope applies only on the face side of its boundary. Extending
@@ -58,6 +59,7 @@ struct EdgeSurface {
     inward: DVec2,
 }
 
+#[cfg(test)]
 impl EdgeSurface {
     fn unbounded(gradient: DVec2) -> Self {
         Self {
@@ -88,7 +90,8 @@ impl ModelSnapshot {
 
 #[derive(Clone, PartialEq)]
 pub struct SceneKey {
-    pub joint_preview: Option<([u64;2], ketchup_core::joinery::JointSettings)>,
+    pub joinery_members: Option<[u64; 2]>,
+    pub joint_preview: Option<([u64; 2], ketchup_core::joinery::JointSettings)>,
     pub model_revision: u64,
     pub camera: Camera,
     pub size: DVec2,
@@ -103,6 +106,8 @@ pub struct SceneKey {
 
 #[derive(Default)]
 pub struct SceneCache {
+    annotations: Option<(Rect, [usize; 2], Vec<egui::Shape>)>,
+    joint_surfaces: JointSurfaceCache,
     occlusion: Occlusion,
     selection_occlusion: Occlusion,
     annotation_occluders: Vec<[DVec3; 3]>,
@@ -117,16 +122,37 @@ pub struct SceneCache {
 
 impl SceneCache {
     pub fn repaint(&self, key: &SceneKey, painter: &egui::Painter, rect: Rect) -> bool {
-        if self.key.as_ref() == Some(key) {
+        if self.key.as_ref() == Some(key)
+            && self
+                .annotations
+                .as_ref()
+                .is_none_or(|(saved, atlas, shapes)| {
+                    shapes.is_empty()
+                        || (*saved == rect
+                            && *atlas == painter.ctx().fonts(|f| f.font_image_size()))
+                })
+        {
             if let Some(callback) = &self.retained {
                 painter.add(egui_wgpu::Callback::new_paint_callback(
                     rect,
                     SharedScene(Arc::clone(callback)),
                 ));
+                if let Some((_, _, annotations)) = &self.annotations {
+                    painter.extend(annotations.iter().cloned());
+                }
                 return true;
             }
         }
         false
+    }
+
+    pub fn remember_annotations(
+        &mut self,
+        painter: &egui::Painter,
+        rect: Rect,
+        shapes: Vec<egui::Shape>,
+    ) {
+        self.annotations = Some((rect, painter.ctx().fonts(|f| f.font_image_size()), shapes));
     }
 }
 
@@ -144,7 +170,44 @@ struct MeshBuffers {
     triangle_ranges: Vec<std::ops::Range<u32>>,
 }
 
+#[derive(Default)]
+pub(super) struct JointSurface {
+    occluders: Option<Vec<(Vec<SurfaceCandidate>, Vec<SurfaceCandidate>)>>,
+    triangles: Vec<JointSurfaceTriangle>,
+    #[cfg(test)]
+    preparation_queries: usize,
+}
+struct SurfaceCandidate {
+    index: usize,
+    bounds: Option<[DVec2; 2]>,
+}
+
+struct JointSurfaceTriangle {
+    points: [DVec3; 3],
+    origin: DVec3,
+    gradient: DVec2,
+}
+
+#[derive(Default)]
+struct JointSurfaceCache {
+    camera: Camera,
+    size: DVec2,
+    sections: [Option<f64>; 3],
+    view_revision: u64,
+    entries: BTreeMap<u64, CachedJointSurface>,
+    used: std::collections::BTreeSet<u64>,
+}
+struct CachedJointSurface {
+    stock: Vec<[DVec3; 3]>,
+    surface: Arc<JointSurface>,
+    view_revision: u64,
+}
+
 pub struct Mesh {
+    visible_joint_surfaces: BTreeMap<u64, (Arc<JointSurface>, Arc<JointSurface>, (u64, u64))>,
+    joint_surfaces: JointSurfaceCache,
+    record_annotation_occluders: bool,
+    gpu_edge_occlusion: bool,
     shadow_vertices: Vec<Vertex>,
     clip_stroke_footprints: bool,
     selection_occlusion: Occlusion,
@@ -165,6 +228,14 @@ pub struct Mesh {
 impl Mesh {
     pub fn new(camera: &Camera, size: DVec2) -> Self {
         Self {
+            visible_joint_surfaces: BTreeMap::new(),
+            joint_surfaces: JointSurfaceCache {
+                camera: camera.clone(),
+                size,
+                ..Default::default()
+            },
+            record_annotation_occluders: true,
+            gpu_edge_occlusion: false,
             shadow_vertices: Vec::new(),
             clip_stroke_footprints: false,
             selection_occlusion: Occlusion::default(),
@@ -190,6 +261,13 @@ impl Mesh {
             cache.mesh_builds += 1;
         }
         let mut mesh = Self::new(camera, size);
+        mesh.joint_surfaces = std::mem::take(&mut cache.joint_surfaces);
+        mesh.joint_surfaces.used.clear();
+        if mesh.joint_surfaces.camera != *camera || mesh.joint_surfaces.size != size {
+            mesh.joint_surfaces.camera = camera.clone();
+            mesh.joint_surfaces.size = size;
+            mesh.joint_surfaces.view_revision = mesh.joint_surfaces.view_revision.wrapping_add(1);
+        }
         mesh.buffer_pool = Some(Arc::clone(&cache.buffers));
         mesh.gpu_pool = Arc::clone(&cache.gpu_buffers);
         if let Ok(mut buffers) = cache.buffers.lock() {
@@ -214,12 +292,26 @@ impl Mesh {
         }
         mesh
     }
+    pub fn enable_gpu_edge_occlusion(&mut self) {
+        self.gpu_edge_occlusion = true;
+    }
     pub fn set_display(&mut self, display: &ketchup_core::DisplaySettings) {
         self.display = display.clone();
+    }
+    pub fn set_annotation_occlusion_enabled(&mut self, enabled: bool) {
+        self.record_annotation_occluders = enabled;
+        if !enabled {
+            self.annotation_occluders.clear();
+        }
+    }
+    pub fn set_entity(&mut self, entity: Option<u64>) {
+        self.occlusion.entity = entity;
+        self.selection_occlusion.entity = entity;
     }
     pub fn set_pixels_per_point(&mut self, pixels_per_point: f32) {
         self.pixels_per_point = f64::from(pixels_per_point).max(0.01);
     }
+
     fn fog_color(&self, color: Color32, point: DVec3) -> Color32 {
         if !self.display.fog {
             return color;
@@ -262,28 +354,315 @@ impl Mesh {
             }
         }
     }
-    /// Joint guides keep the source surface depth and existing occlusion rules.
-    /// The segment cap bounds dash work even when a joint fills the viewport.
-    pub fn surface_guide(&mut self,a:DVec3,b:DVec3,face:[DVec3;3],width:f64,color:Color32,dashed:bool) {
-        let Some((a,b))=self.section_line(a,b) else {return;};
-        let color=self.fog_color(color,(a+b)*0.5);
-        let Some((a,b))=self.view.segment_depth(a,b) else {return;};
-        let mut gradient=None;
-        self.view.for_each_triangle_depth(face,|triangle| {gradient=gradient.or_else(||depth_gradient(triangle));});
-        let surfaces:Vec<_>=gradient.into_iter().map(EdgeSurface::unbounded).collect();
-        for (start,end) in self.occlusion.visible_intervals(a,b) {
-            if !dashed {self.surface_stroke(a.lerp(b,start),a.lerp(b,end),width,color,&surfaces);continue;}
-            let length=(b.truncate()-a.truncate()).length().max(1.);
-            let period=8_f64.max(length/64.);
-            let first=(start*length/period).floor() as usize;
-            let last=(end*length/period).ceil() as usize;
-            for i in first..last {
-                let lo=start.max(i as f64*period/length);
-                let hi=end.min((i as f64*period+period*0.4)/length);
-                if hi>lo {self.surface_stroke(a.lerp(b,lo),a.lerp(b,hi),width,color,&surfaces);}
+    /// Share projections between joints on the same board, and between frames
+    /// whose camera and stock are unchanged. Screen-space stroke width and
+    /// scene occlusion are still resolved against the current frame.
+    #[cfg(test)]
+    pub(super) fn cached_joint_surface(
+        &mut self,
+        owner: u64,
+        stock: &[[DVec3; 3]],
+    ) -> Arc<JointSurface> {
+        self.cached_joint_surface_for_entities(owner, stock, &Default::default())
+    }
+
+    pub(super) fn cached_joint_surface_for_entities(
+        &mut self,
+        owner: u64,
+        stock: &[[DVec3; 3]],
+        own_entities: &std::collections::BTreeSet<u64>,
+    ) -> Arc<JointSurface> {
+        let projected = self.projected_joint_surface(owner, stock);
+        self.occlusion.finish_collection();
+        self.selection_occlusion.finish_collection();
+        let revisions = (self.occlusion.revision, self.selection_occlusion.revision);
+        if let Some((source, visible, saved)) = self.visible_joint_surfaces.get(&owner) {
+            if Arc::ptr_eq(source, &projected) && revisions == *saved {
+                return Arc::clone(visible);
+            }
+        }
+        let mut surface = JointSurface::default();
+        let mut occluders = Vec::new();
+        for triangle in &projected.triangles {
+            let polygon = triangle.points.map(DVec3::truncate);
+            occluders.push((
+                self.occlusion.precision_candidates(
+                    &polygon,
+                    triangle.origin,
+                    triangle.gradient,
+                    true,
+                    own_entities,
+                ),
+                self.selection_occlusion.precision_candidates(
+                    &polygon,
+                    triangle.origin,
+                    triangle.gradient,
+                    true,
+                    own_entities,
+                ),
+            ));
+            surface.triangles.push(JointSurfaceTriangle { ..*triangle });
+        }
+        surface.occluders = Some(occluders);
+        let surface = Arc::new(surface);
+        self.visible_joint_surfaces
+            .insert(owner, (projected, Arc::clone(&surface), revisions));
+        surface
+    }
+
+    fn projected_joint_surface(&mut self, owner: u64, stock: &[[DVec3; 3]]) -> Arc<JointSurface> {
+        let sections = self.display.section_limits();
+        if self.joint_surfaces.sections != sections {
+            self.joint_surfaces.view_revision = self.joint_surfaces.view_revision.wrapping_add(1);
+            self.joint_surfaces.sections = sections;
+        }
+        self.joint_surfaces.used.insert(owner);
+        let revision = self.joint_surfaces.view_revision;
+        if let Some(entry) = self.joint_surfaces.entries.get(&owner) {
+            if entry.view_revision == revision && entry.stock.as_slice() == stock {
+                return Arc::clone(&entry.surface);
+            }
+        }
+        let surface = Arc::new(self.joint_surface(stock.iter().copied()));
+        self.joint_surfaces
+            .entries
+            .entry(owner)
+            .and_modify(|entry| {
+                if entry.stock.as_slice() != stock {
+                    entry.stock.clear();
+                    entry.stock.extend_from_slice(stock);
+                }
+                entry.surface = Arc::clone(&surface);
+                entry.view_revision = revision;
+            })
+            .or_insert_with(|| CachedJointSurface {
+                stock: stock.to_vec(),
+                surface: Arc::clone(&surface),
+                view_revision: revision,
+            });
+        surface
+    }
+
+    /// Resolve the visible stock skin once, shared by every contour on this board.
+    pub(super) fn joint_surface(
+        &self,
+        triangles: impl IntoIterator<Item = [DVec3; 3]>,
+    ) -> JointSurface {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _profile = crate::app::viewport_benchmark::scope("stock_skin");
+        let mut surface = JointSurface::default();
+        let mut occlusion = Occlusion::default();
+        for triangle in triangles {
+            let (polygon, len) = self.display.section_triangle(triangle);
+            for i in 1..len.saturating_sub(1) {
+                self.view.for_each_triangle_depth(
+                    [polygon[0], polygon[i], polygon[i + 1]],
+                    |points| {
+                        if let Some(gradient) = depth_gradient(points) {
+                            occlusion.insert(points);
+                            surface.triangles.push(JointSurfaceTriangle {
+                                points,
+                                origin: points[0],
+                                gradient,
+                            });
+                        }
+                    },
+                );
+            }
+        }
+        // Hidden stock faces never need to participate in per-edge clipping.
+        // The closed board's front skin is independent of which guide is drawn.
+        let projected = std::mem::take(&mut surface.triangles);
+        for triangle in projected {
+            for polygon in occlusion.visible_surface_polygons(
+                triangle.points.map(DVec3::truncate).to_vec(),
+                triangle.origin,
+                triangle.gradient,
+            ) {
+                // Coincident projected silhouettes can differ by a few f64
+                // arithmetic steps, especially with parallel cameras. Discard
+                // invisible slivers rather than supporting guides on rear skin.
+                let perimeter: f64 = (0..polygon.len())
+                    .map(|i| polygon[i].distance(polygon[(i + 1) % polygon.len()]))
+                    .sum();
+                let area = polygon.first().map_or(0., |&origin| {
+                    polygon
+                        .windows(2)
+                        .map(|edge| (edge[0] - origin).perp_dot(edge[1] - origin))
+                        .sum::<f64>()
+                        .abs()
+                });
+                if area <= (perimeter * 1e-7).max(1e-12) {
+                    continue;
+                }
+                let point = |p: DVec2| {
+                    p.extend(
+                        triangle.origin.z + triangle.gradient.dot(p - triangle.origin.truncate()),
+                    )
+                };
+                for i in 1..polygon.len().saturating_sub(1) {
+                    surface.triangles.push(JointSurfaceTriangle {
+                        points: [point(polygon[0]), point(polygon[i]), point(polygon[i + 1])],
+                        origin: triangle.origin,
+                        gradient: triangle.gradient,
+                    });
+                }
+            }
+        }
+        #[cfg(test)]
+        {
+            surface.preparation_queries = occlusion.polygon_queries;
+        }
+        surface
+    }
+
+    /// Project internal joint guides onto their owning board's visible skin.
+    /// The skin's real depth lets other objects hide the entire stroke footprint.
+    pub(super) fn joint_guide(
+        &mut self,
+        a: DVec3,
+        b: DVec3,
+        surface: &JointSurface,
+        width: f64,
+        color: Color32,
+        dashed: bool,
+    ) {
+        let Some((a, b)) = self.section_line(a, b) else {
+            return;
+        };
+        // The caller supplies cut-created edges only. Show their complete
+        // hidden contours through their own stock, including the lower face.
+        // Face coplanarity cannot decide whether an edge belongs to the cut.
+        let color = self.fog_color(color, (a + b) * 0.5);
+        let Some((a, b)) = self.view.segment_depth(a, b) else {
+            return;
+        };
+        let (a, b) = (a.truncate(), b.truncate());
+        let delta = b - a;
+        let length_squared = delta.length_squared();
+        if length_squared < 0.01 {
+            return;
+        }
+        let normal = DVec2::new(-delta.y, delta.x).normalize();
+        let fringe = (normal.x.abs() + normal.y.abs()) / self.pixels_per_point;
+        let n = normal * (width + fringe) * 0.5;
+        let length = delta.length();
+        // Fit whole dashes to the complete segment, including both endpoints.
+        // Every corner and short connector remains drawn; triangle clipping
+        // must not restart the pattern or leave its final corner in a gap.
+        let dash_count = (length / 8.).ceil().clamp(1., 64.) as usize;
+        let dash_slots = dash_count as f64 - 0.5;
+        let mut dash_start = Vec::with_capacity(8);
+        let mut dash_end = Vec::with_capacity(8);
+        for (index, triangle) in surface.triangles.iter().enumerate() {
+            let [p, q, r] = triangle.points.map(DVec3::truncate);
+            let winding = (q - p).perp_dot(r - p).signum();
+            let sides = [(p, q), (q, r), (r, p)];
+            // Expand by the lateral footprint only to bound dash work. Actual
+            // pixels are clipped to the exact triangle below, including holes.
+            let mut interval = (0., 1.);
+            if !sides.iter().all(|&(p, q)| {
+                let side = |point: DVec2| winding * (q - p).perp_dot(point - p);
+                let allowance = (q - p).perp_dot(n).abs();
+                clip_positive(&mut interval, side(a) + allowance, side(b) + allowance)
+            }) {
+                continue;
+            }
+            // Clip the complete guide once. Traversing the visibility
+            // hierarchies for every individual dash multiplies orbit cost by
+            // up to 64 without changing which parts of the guide are visible.
+            let (start, end) = (a.lerp(b, interval.0), a.lerp(b, interval.1));
+            let mut polygon = vec![start + n, end + n, end - n, start - n];
+            for (p, q) in sides {
+                polygon = clip_polygon(&polygon, |point| winding * (q - p).perp_dot(point - p));
+                if polygon.len() < 3 {
+                    break;
+                }
+            }
+            if polygon.len() < 3 {
+                continue;
+            }
+            let polygons = if let Some(occluders) = &surface.occluders {
+                #[cfg(not(target_arch = "wasm32"))]
+                let _profile = crate::app::viewport_benchmark::scope("stroke_clip");
+                let polygons = self.occlusion.visible_surface_candidates(
+                    polygon,
+                    triangle.origin,
+                    triangle.gradient,
+                    &occluders[index].0,
+                );
+                polygons
+                    .into_iter()
+                    .flat_map(|polygon| {
+                        self.selection_occlusion.visible_surface_candidates(
+                            polygon,
+                            triangle.origin,
+                            triangle.gradient,
+                            &occluders[index].1,
+                        )
+                    })
+                    .collect()
+            } else {
+                self.visible_stroke_polygons(polygon, triangle.origin, triangle.gradient)
+            };
+            for polygon in polygons {
+                if !dashed {
+                    self.emit_stroke_polygon(
+                        &polygon,
+                        triangle.origin,
+                        triangle.gradient,
+                        a,
+                        n,
+                        color,
+                    );
+                    continue;
+                }
+                // One GPU strip carries the dash phase. CPU subdivision is
+                // needed only for annotation masks, not for rendered vertices.
+                self.emit_stroke_geometry(
+                    &polygon,
+                    triangle.origin,
+                    triangle.gradient,
+                    a,
+                    n,
+                    color,
+                    Some(delta * (dash_slots / length_squared)),
+                );
+                if !self.record_annotation_occluders || color.a() != 255 {
+                    continue;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                let _profile = crate::app::viewport_benchmark::scope("joint_annotation_masks");
+                // Split only the already visible polygons into dashes.
+                // Their phase still comes from the complete source edge,
+                // so both endpoints and triangle seams stay connected.
+                let parameter = |point: DVec2| (point - a).dot(delta) / length_squared;
+                let (lo, hi) = polygon.iter().fold((1_f64, 0_f64), |(lo, hi), &point| {
+                    let t = parameter(point).clamp(0., 1.);
+                    (lo.min(t), hi.max(t))
+                });
+                for i in (lo * dash_slots).floor() as usize
+                    ..((hi * dash_slots).ceil() as usize).min(dash_count)
+                {
+                    let start = i as f64 / dash_slots;
+                    let end = (i as f64 + 0.5) / dash_slots;
+                    if start >= hi || end <= lo {
+                        continue;
+                    }
+                    clip_polygon_into(&polygon, |point| parameter(point) - start, &mut dash_start);
+                    clip_polygon_into(&dash_start, |point| end - parameter(point), &mut dash_end);
+                    if dash_end.len() >= 3 {
+                        self.queue_annotation_polygon(
+                            &dash_end,
+                            triangle.origin,
+                            triangle.gradient,
+                        );
+                    }
+                }
             }
         }
     }
+
     /// Attach depth slopes only to the boundaries of faces that are drawn.
     /// NDC depth is affine in screen coordinates, even in perspective.
     pub fn face_edges(&mut self, face: &Face, cached: &CachedFace) {
@@ -368,6 +747,8 @@ impl Mesh {
         endpoints: bool,
         surfaces: &[EdgeSurface],
     ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _profile = crate::app::viewport_benchmark::scope("model_edges");
         let Some((a, b)) = self.section_line(a, b) else {
             return;
         };
@@ -378,7 +759,18 @@ impl Mesh {
                 a -= direction.extend(0.);
                 b += direction.extend(0.);
             }
-            let visible = self.occlusion.visible_intervals(a, b);
+            let gpu_guard = (self.gpu_edge_occlusion && !self.clip_stroke_footprints).then(|| {
+                let direction = (b - a).truncate().normalize_or_zero();
+                let normal = DVec2::new(-direction.y, direction.x);
+                let fringe = (normal.x.abs() + normal.y.abs()) / self.pixels_per_point;
+                let offset = normal * (width + fringe) * 0.5;
+                surfaces
+                    .iter()
+                    .map(|surface| surface.gradient.dot(offset).abs())
+                    .fold(0_f64, f64::max)
+                    + 4. * f64::from(f32::EPSILON)
+            });
+            let visible = self.occlusion.visible_intervals_with_guard(a, b, gpu_guard);
             for &(start, end) in &visible {
                 self.surface_stroke(a.lerp(b, start), a.lerp(b, end), width, color, surfaces);
             }
@@ -410,6 +802,8 @@ impl Mesh {
         color: Color32,
         surfaces: &[EdgeSurface],
     ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _profile = crate::app::viewport_benchmark::scope("edge_emit");
         let depths = [a.z, b.z];
         let a = a.truncate();
         let b = b.truncate();
@@ -455,55 +849,22 @@ impl Mesh {
                     continue;
                 };
                 let origin = points[0];
-                let polygons = self.occlusion.visible_surface_polygons(
+                self.clipped_stroke_polygon(
                     points.map(DVec3::truncate).to_vec(),
                     origin,
                     gradient,
+                    a,
+                    n,
+                    color,
                 );
-                // Ordinary outlines occlude selection only where their real
-                // projected surface is nearer, including across wide strokes.
-                let polygons: Vec<_> = polygons
-                    .into_iter()
-                    .flat_map(|polygon| {
-                        self.selection_occlusion
-                            .visible_surface_polygons(polygon, origin, gradient)
-                    })
-                    .collect();
-                for polygon in polygons {
-                    let base = self.vertices.len() as u32;
-                    for &p in &polygon {
-                        let depth = origin.z + gradient.dot(p - origin.truncate());
-                        self.vertices.push(Vertex {
-                            position: [
-                                (p.x / self.size.x * 2. - 1.) as f32,
-                                (1. - p.y / self.size.y * 2.) as f32,
-                                (depth as f32).next_down().max(0.),
-                            ],
-                            color: color.to_array(),
-                            lateral: ((p - a).dot(n) / n.length_squared()) as f32,
-                            shadow_color: [0; 4],
-                        });
-                    }
-                    for i in 1..polygon.len().saturating_sub(1) {
-                        self.indices
-                            .extend([base, base + i as u32, base + i as u32 + 1]);
-                        if color.a() == 255 {
-                            self.annotation_occluders.push(
-                                [polygon[0], polygon[i], polygon[i + 1]].map(|p| {
-                                    p.extend(origin.z + gradient.dot(p - origin.truncate()))
-                                }),
-                            );
-                        }
-                    }
-                }
             }
             return;
         }
         let base = self.vertices.len() as u32;
         self.indices.extend(indices.iter().map(|&i| base + i));
-        // Retain f64 projected geometry for annotations painted by egui after
-        // the GPU scene. Add it to CPU occlusion only after all model strokes
-        // are drawn, so edge rendering does not depend on insertion order.
+        // Share ordinary outlines with annotation clipping instead of merging
+        // them into the face hierarchy and rebuilding it a second time.
+        // Selected strokes and cut-guide dashes have their own later masks.
         if color.a() == 255 && depths.iter().all(|&z| z > 0. && z < 1.) {
             let projected: Vec<_> = strip
                 .iter()
@@ -519,17 +880,20 @@ impl Mesh {
                     projected[triangle[1] as usize],
                     projected[triangle[2] as usize],
                 ]);
-                self.annotation_occluders.push([
-                    projected[triangle[0] as usize],
-                    projected[triangle[1] as usize],
-                    projected[triangle[2] as usize],
-                ]);
+                if self.record_annotation_occluders && !self.gpu_edge_occlusion {
+                    self.annotation_occluders.push([
+                        projected[triangle[0] as usize],
+                        projected[triangle[1] as usize],
+                        projected[triangle[2] as usize],
+                    ]);
+                }
             }
         }
         let color = color.to_array();
         for &(endpoint, lateral) in strip {
             let p = [a, b][endpoint] + n * lateral;
             self.vertices.push(Vertex {
+                dash_phase: -1.,
                 position: [
                     (p.x / self.size.x * 2. - 1.) as f32,
                     (1. - p.y / self.size.y * 2.) as f32,
@@ -539,6 +903,97 @@ impl Mesh {
                 lateral: lateral as f32,
                 shadow_color: [0; 4],
             });
+        }
+    }
+
+    fn clipped_stroke_polygon(
+        &mut self,
+        polygon: Vec<DVec2>,
+        origin: DVec3,
+        gradient: DVec2,
+        a: DVec2,
+        n: DVec2,
+        color: Color32,
+    ) {
+        for polygon in self.visible_stroke_polygons(polygon, origin, gradient) {
+            self.emit_stroke_polygon(&polygon, origin, gradient, a, n, color);
+        }
+    }
+
+    fn visible_stroke_polygons(
+        &mut self,
+        polygon: Vec<DVec2>,
+        origin: DVec3,
+        gradient: DVec2,
+    ) -> Vec<Vec<DVec2>> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _profile = crate::app::viewport_benchmark::scope("stroke_clip");
+        let polygons = self
+            .occlusion
+            .visible_surface_polygons(polygon, origin, gradient);
+        // Ordinary outlines occlude strokes only where their real
+        // projected surface is nearer, including across wide strokes.
+        polygons
+            .into_iter()
+            .flat_map(|polygon| {
+                self.selection_occlusion
+                    .visible_surface_polygons(polygon, origin, gradient)
+            })
+            .collect()
+    }
+
+    fn emit_stroke_polygon(
+        &mut self,
+        polygon: &[DVec2],
+        origin: DVec3,
+        gradient: DVec2,
+        a: DVec2,
+        n: DVec2,
+        color: Color32,
+    ) {
+        self.emit_stroke_geometry(polygon, origin, gradient, a, n, color, None);
+        if color.a() == 255 && self.record_annotation_occluders {
+            self.queue_annotation_polygon(polygon, origin, gradient);
+        }
+    }
+
+    fn emit_stroke_geometry(
+        &mut self,
+        polygon: &[DVec2],
+        origin: DVec3,
+        gradient: DVec2,
+        a: DVec2,
+        n: DVec2,
+        color: Color32,
+        dash_axis: Option<DVec2>,
+    ) {
+        let base = self.vertices.len() as u32;
+        for &p in polygon {
+            let depth = origin.z + gradient.dot(p - origin.truncate());
+            self.vertices.push(Vertex {
+                position: [
+                    (p.x / self.size.x * 2. - 1.) as f32,
+                    (1. - p.y / self.size.y * 2.) as f32,
+                    (depth as f32).next_down().max(0.),
+                ],
+                color: color.to_array(),
+                lateral: ((p - a).dot(n) / n.length_squared()) as f32,
+                shadow_color: [0; 4],
+                dash_phase: dash_axis.map_or(-1., |axis| (p - a).dot(axis).max(0.) as f32),
+            });
+        }
+        for i in 1..polygon.len().saturating_sub(1) {
+            self.indices
+                .extend([base, base + i as u32, base + i as u32 + 1]);
+        }
+    }
+
+    fn queue_annotation_polygon(&mut self, polygon: &[DVec2], origin: DVec3, gradient: DVec2) {
+        for i in 1..polygon.len().saturating_sub(1) {
+            self.annotation_occluders.push(
+                [polygon[0], polygon[i], polygon[i + 1]]
+                    .map(|p| p.extend(origin.z + gradient.dot(p - origin.truncate()))),
+            );
         }
     }
 
@@ -639,7 +1094,22 @@ impl Mesh {
     }
 
     fn visible_annotation_line(&mut self, a: DVec3, b: DVec3) -> Vec<(DVec3, DVec3)> {
-        let visible = self.occlusion.visible_intervals(a, b);
+        let mut visible = self.occlusion.visible_intervals(a, b);
+        if self.gpu_edge_occlusion {
+            let outlines = self.selection_occlusion.visible_intervals(a, b);
+            let mut intersections = Vec::new();
+            for &(lo, hi) in &visible {
+                for &(start, end) in &outlines {
+                    let (start, end) = (start.max(lo), end.min(hi));
+                    if start < end {
+                        intersections.push((start, end));
+                    }
+                }
+            }
+            self.selection_occlusion.spans = outlines;
+            visible.clear();
+            visible.extend(intersections);
+        }
         let lines = visible
             .iter()
             .map(|&(start, end)| (a.lerp(b, start), a.lerp(b, end)))
@@ -678,9 +1148,7 @@ impl Mesh {
         } else {
             DVec2::ZERO
         };
-        let visible = self
-            .occlusion
-            .visible_surface_polygons(polygon.clone(), a, gradient);
+        let visible = self.visible_annotation_polygons(polygon.clone(), a, gradient);
         if visible.len() == 1 && visible[0] == polygon {
             return vec![shape];
         }
@@ -716,7 +1184,7 @@ impl Mesh {
         ]
         .map(|p| DVec2::new(f64::from(p.x), f64::from(p.y)))
         .into();
-        let visible = self.occlusion.visible_polygons(polygon.clone(), point.z);
+        let visible = self.visible_annotation_polygons(polygon.clone(), point, DVec2::ZERO);
         if visible.len() == 1 && visible[0] == polygon {
             return vec![shape];
         }
@@ -724,6 +1192,20 @@ impl Mesh {
             return vec![];
         }
         clipped_annotation_shapes(painter, viewport, shape, &visible)
+    }
+
+    fn visible_annotation_polygons(
+        &mut self,
+        polygon: Vec<DVec2>,
+        origin: DVec3,
+        gradient: DVec2,
+    ) -> Vec<Vec<DVec2>> {
+        if self.gpu_edge_occlusion {
+            self.visible_stroke_polygons(polygon, origin, gradient)
+        } else {
+            self.occlusion
+                .visible_surface_polygons(polygon, origin, gradient)
+        }
     }
 
     pub fn background_grid_line(
@@ -742,6 +1224,7 @@ impl Mesh {
         for (endpoint, lateral) in [(0, 1.), (0, -1.), (1, 1.), (1, -1.)] {
             let p = [a, b][endpoint] + offset * lateral;
             self.vertices.push(Vertex {
+                dash_phase: -1.,
                 position: [
                     (p.x / self.size.x * 2. - 1.) as f32,
                     (1. - p.y / self.size.y * 2.) as f32,
@@ -795,6 +1278,7 @@ impl Mesh {
                         |triangle| {
                             for p in triangle {
                                 self.shadow_vertices.push(Vertex {
+                                    dash_phase: -1.,
                                     position: [
                                         (p.x / self.size.x * 2. - 1.) as f32,
                                         (1. - p.y / self.size.y * 2.) as f32,
@@ -844,6 +1328,7 @@ impl Mesh {
                 indices.extend([base, base + 1, base + 2]);
                 for p in triangle {
                     vertices.push(Vertex {
+                        dash_phase: -1.,
                         position: [
                             (p.x / size.x * 2. - 1.) as f32,
                             (1. - p.y / size.y * 2.) as f32,
@@ -884,6 +1369,12 @@ impl Mesh {
     // Even rebuilt frames can keep unchanged meshes resident on the GPU,
     // including those using the uncached preview and annotation paths.
     fn retain(mut self, cache: &mut SceneCache) -> Arc<SceneCallback> {
+        let used = &self.joint_surfaces.used;
+        self.joint_surfaces
+            .entries
+            .retain(|owner, _| used.contains(owner));
+        self.joint_surfaces.used.clear();
+        cache.joint_surfaces = std::mem::take(&mut self.joint_surfaces);
         self.normalize_parallel_depth();
         let candidate = Arc::new(self.into_callback());
         if let Some(previous) = &cache.retained {
@@ -987,6 +1478,7 @@ impl Mesh {
 // subtract hidden spans immediately and stop once the edge is fully hidden.
 #[derive(Default)]
 struct Occlusion {
+    entity: Option<u64>,
     triangles: Vec<OccludingTriangle>,
     indices: Vec<usize>,
     nodes: Vec<OcclusionNode>,
@@ -1002,9 +1494,12 @@ struct Occlusion {
     query_work: (usize, usize),
     #[cfg(test)]
     hierarchy_builds: usize,
+    #[cfg(test)]
+    polygon_queries: usize,
 }
 
 struct CachedVisibility {
+    gpu_guard: Option<f64>,
     a: DVec3,
     b: DVec3,
     revision: u64,
@@ -1012,6 +1507,7 @@ struct CachedVisibility {
 }
 
 struct OccludingTriangle {
+    entity: Option<u64>,
     points: [DVec3; 3],
     gradient: DVec2,
     bounds: OcclusionBounds,
@@ -1023,26 +1519,50 @@ struct OcclusionBounds {
     hi: DVec3,
 }
 
+struct ScreenSegment {
+    a: DVec3,
+    lo: DVec3,
+    hi: DVec3,
+    inverse: DVec2,
+}
+impl ScreenSegment {
+    fn new(a: DVec3, b: DVec3) -> Self {
+        let delta = b - a;
+        Self {
+            a,
+            lo: a.min(b),
+            hi: a.max(b),
+            inverse: DVec2::new(
+                if delta.x == 0. { 0. } else { delta.x.recip() },
+                if delta.y == 0. { 0. } else { delta.y.recip() },
+            ),
+        }
+    }
+}
 impl OcclusionBounds {
-    fn overlaps(self, a: DVec3, b: DVec3) -> bool {
-        if self.lo.z >= a.z.max(b.z) {
+    fn overlaps(self, segment: &ScreenSegment) -> bool {
+        if self.lo.z >= segment.hi.z
+            || self.lo.x > segment.hi.x
+            || self.hi.x < segment.lo.x
+            || self.lo.y > segment.hi.y
+            || self.hi.y < segment.lo.y
+        {
             return false;
         }
-        let mut interval = (0., 1.);
+        // Slab intersections share the reciprocals across every hierarchy node
+        // and triangle tested for this edge. No per-node divisions or closures.
+        let mut enter = 0_f64;
+        let mut exit = 1_f64;
         for axis in 0..2 {
-            if !clip_positive(
-                &mut interval,
-                a[axis] - self.lo[axis],
-                b[axis] - self.lo[axis],
-            ) || !clip_positive(
-                &mut interval,
-                self.hi[axis] - a[axis],
-                self.hi[axis] - b[axis],
-            ) {
-                return false;
+            if segment.inverse[axis] == 0. {
+                continue;
             }
+            let a = (self.lo[axis] - segment.a[axis]) * segment.inverse[axis];
+            let b = (self.hi[axis] - segment.a[axis]) * segment.inverse[axis];
+            enter = enter.max(a.min(b));
+            exit = exit.min(a.max(b));
         }
-        true
+        enter < exit
     }
 }
 
@@ -1054,6 +1574,23 @@ struct OcclusionNode {
 }
 
 impl OccludingTriangle {
+    fn surface_planes(&self, origin: DVec3, gradient: DVec2) -> [(DVec2, DVec2, f64); 4] {
+        let [a, b, c] = self.points.map(DVec3::truncate);
+        let winding = (b - a).perp_dot(c - a).signum();
+        [
+            (
+                gradient - self.gradient,
+                a,
+                origin.z + gradient.dot(a - origin.truncate())
+                    - self.points[0].z
+                    - 64. * f64::EPSILON,
+            ),
+            (DVec2::new(-(b - a).y, (b - a).x) * winding, a, 0.),
+            (DVec2::new(-(c - b).y, (c - b).x) * winding, b, 0.),
+            (DVec2::new(-(a - c).y, (a - c).x) * winding, c, 0.),
+        ]
+    }
+
     fn hidden_interval(&self, a: DVec3, b: DVec3) -> Option<(f64, f64)> {
         let mut interval = (0., 1.);
         let delta = b - a;
@@ -1105,7 +1642,7 @@ impl Occlusion {
         if self
             .triangles
             .get(index)
-            .is_some_and(|t| t.points == points)
+            .is_some_and(|t| t.points == points && t.entity == self.entity)
         {
             if let Some(cursor) = &mut self.insertion_cursor {
                 *cursor += 1;
@@ -1120,6 +1657,7 @@ impl Occlusion {
             hi: points.iter().copied().reduce(DVec3::max).unwrap(),
         };
         let triangle = OccludingTriangle {
+            entity: self.entity,
             points,
             gradient,
             bounds,
@@ -1239,13 +1777,25 @@ impl Occlusion {
     }
 
     fn visible_intervals(&mut self, a: DVec3, b: DVec3) -> Vec<(f64, f64)> {
+        self.visible_intervals_with_guard(a, b, None)
+    }
+    fn visible_intervals_with_guard(
+        &mut self,
+        a: DVec3,
+        b: DVec3,
+        gpu_guard: Option<f64>,
+    ) -> Vec<(f64, f64)> {
         self.finish_collection();
         let index = self.line_cursor;
         self.line_cursor += 1;
         let mut visible = std::mem::take(&mut self.spans);
         visible.clear();
         if let Some(cached) = self.lines.get(index) {
-            if cached.a == a && cached.b == b && cached.revision == self.revision {
+            if cached.a == a
+                && cached.b == b
+                && cached.revision == self.revision
+                && cached.gpu_guard == gpu_guard
+            {
                 visible.extend_from_slice(&cached.spans);
                 #[cfg(test)]
                 {
@@ -1254,9 +1804,10 @@ impl Occlusion {
                 return visible;
             }
         }
-        self.compute_intervals(a, b, &mut visible);
+        self.compute_intervals(a, b, &mut visible, gpu_guard);
         if index == self.lines.len() {
             self.lines.push(CachedVisibility {
+                gpu_guard,
                 a,
                 b,
                 revision: self.revision,
@@ -1264,6 +1815,7 @@ impl Occlusion {
             });
         } else {
             let cached = &mut self.lines[index];
+            cached.gpu_guard = gpu_guard;
             cached.a = a;
             cached.b = b;
             cached.revision = self.revision;
@@ -1273,6 +1825,7 @@ impl Occlusion {
         visible
     }
 
+    #[cfg(test)]
     fn visible_polygons(&mut self, polygon: Vec<DVec2>, depth: f64) -> Vec<Vec<DVec2>> {
         self.visible_surface_polygons(polygon, DVec3::new(0., 0., depth), DVec2::ZERO)
     }
@@ -1283,22 +1836,32 @@ impl Occlusion {
         origin: DVec3,
         gradient: DVec2,
     ) -> Vec<Vec<DVec2>> {
+        let candidates = self.surface_candidates(&polygon, origin, gradient);
+        self.visible_surface_candidates(polygon, origin, gradient, &candidates)
+    }
+
+    fn surface_candidates(
+        &mut self,
+        polygon: &[DVec2],
+        origin: DVec3,
+        gradient: DVec2,
+    ) -> Vec<SurfaceCandidate> {
         self.finish_collection();
-        let mut visible = vec![polygon];
-        if self.triangles.is_empty() {
-            return visible;
+        let mut candidates = Vec::new();
+        if self.triangles.is_empty() || polygon.len() < 3 {
+            return candidates;
         }
         if self.nodes.is_empty() {
             self.build(0, self.indices.len());
             self.tree_quality = self.quality();
         }
         let depth_at = |p: DVec2| origin.z + gradient.dot(p - origin.truncate());
-        let lo = visible[0]
+        let lo = polygon
             .iter()
             .map(|&p| p.extend(depth_at(p)))
             .reduce(DVec3::min)
             .unwrap();
-        let hi = visible[0]
+        let hi = polygon
             .iter()
             .map(|&p| p.extend(depth_at(p)))
             .reduce(DVec3::max)
@@ -1326,77 +1889,156 @@ impl Occlusion {
                 if !overlaps(triangle.bounds) {
                     continue;
                 }
-                let [a, b, c] = triangle.points.map(|p| p.truncate());
-                let winding = (b - a).perp_dot(c - a).signum();
-                // Test depth first: most nearby faces are coplanar with the
-                // stroke. Splitting along their infinite side planes first
-                // needlessly fragments an otherwise fully visible polygon.
-                let planes = [
-                    (
-                        gradient - triangle.gradient,
-                        a,
-                        depth_at(a) - triangle.points[0].z - 64. * f64::EPSILON,
-                    ),
-                    (DVec2::new(-(b - a).y, (b - a).x) * winding, a, 0.),
-                    (DVec2::new(-(c - b).y, (c - b).x) * winding, b, 0.),
-                    (DVec2::new(-(a - c).y, (a - c).x) * winding, c, 0.),
-                ];
-                let mut outside = vec![];
-                // The occluded region is the intersection of the triangle's
-                // three screen half-planes and its foreground depth half-plane.
-                for mut polygon in visible {
-                    // A disjoint occluder must leave the polygon intact.
-                    // Bounding-box overlap alone does not imply intersection;
-                    // without this check each unrelated edge can multiply the
-                    // fragments processed by every subsequent occluder.
-                    if planes.iter().any(|&(normal, origin, offset)| {
-                        polygon
-                            .iter()
-                            .all(|&p| normal.dot(p - origin) + offset <= 0.)
-                    }) {
-                        outside.push(polygon);
-                        continue;
-                    }
-                    let mut hidden = polygon.clone();
-                    for &(normal, origin, offset) in &planes {
-                        hidden = clip_polygon(&hidden, |p| normal.dot(p - origin) + offset);
-                        if hidden.len() < 3 {
-                            break;
-                        }
-                    }
-                    let hidden_area = hidden.first().map_or(0., |&origin| {
-                        hidden
-                            .windows(2)
-                            .map(|edge| (edge[0] - origin).perp_dot(edge[1] - origin))
-                            .sum::<f64>()
-                            .abs()
-                    });
-                    if hidden.len() < 3 || hidden_area <= 1e-12 {
-                        outside.push(polygon);
-                        continue;
-                    }
-                    for &(normal, origin, offset) in &planes {
-                        let side = |p: DVec2| normal.dot(p - origin) + offset;
-                        let piece = clip_polygon(&polygon, |p| -side(p));
-                        if piece.len() >= 3 {
-                            outside.push(piece);
-                        }
-                        polygon = clip_polygon(&polygon, side);
-                        if polygon.len() < 3 {
-                            break;
-                        }
+                candidates.push(SurfaceCandidate {
+                    index,
+                    bounds: None,
+                });
+            }
+        }
+        candidates
+    }
+
+    // The depth buffer clips ordinary foreground geometry. Retain f64 CPU
+    // clipping only where f32 depth rounding could place a foreground face or
+    // outline in the guide's depth layer. The conservative guard covers both
+    // the guide's one-step bias and raster interpolation error.
+    fn precision_candidates(
+        &mut self,
+        polygon: &[DVec2],
+        origin: DVec3,
+        gradient: DVec2,
+        gpu_depth: bool,
+        own_entities: &std::collections::BTreeSet<u64>,
+    ) -> Vec<SurfaceCandidate> {
+        let mut candidates = self.surface_candidates(polygon, origin, gradient);
+        let mut hidden = Vec::with_capacity(8);
+        let mut scratch = Vec::with_capacity(8);
+        candidates.retain_mut(|candidate| {
+            let triangle = &self.triangles[candidate.index];
+            if triangle.entity.is_some_and(|id| own_entities.contains(&id)) {
+                return false;
+            }
+            let planes = triangle.surface_planes(origin, gradient);
+            if planes.iter().any(|&(normal, origin, offset)| {
+                polygon
+                    .iter()
+                    .all(|&p| normal.dot(p - origin) + offset <= 0.)
+            }) {
+                return false;
+            }
+            if gpu_depth
+                && triangle.points.iter().all(|p| {
+                    origin.z + gradient.dot(p.truncate() - origin.truncate()) - p.z
+                        > 4. * f64::from(f32::EPSILON)
+                })
+            {
+                return false;
+            }
+            hidden.clear();
+            hidden.extend_from_slice(polygon);
+            for &(normal, origin, offset) in &planes {
+                clip_polygon_into(&hidden, |p| normal.dot(p - origin) + offset, &mut scratch);
+                std::mem::swap(&mut hidden, &mut scratch);
+                if hidden.len() < 3 {
+                    break;
+                }
+            }
+            if gpu_depth {
+                let (normal, origin, offset) = planes[0];
+                clip_polygon_into(
+                    &hidden,
+                    |p| 4. * f64::from(f32::EPSILON) - normal.dot(p - origin) - offset,
+                    &mut scratch,
+                );
+                std::mem::swap(&mut hidden, &mut scratch);
+            }
+            if !has_surface_area(&hidden) {
+                return false;
+            }
+            candidate.bounds = Some([
+                hidden.iter().copied().reduce(DVec2::min).unwrap(),
+                hidden.iter().copied().reduce(DVec2::max).unwrap(),
+            ]);
+            true
+        });
+        candidates
+    }
+
+    fn visible_surface_candidates(
+        &mut self,
+        polygon: Vec<DVec2>,
+        origin: DVec3,
+        gradient: DVec2,
+        candidates: &[SurfaceCandidate],
+    ) -> Vec<Vec<DVec2>> {
+        #[cfg(test)]
+        {
+            self.polygon_queries += 1;
+        }
+        if candidates.is_empty() {
+            return vec![polygon];
+        }
+        let bounds = [
+            polygon.iter().copied().reduce(DVec2::min).unwrap(),
+            polygon.iter().copied().reduce(DVec2::max).unwrap(),
+        ];
+        let mut visible = vec![polygon];
+        let mut outside = Vec::new();
+        for candidate in candidates {
+            if candidate.bounds.is_some_and(|[lo, hi]| {
+                hi.x < bounds[0].x || hi.y < bounds[0].y || lo.x > bounds[1].x || lo.y > bounds[1].y
+            }) {
+                continue;
+            }
+            let planes = self.triangles[candidate.index].surface_planes(origin, gradient);
+            outside.clear();
+            for mut polygon in visible.drain(..) {
+                if planes.iter().any(|&(normal, origin, offset)| {
+                    polygon
+                        .iter()
+                        .all(|&p| normal.dot(p - origin) + offset <= 0.)
+                }) {
+                    outside.push(polygon);
+                    continue;
+                }
+                let mut hidden = polygon.clone();
+                for &(normal, origin, offset) in &planes {
+                    hidden = clip_polygon(&hidden, |p| normal.dot(p - origin) + offset);
+                    if hidden.len() < 3 {
+                        break;
                     }
                 }
-                visible = outside;
-                if visible.is_empty() {
-                    return visible;
+                if !has_surface_area(&hidden) {
+                    outside.push(polygon);
+                    continue;
                 }
+                for &(normal, origin, offset) in &planes {
+                    let side = |p: DVec2| normal.dot(p - origin) + offset;
+                    let piece = clip_polygon(&polygon, |p| -side(p));
+                    if piece.len() >= 3 {
+                        outside.push(piece);
+                    }
+                    polygon = clip_polygon(&polygon, side);
+                    if polygon.len() < 3 {
+                        break;
+                    }
+                }
+            }
+            std::mem::swap(&mut visible, &mut outside);
+            if visible.is_empty() {
+                break;
             }
         }
         visible
     }
 
-    fn compute_intervals(&mut self, a: DVec3, b: DVec3, visible: &mut Vec<(f64, f64)>) {
+    fn compute_intervals(
+        &mut self,
+        a: DVec3,
+        b: DVec3,
+        visible: &mut Vec<(f64, f64)>,
+        gpu_guard: Option<f64>,
+    ) {
         #[cfg(test)]
         {
             self.query_work = (0, 0);
@@ -1417,6 +2059,7 @@ impl Occlusion {
                 self.hierarchy_builds += 1;
             }
         }
+        let segment = ScreenSegment::new(a, b);
         self.pending.clear();
         self.pending.push(0);
         while let Some(index) = self.pending.pop() {
@@ -1425,7 +2068,9 @@ impl Occlusion {
                 self.query_work.0 += 1;
             }
             let node = &self.nodes[index];
-            if !node.bounds.overlaps(a, b) {
+            if !node.bounds.overlaps(&segment)
+                || gpu_guard.is_some_and(|guard| node.bounds.hi.z < segment.lo.z - guard)
+            {
                 continue;
             }
             if let Some((left, right)) = node.children {
@@ -1439,7 +2084,9 @@ impl Occlusion {
             }
             for &index in &self.indices[node.start..node.end] {
                 let triangle = &self.triangles[index];
-                if !triangle.bounds.overlaps(a, b) {
+                if !triangle.bounds.overlaps(&segment)
+                    || gpu_guard.is_some_and(|guard| triangle.bounds.hi.z < segment.lo.z - guard)
+                {
                     continue;
                 }
                 #[cfg(test)]
@@ -1459,8 +2106,32 @@ impl Occlusion {
     }
 }
 
+fn has_surface_area(polygon: &[DVec2]) -> bool {
+    polygon.len() >= 3
+        && polygon.first().is_some_and(|&origin| {
+            polygon
+                .windows(2)
+                .map(|edge| (edge[0] - origin).perp_dot(edge[1] - origin))
+                .sum::<f64>()
+                .abs()
+                > 1e-12
+        })
+}
+
 fn clip_polygon(polygon: &[DVec2], side: impl Fn(DVec2) -> f64) -> Vec<DVec2> {
-    let mut clipped = vec![];
+    if polygon.len() < 3 {
+        return Vec::new();
+    }
+    let mut clipped = Vec::with_capacity(polygon.len() + 1);
+    clip_polygon_into(polygon, side, &mut clipped);
+    clipped
+}
+
+fn clip_polygon_into(polygon: &[DVec2], side: impl Fn(DVec2) -> f64, clipped: &mut Vec<DVec2>) {
+    clipped.clear();
+    if polygon.len() < 3 {
+        return;
+    }
     for i in 0..polygon.len() {
         let a = polygon[i];
         let b = polygon[(i + 1) % polygon.len()];
@@ -1476,16 +2147,17 @@ fn clip_polygon(polygon: &[DVec2], side: impl Fn(DVec2) -> f64) -> Vec<DVec2> {
     // triangle boundary. A zero-area region must not become a clipping mask:
     // its zero-length sides would otherwise admit the entire source mesh.
     if clipped.len() < 3 {
-        return vec![];
+        clipped.clear();
+        return;
     }
     let origin = clipped[0];
     let area = (1..clipped.len() - 1)
         .map(|i| (clipped[i] - origin).perp_dot(clipped[i + 1] - origin))
         .sum::<f64>();
     if area.abs() <= 1e-12 {
-        return vec![];
+        clipped.clear();
+        return;
     }
-    clipped
 }
 
 fn clipped_annotation_shapes(
@@ -1758,7 +2430,7 @@ fn create_pipeline_with_samples(
             buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Unorm8x4,2=>Float32,3=>Unorm8x4],
+                attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Unorm8x4,2=>Float32,3=>Unorm8x4,4=>Float32],
             })],
             compilation_options: Default::default(),
         },
@@ -2280,22 +2952,1043 @@ impl CachedFace {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn joint_surface_guides_keep_real_depth_and_hide_behind_nearer_faces() {
-        let camera=Camera::default();let size=DVec2::splat(100.);
-        let inverse=camera.matrix(size).inverse();
-        let world=|x:f64,y:f64,z:f64|inverse.project_point3(DVec3::new(x/50.-1.,1.-y/50.,z));
-        let a=world(30.,50.,0.6);let b=world(70.,50.,0.6);
-        let face=[world(10.,10.,0.6),world(90.,10.,0.6),world(50.,90.,0.6)];
-        for dashed in [false,true] {
-            let mut mesh=Mesh::new(&camera,size);
-            mesh.surface_guide(a,b,face,1.,Color32::WHITE,dashed);
+    #[ignore = "Requires a GPU adapter; compares hybrid cut-guide clipping against the full f64 reference"]
+    fn gpu_cut_guides_match_full_cpu_clipping_for_foreground_faces_outlines_and_dash_gaps() {
+        use wgpu::util::DeviceExt;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(include_str!("edges.wgsl").into()),
+        });
+        let pipelines = [
+            PipelinePass::Faces,
+            PipelinePass::EdgeDepth,
+            PipelinePass::Edges,
+        ]
+        .map(|pass| create_pipeline(&device, &shader, wgpu::TextureFormat::Rgba8Unorm, pass));
+        let size = wgpu::Extent3d {
+            width: 64,
+            height: 64,
+            depth_or_array_layers: 1,
+        };
+        let texture = |format, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let color = texture(
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let depth = texture(
+            wgpu::TextureFormat::Depth32Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        let color_view = color.create_view(&Default::default());
+        let depth_view = depth.create_view(&Default::default());
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256 * 64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let render = |mesh: Mesh| {
+            let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&mesh.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+                pass.set_vertex_buffer(0, vertices.slice(..));
+                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_pipeline(&pipelines[0]);
+                for range in &mesh.triangle_ranges {
+                    pass.draw_indexed(range.clone(), 0, 0..1);
+                }
+                let edge_start = mesh.triangle_ranges.last().map_or(0, |range| range.end);
+                for pipeline in &pipelines[1..] {
+                    pass.set_pipeline(pipeline);
+                    pass.draw_indexed(edge_start..mesh.indices.len() as u32, 0, 0..1);
+                }
+            }
+            encoder.copy_texture_to_buffer(
+                color.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(64),
+                    },
+                },
+                size,
+            );
+            queue.submit([encoder.finish()]);
+            let (send, receive) = std::sync::mpsc::channel();
+            readback
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    send.send(result).unwrap();
+                });
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(std::time::Duration::from_secs(30)),
+                })
+                .unwrap();
+            receive.recv().unwrap().unwrap();
+            let pixels = readback.slice(..).get_mapped_range().unwrap().to_vec();
+            readback.unmap();
+            pixels
+        };
+        for projection in [
+            ketchup_core::Projection::Parallel,
+            ketchup_core::Projection::Perspective,
+        ] {
+            let camera = Camera {
+                projection,
+                ..Default::default()
+            };
+            let viewport = DVec2::splat(64.);
+            let inverse = camera.matrix(viewport).inverse();
+            let world = |x: f64, y: f64, z: f64| {
+                inverse.project_point3(DVec3::new(x / 32. - 1., 1. - y / 32., z))
+            };
+            for foreground in [0.2, 0.4 - 1e-9] {
+                let build = |hybrid| {
+                    let mut mesh = Mesh::new(&camera, viewport);
+                    if hybrid {
+                        mesh.enable_gpu_edge_occlusion();
+                    }
+                    let rectangle = |lo: DVec2, hi: DVec2, z| {
+                        let p = [
+                            world(lo.x, lo.y, z),
+                            world(hi.x, lo.y, z),
+                            world(hi.x, hi.y, z),
+                            world(lo.x, hi.y, z),
+                        ];
+                        [[p[0], p[1], p[2]], [p[0], p[2], p[3]]]
+                    };
+                    let stock = rectangle(DVec2::splat(6.), DVec2::splat(58.), 0.4);
+                    for triangle in stock {
+                        mesh.world_triangle(&camera, triangle, Color32::WHITE);
+                    }
+                    for triangle in
+                        rectangle(DVec2::new(25., 10.), DVec2::new(39., 54.), foreground)
+                    {
+                        mesh.world_triangle(&camera, triangle, Color32::GRAY);
+                    }
+                    mesh.styled_line(
+                        world(46., 6., 0.3),
+                        world(46., 58., 0.3),
+                        4.,
+                        Color32::BLACK,
+                        false,
+                        false,
+                    );
+                    mesh.styled_line(
+                        world(10., 44., 0.3),
+                        world(54., 44., 0.3),
+                        2.,
+                        Color32::BLUE,
+                        false,
+                        false,
+                    );
+                    mesh.styled_line(
+                        world(10., 52., 0.5),
+                        world(54., 52., 0.5),
+                        2.,
+                        Color32::BLACK,
+                        false,
+                        false,
+                    );
+                    let surface = if hybrid {
+                        mesh.cached_joint_surface(7, &stock)
+                    } else {
+                        Arc::new(mesh.joint_surface(stock))
+                    };
+                    mesh.joint_guide(
+                        world(9., 28., 0.8),
+                        world(55., 28., 0.8),
+                        &surface,
+                        2.,
+                        Color32::from_rgb(0, 100, 92),
+                        true,
+                    );
+                    mesh.joint_guide(
+                        world(12., 48., 0.8),
+                        world(54., 15., 0.8),
+                        &surface,
+                        2.,
+                        Color32::from_rgb(0, 100, 92),
+                        true,
+                    );
+                    mesh
+                };
+                let reference = render(build(false));
+                let hybrid = render(build(true));
+                assert!(
+                    reference.chunks_exact(4).any(|p| p[0] == 0 && p[1] == 100),
+                    "draw real dotted cut guides"
+                );
+                assert!(
+                    reference
+                        .chunks_exact(4)
+                        .zip(hybrid.chunks_exact(4))
+                        .enumerate()
+                        .all(|(i, (a, b))| {
+                            a.iter().zip(b).all(|(a,b)| a.abs_diff(*b) <= 2)
+                    // The full CPU reference masks even the zero-opacity
+                    // boundary of the outline's antialias fringe. GPU depth
+                    // keeps a guide visible at that transparent boundary;
+                    // the actual outline core must still match exactly.
+                    || ((matches!(i % 64, 43 | 48) || matches!(i / 64, 42 | 45))
+                        && a == [255,255,255,255] && b[0] < b[1] && b[1] >= 100)
+                        }),
+                    "GPU foreground occlusion must match f64 clipping: {projection:?}, {foreground}; differences={:?}",
+                    reference
+                        .chunks_exact(4)
+                        .zip(hybrid.chunks_exact(4))
+                        .enumerate()
+                        .filter(|(_, (a, b))| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 2))
+                        .map(|(i, (a, b))| (i % 64, i / 64, a, b))
+                        .take(12)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn annotations_share_outline_masks_without_changing_line_or_label_visibility() {
+        let draw = |shared| {
+            let mut mesh = Mesh::new(&Camera::default(), DVec2::splat(100.));
+            if shared {
+                mesh.enable_gpu_edge_occlusion();
+            }
+            mesh.line(
+                DVec3::new(50., 0., 0.3),
+                DVec3::new(50., 100., 0.3),
+                3.,
+                Color32::BLACK,
+            );
+            mesh.begin_selected_edges();
+            mesh.surface_stroke(
+                DVec3::new(0., 65., 0.4),
+                DVec3::new(100., 65., 0.4),
+                4.,
+                Color32::RED,
+                &[],
+            );
+            mesh.occlude_annotations_with_edges();
+            mesh
+        };
+        let mut reference = draw(false);
+        let mut shared = draw(true);
+        assert!(
+            shared.occlusion.triangles.len() < reference.occlusion.triangles.len(),
+            "do not duplicate ordinary outlines into the face hierarchy"
+        );
+        for depth in [0.2, 0.3 + 1e-10, 0.6] {
+            let (a, b) = (DVec3::new(10., 50., depth), DVec3::new(90., 50., depth));
+            let expected = reference.visible_annotation_line(a, b);
+            let actual = shared.visible_annotation_line(a, b);
+            assert_eq!(expected.len(), actual.len());
+            for ((a, b), (c, d)) in expected.into_iter().zip(actual) {
+                assert!(a.distance(c) < 1e-8 && b.distance(d) < 1e-8);
+            }
+            let polygon = vec![
+                DVec2::new(20., 20.),
+                DVec2::new(80., 20.),
+                DVec2::new(80., 80.),
+                DVec2::new(20., 80.),
+            ];
+            let expected = reference.visible_annotation_polygons(polygon.clone(), a, DVec2::ZERO);
+            let actual = shared.visible_annotation_polygons(polygon, a, DVec2::ZERO);
+            assert!((polygon_area(&expected) - polygon_area(&actual)).abs() < 1e-7);
+        }
+    }
+
+    #[test]
+    fn gpu_edge_visibility_preserves_precision_and_invalidates_cached_intervals_when_modes_change()
+    {
+        let mut occlusion = Occlusion::default();
+        occluding_rectangle(&mut occlusion, DVec2::ZERO, DVec2::splat(100.), 0.3);
+        let (a, b) = (DVec3::new(10., 50., 0.5), DVec3::new(90., 50., 0.5));
+        assert!(occlusion.visible_intervals(a, b).is_empty());
+        occlusion.line_cursor = 0;
+        let visible = occlusion.visible_intervals_with_guard(a, b, Some(1e-6));
+        assert_eq!(
+            visible,
+            vec![(0., 1.)],
+            "distant faces are resolved by GPU depth"
+        );
+        occlusion.line_cursor = 0;
+        assert!(
+            occlusion.visible_intervals(a, b).is_empty(),
+            "selected edges retain f64 clipping"
+        );
+        occlusion.line_cursor = 0;
+        assert!(
+            occlusion
+                .visible_intervals_with_guard(a, b, Some(0.3))
+                .is_empty(),
+            "a steep stroke footprint still requires CPU clipping"
+        );
+        let (a, b) = (
+            DVec3::new(10., 50., 0.3 + 1e-9),
+            DVec3::new(90., 50., 0.3 + 1e-9),
+        );
+        assert!(
+            occlusion
+                .visible_intervals_with_guard(a, b, Some(1e-6))
+                .is_empty(),
+            "foreground differences lost in GPU depth must still hide the edge"
+        );
+    }
+
+    #[test]
+    fn joint_precision_masks_ignore_own_entities_and_track_foreign_owner_changes() {
+        let polygon = [
+            DVec2::new(0., 0.),
+            DVec2::new(100., 0.),
+            DVec2::new(100., 100.),
+            DVec2::new(0., 100.),
+        ];
+        let origin = DVec3::new(0., 0., 0.4);
+        let mut occlusion = Occlusion::default();
+        let own = std::collections::BTreeSet::from([10]);
+        occlusion.begin_frame();
+        occlusion.entity = Some(10);
+        occluding_rectangle(&mut occlusion, DVec2::ZERO, DVec2::splat(100.), 0.4 - 1e-9);
+        assert!(
+            occlusion
+                .precision_candidates(&polygon, origin, DVec2::ZERO, false, &own)
+                .is_empty()
+        );
+        let revision = occlusion.revision;
+        // Identical geometry assigned to a different piece must invalidate the
+        // cached identity and remain an occluder, even inside a GPU depth step.
+        occlusion.begin_frame();
+        occlusion.entity = Some(20);
+        occluding_rectangle(&mut occlusion, DVec2::ZERO, DVec2::splat(100.), 0.4 - 1e-9);
+        assert_ne!(occlusion.revision, revision);
+        let candidates = occlusion.precision_candidates(&polygon, origin, DVec2::ZERO, true, &own);
+        assert_eq!(candidates.len(), 2);
+        assert!(
+            occlusion
+                .visible_surface_candidates(polygon.to_vec(), origin, DVec2::ZERO, &candidates)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn joint_surface_candidates_preserve_foreground_faces_and_outlines_and_refresh_after_edits() {
+        for projection in [
+            ketchup_core::Projection::Parallel,
+            ketchup_core::Projection::Perspective,
+        ] {
+            let camera = Camera {
+                projection,
+                ..Default::default()
+            };
+            let size = DVec2::splat(100.);
+            let inverse = camera.matrix(size).inverse();
+            let world = |x: f64, y: f64, z: f64| {
+                inverse.project_point3(DVec3::new(x / 50. - 1., 1. - y / 50., z))
+            };
+            let p = [
+                world(10., 10., 0.4),
+                world(90., 10., 0.4),
+                world(90., 90., 0.4),
+                world(10., 90., 0.4),
+            ];
+            let stock = [[p[0], p[1], p[2]], [p[0], p[2], p[3]]];
+            let render = |prepared: bool, dashed: bool| {
+                let mut mesh = Mesh::new(&camera, size);
+                // Most geometry is behind the stock; one face and one outline
+                // are in front, and must still mask the complete guide width.
+                for i in 0..30 {
+                    occluding_rectangle(
+                        &mut mesh.occlusion,
+                        DVec2::new(i as f64, 0.),
+                        DVec2::new(i as f64 + 20., 100.),
+                        0.6,
+                    );
+                }
+                occluding_rectangle(
+                    &mut mesh.occlusion,
+                    DVec2::new(45., 0.),
+                    DVec2::new(55., 100.),
+                    0.4 - 1e-9,
+                );
+                mesh.line(
+                    DVec3::new(70., 0., 0.4 - 2e-9),
+                    DVec3::new(70., 100., 0.4 - 2e-9),
+                    4.,
+                    Color32::BLACK,
+                );
+                mesh.vertices.clear();
+                mesh.indices.clear();
+                let surface = if prepared {
+                    mesh.cached_joint_surface(7, &stock)
+                } else {
+                    Arc::new(mesh.joint_surface(stock))
+                };
+                if prepared {
+                    assert!(Arc::ptr_eq(&surface, &mesh.cached_joint_surface(7, &stock)));
+                    let candidates = surface.occluders.as_ref().unwrap();
+                    assert!(
+                        candidates.iter().all(|(faces, _)| faces.len() <= 2),
+                        "background geometry must be rejected once for the board"
+                    );
+                }
+                for (a, b) in [
+                    (world(15., 35., 0.8), world(85., 65., 0.8)),
+                    (world(20., 80., 0.8), world(80., 20., 0.8)),
+                ] {
+                    mesh.joint_guide(a, b, &surface, 3., Color32::WHITE, dashed);
+                }
+                mesh
+            };
+            for dashed in [false, true] {
+                let original = render(false, dashed);
+                let prepared = render(true, dashed);
+                // Candidate filtering preserves the exact clipping output, not
+                // just the centerline or an approximate visibility threshold.
+                assert_eq!(
+                    bytemuck::cast_slice::<Vertex, u8>(&original.vertices),
+                    bytemuck::cast_slice::<Vertex, u8>(&prepared.vertices)
+                );
+                assert_eq!(original.indices, prepared.indices);
+            }
+            let mut mesh = Mesh::new(&camera, size);
+            let before = mesh.cached_joint_surface(7, &stock);
+            occluding_rectangle(&mut mesh.occlusion, DVec2::ZERO, size, 0.4 - 1e-9);
+            let after = mesh.cached_joint_surface(7, &stock);
+            assert!(
+                !Arc::ptr_eq(&before, &after),
+                "foreground edits invalidate candidates"
+            );
+            mesh.joint_guide(
+                world(20., 50., 0.8),
+                world(80., 50., 0.8),
+                &after,
+                2.,
+                Color32::WHITE,
+                true,
+            );
+            assert!(mesh.vertices.is_empty());
+        }
+    }
+
+    #[test]
+    fn projected_joint_surfaces_reuse_stock_and_invalidate_on_view_geometry_and_sections() {
+        let camera = Camera::default();
+        let size = DVec2::new(640., 480.);
+        let stock = [[DVec3::ZERO, DVec3::X, DVec3::Y]];
+        let mut cache = SceneCache::default();
+        let mut first_frame = Mesh::cached(&camera, size, &mut cache);
+        let first = first_frame.projected_joint_surface(7, &stock);
+        assert!(
+            Arc::ptr_eq(&first, &first_frame.projected_joint_surface(7, &stock)),
+            "joints sharing a board must reuse its projected skin"
+        );
+        first_frame.retain(&mut cache);
+
+        let mut next_frame = Mesh::cached(&camera, size, &mut cache);
+        next_frame.set_display(&Default::default());
+        next_frame.set_pixels_per_point(2.);
+        assert!(
+            Arc::ptr_eq(&first, &next_frame.projected_joint_surface(7, &stock)),
+            "hover redraws and pixel density must not rebuild the unchanged stock projection"
+        );
+        let moved_stock = stock.map(|triangle| triangle.map(|p| p + DVec3::Z * 0.1));
+        let moved = next_frame.projected_joint_surface(7, &moved_stock);
+        assert!(!Arc::ptr_eq(&first, &moved));
+        let sections = ketchup_core::DisplaySettings {
+            section_cuts: true,
+            section_axes: [false, false, true],
+            section_height: 0.,
+            ..Default::default()
+        };
+        next_frame.set_display(&sections);
+        let sectioned = next_frame.projected_joint_surface(7, &moved_stock);
+        assert!(!Arc::ptr_eq(&moved, &sectioned));
+        assert!(sectioned.triangles.is_empty());
+        next_frame.retain(&mut cache);
+
+        let mut default_display = Mesh::cached(&camera, size, &mut cache);
+        let unsectioned = default_display.projected_joint_surface(7, &moved_stock);
+        assert!(!Arc::ptr_eq(&sectioned, &unsectioned));
+        assert!(
+            !unsectioned.triangles.is_empty(),
+            "default display settings must not inherit stale section clipping"
+        );
+        default_display.retain(&mut cache);
+
+        let mut orbit = camera.clone();
+        orbit.yaw += 0.2;
+        let mut orbit_frame = Mesh::cached(&orbit, size, &mut cache);
+        orbit_frame.set_display(&sections);
+        let rotated = orbit_frame.projected_joint_surface(7, &moved_stock);
+        assert!(!Arc::ptr_eq(&sectioned, &rotated));
+        orbit_frame.retain(&mut cache);
+        let mut resized = Mesh::cached(&orbit, size * 2., &mut cache);
+        resized.set_display(&sections);
+        assert!(!Arc::ptr_eq(
+            &rotated,
+            &resized.projected_joint_surface(7, &moved_stock)
+        ));
+        resized.retain(&mut cache);
+        Mesh::cached(&orbit, size * 2., &mut cache).retain(&mut cache);
+        assert!(
+            cache.joint_surfaces.entries.is_empty(),
+            "unused boards must not accumulate in the cache"
+        );
+    }
+
+    #[test]
+    fn disabling_unused_annotation_masks_preserves_strokes_selection_and_joint_geometry() {
+        let camera = Camera::default();
+        let size = DVec2::splat(100.);
+        let inverse = camera.matrix(size).inverse();
+        let world = |x: f64, y: f64, z: f64| {
+            inverse.project_point3(DVec3::new(x / 50. - 1., 1. - y / 50., z))
+        };
+        let draw = |annotations| {
+            let mut mesh = Mesh::new(&camera, size);
+            mesh.set_annotation_occlusion_enabled(annotations);
+            mesh.line(
+                DVec3::new(50., 0., 0.3),
+                DVec3::new(50., 100., 0.3),
+                3.,
+                Color32::BLACK,
+            );
+            mesh.begin_selected_edges();
+            mesh.surface_stroke(
+                DVec3::new(10., 50., 0.35),
+                DVec3::new(90., 50., 0.35),
+                6.,
+                Color32::RED,
+                &[],
+            );
+            let p = [
+                world(0., 0., 0.25),
+                world(100., 0., 0.25),
+                world(100., 100., 0.25),
+                world(0., 100., 0.25),
+            ];
+            let surface = mesh.joint_surface([[p[0], p[1], p[2]], [p[0], p[2], p[3]]]);
+            mesh.joint_guide(
+                world(10., 40., 0.8),
+                world(90., 40., 0.8),
+                &surface,
+                1.8,
+                Color32::WHITE,
+                true,
+            );
+            mesh
+        };
+        let mut enabled = draw(true);
+        let mut disabled = draw(false);
+        assert_eq!(
+            bytemuck::cast_slice::<Vertex, u8>(&enabled.vertices),
+            bytemuck::cast_slice::<Vertex, u8>(&disabled.vertices)
+        );
+        assert_eq!(enabled.indices, disabled.indices);
+        assert!(!enabled.annotation_occluders.is_empty());
+        assert!(disabled.annotation_occluders.is_empty());
+        assert!(
+            !disabled.selection_occlusion.triangles.is_empty(),
+            "ordinary edge masking must remain active"
+        );
+        enabled.occlude_annotations_with_edges();
+        disabled.occlude_annotations_with_edges();
+        assert!(!enabled.occlusion.triangles.is_empty());
+        assert!(
+            disabled.occlusion.triangles.is_empty(),
+            "an unannotated scene must not collect unused stroke triangles"
+        );
+    }
+
+    #[test]
+    fn all_lower_cut_face_edges_render_as_dotted_xray_through_their_own_board() {
+        let points = [
+            DVec3::new(-1., -1., -1.),
+            DVec3::new(1., -1., -1.),
+            DVec3::new(1., 1., -1.),
+            DVec3::new(-1., 1., -1.),
+            DVec3::new(-1., -1., 1.),
+            DVec3::new(1., -1., 1.),
+            DVec3::new(1., 1., 1.),
+            DVec3::new(-1., 1., 1.),
+        ];
+        let triangles: Vec<_> = [
+            [0, 1, 2, 3],
+            [4, 5, 6, 7],
+            [0, 1, 5, 4],
+            [1, 2, 6, 5],
+            [2, 3, 7, 6],
+            [3, 0, 4, 7],
+        ]
+        .into_iter()
+        .flat_map(|p| {
+            [
+                [points[p[0]], points[p[1]], points[p[2]]],
+                [points[p[0]], points[p[2]], points[p[3]]],
+            ]
+        })
+        .collect();
+        let floor = [
+            DVec3::new(-0.6, -0.4, -0.5),
+            DVec3::new(0.6, -0.4, -0.5),
+            DVec3::new(0.6, 0.4, -0.5),
+            DVec3::new(-0.6, 0.4, -0.5),
+        ];
+        for projection in [
+            ketchup_core::Projection::Parallel,
+            ketchup_core::Projection::Perspective,
+        ] {
+            let camera = Camera {
+                projection,
+                ..Default::default()
+            };
+            let mut mesh = Mesh::new(&camera, DVec2::new(800., 600.));
+            let surface = mesh.joint_surface(triangles.iter().copied());
+            for triangle in &surface.triangles {
+                mesh.occlusion.insert(triangle.points);
+            }
+            for i in 0..4 {
+                let start = mesh.indices.len();
+                mesh.joint_guide(
+                    floor[i],
+                    floor[(i + 1) % 4],
+                    &surface,
+                    1.8,
+                    Color32::WHITE,
+                    true,
+                );
+                assert!(
+                    mesh.indices.len() > start,
+                    "lower cut-face edge {i} disappeared in {projection:?}"
+                );
+            }
+            // A connector may share an exterior side plane without becoming
+            // an ordinary stock rim. Its recessed contour must remain visible.
+            let start = mesh.indices.len();
+            mesh.joint_guide(
+                DVec3::new(1., -0.4, -0.5),
+                DVec3::new(1., 0.4, -0.5),
+                &surface,
+                1.8,
+                Color32::WHITE,
+                true,
+            );
+            assert!(
+                mesh.indices.len() > start,
+                "coplanarity with an outer face must not suppress cut edges"
+            );
+        }
+    }
+
+    #[test]
+    fn joint_visibility_work_does_not_scale_with_dash_count() {
+        let camera = Camera::default();
+        let size = DVec2::new(1024., 512.);
+        let inverse = camera.matrix(size).inverse();
+        let world = |x: f64, y: f64, z: f64| {
+            inverse.project_point3(DVec3::new(x / size.x * 2. - 1., 1. - y / size.y * 2., z))
+        };
+        let render = |dashed| {
+            let mut mesh = Mesh::new(&camera, size);
+            let p = [
+                world(0., 0., 0.4),
+                world(size.x, 0., 0.4),
+                world(size.x, size.y, 0.4),
+                world(0., size.y, 0.4),
+            ];
+            let mut surface = mesh.joint_surface([[p[0], p[1], p[2]], [p[0], p[2], p[3]]]);
+            occluding_rectangle(
+                &mut mesh.occlusion,
+                DVec2::new(400., 0.),
+                DVec2::new(600., size.y),
+                0.2,
+            );
+            mesh.joint_guide(
+                world(10., 256., 0.8),
+                world(1010., 256., 0.8),
+                &mut surface,
+                1.8,
+                Color32::WHITE,
+                dashed,
+            );
+            let work = (
+                surface.preparation_queries,
+                mesh.occlusion.polygon_queries,
+                mesh.selection_occlusion.polygon_queries,
+            );
+            (mesh, work)
+        };
+        let (solid, solid_work) = render(false);
+        let (dashed, dashed_work) = render(true);
+        assert!(solid_work.1 > 0);
+        assert_eq!(
+            dashed_work, solid_work,
+            "64 dashes must use the same visibility work as a continuous guide"
+        );
+        assert_eq!(
+            dashed.indices, solid.indices,
+            "dashes must not multiply GPU triangles"
+        );
+        assert_eq!(dashed.vertices.len(), solid.vertices.len());
+        assert!(dashed.vertices.iter().all(|v| v.dash_phase >= 0.));
+        let covers = |x: f64| {
+            let point = DVec2::new(x / size.x * 2. - 1., 0.);
+            dashed.indices.chunks_exact(3).any(|indices| {
+                let p = [indices[0], indices[1], indices[2]].map(|i| {
+                    let p = dashed.vertices[i as usize].position;
+                    DVec2::new(f64::from(p[0]), f64::from(p[1]))
+                });
+                let denominator = (p[1] - p[0]).perp_dot(p[2] - p[0]);
+                let winding = denominator.signum();
+                let inside = winding != 0.
+                    && [(p[0], p[1]), (p[1], p[2]), (p[2], p[0])]
+                        .into_iter()
+                        .all(|(a, b)| winding * (b - a).perp_dot(point - a) >= -1e-10);
+                if !inside {
+                    return false;
+                }
+                let u = (point - p[0]).perp_dot(p[2] - p[0]) / denominator;
+                let v = (p[1] - p[0]).perp_dot(point - p[0]) / denominator;
+                let phase = [indices[0], indices[1], indices[2]]
+                    .map(|i| f64::from(dashed.vertices[i as usize].dash_phase));
+                let phase = phase[0] + u * (phase[1] - phase[0]) + v * (phase[2] - phase[0]);
+                phase < 0. || phase.rem_euclid(1.) <= 0.5
+            })
+        };
+        for i in 0..64 {
+            let dash_center = 10. + (i as f64 + 0.25) / 63.5 * 1000.;
+            assert_eq!(
+                covers(dash_center),
+                !(400. ..600.).contains(&dash_center),
+                "visible dashes must retain their phase and foreground masking"
+            );
+            if i < 63 {
+                let gap_center = 10. + (i as f64 + 0.75) / 63.5 * 1000.;
+                assert!(
+                    !covers(gap_center),
+                    "dash gaps must remain empty after clipping"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dashed_cut_guides_reach_both_endpoints_including_short_connectors() {
+        let camera = Camera::default();
+        let size = DVec2::splat(100.);
+        let inverse = camera.matrix(size).inverse();
+        let world = |x: f64, y: f64, z: f64| {
+            inverse.project_point3(DVec3::new(x / 50. - 1., 1. - y / 50., z))
+        };
+        for length in [1., 4., 8., 13., 31., 70.] {
+            let mut mesh = Mesh::new(&camera, size);
+            let p = [
+                world(0., 0., 0.4),
+                world(100., 0., 0.4),
+                world(100., 100., 0.4),
+                world(0., 100., 0.4),
+            ];
+            let mut surface = mesh.joint_surface([[p[0], p[1], p[2]], [p[0], p[2], p[3]]]);
+            mesh.joint_guide(
+                world(10., 50., 0.8),
+                world(10. + length, 50., 0.8),
+                &mut surface,
+                1.8,
+                Color32::WHITE,
+                true,
+            );
+            let xs: Vec<_> = mesh
+                .vertices
+                .iter()
+                .map(|v| (v.position[0] + 1.) * 50.)
+                .collect();
+            assert!(!xs.is_empty());
+            let lo = xs.iter().copied().reduce(f32::min).unwrap();
+            let hi = xs.iter().copied().reduce(f32::max).unwrap();
+            assert!((lo - 10.).abs() < 1e-4);
+            assert!(
+                (f64::from(hi) - 10. - length).abs() < 1e-4,
+                "the last dash must reach the next contour segment"
+            );
+        }
+    }
+
+    #[test]
+    fn internal_joint_guides_project_to_the_owner_skin_and_hide_only_behind_nearer_faces() {
+        for projection in [
+            ketchup_core::Projection::Parallel,
+            ketchup_core::Projection::Perspective,
+        ] {
+            let mut camera = Camera::default();
+            camera.projection = projection;
+            let size = DVec2::splat(100.);
+            let inverse = camera.matrix(size).inverse();
+            let world = |x: f64, y: f64, z: f64| {
+                inverse.project_point3(DVec3::new(x / 50. - 1., 1. - y / 50., z))
+            };
+            let face = [
+                world(10., 10., 0.6),
+                world(90., 10., 0.6),
+                world(50., 90., 0.6),
+            ];
+            for dashed in [false, true] {
+                for alpha in [230, 255] {
+                    for occluder in [None, Some(0.5), Some(0.6), Some(0.7)] {
+                        let mut mesh = Mesh::new(&camera, size);
+                        if let Some(depth) = occluder {
+                            occluding_rectangle(&mut mesh.occlusion, DVec2::ZERO, size, depth);
+                        }
+                        let back = [
+                            world(10., 10., 0.85),
+                            world(90., 10., 0.85),
+                            world(50., 90., 0.85),
+                        ];
+                        let mut surface = mesh.joint_surface([face, back]);
+                        for triangle in &surface.triangles {
+                            mesh.occlusion.insert(triangle.points);
+                        }
+                        mesh.joint_guide(
+                            world(30., 50., 0.8),
+                            world(70., 50., 0.8),
+                            &mut surface,
+                            1.5,
+                            Color32::from_rgba_unmultiplied(0, 100, 92, alpha),
+                            dashed,
+                        );
+                        if occluder == Some(0.5) {
+                            assert!(
+                                mesh.vertices.is_empty(),
+                                "hidden guides must disappear completely"
+                            );
+                        } else {
+                            assert!(!mesh.vertices.is_empty());
+                            assert!(
+                                mesh.vertices
+                                    .iter()
+                                    .all(|v| (v.position[2] - 0.6).abs() < 1e-5),
+                                "projection={projection:?}, dashed={dashed}, occluder={occluder:?}: depths={:?}",
+                                mesh.vertices
+                                    .iter()
+                                    .map(|v| v.position[2])
+                                    .collect::<Vec<_>>()
+                            );
+                            assert!(mesh.vertices.iter().all(|v| v.color[3] == alpha));
+                            mesh.normalize_parallel_depth();
+                            assert!(mesh.vertices.iter().all(|v| v.position[2] > 0.));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn joint_guides_follow_sloping_faces_and_clip_the_full_width_at_foreground_edges() {
+        let camera = Camera::default();
+        let size = DVec2::splat(100.);
+        let inverse = camera.matrix(size).inverse();
+        let world = |x: f64, y: f64, z: f64| {
+            inverse.project_point3(DVec3::new(x / 50. - 1., 1. - y / 50., z))
+        };
+        let projected = [
+            DVec3::new(10., 10., 0.42),
+            DVec3::new(90., 10., 0.42),
+            DVec3::new(50., 90., 0.58),
+        ];
+        for dashed in [false, true] {
+            let mut mesh = Mesh::new(&camera, size);
+            mesh.occlusion.insert(projected);
+            occluding_rectangle(&mut mesh.occlusion, DVec2::new(50., 0.), size, 0.3);
+            let mut surface = mesh.joint_surface([projected.map(|p| world(p.x, p.y, p.z))]);
+            mesh.joint_guide(
+                world(40., 30., 0.8),
+                world(60., 70., 0.8),
+                &mut surface,
+                6.,
+                Color32::WHITE,
+                dashed,
+            );
             assert!(!mesh.vertices.is_empty());
-            assert!(mesh.vertices.iter().all(|v|(v.position[2]-0.6).abs()<1e-5));
-            let mut occluded=Mesh::new(&camera,size);
-            occluding_rectangle(&mut occluded.occlusion,DVec2::ZERO,size,0.5);
-            occluded.surface_guide(a,b,face,1.,Color32::WHITE,dashed);
-            assert!(occluded.vertices.is_empty());
+            assert!(
+                !mesh.clip_stroke_footprints,
+                "restore the caller's clipping state"
+            );
+            for vertex in &mesh.vertices {
+                let [x, y, z] = vertex.position;
+                assert!(
+                    x <= 1e-5,
+                    "the full guide width must stop at the foreground edge"
+                );
+                let screen_y = (1. - y) * 50.;
+                assert!(
+                    (z - (0.4 + screen_y * 0.002)).abs() < 1e-5,
+                    "the stroke width must follow its supporting surface depth"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stock_supported_cut_contours_cross_their_own_notches_but_hide_behind_other_pieces() {
+        let camera = Camera::default();
+        let size = DVec2::splat(100.);
+        let inverse = camera.matrix(size).inverse();
+        let world = |x: f64, y: f64, z: f64| {
+            inverse.project_point3(DVec3::new(x / 50. - 1., 1. - y / 50., z))
+        };
+        for foreground in [false, true] {
+            let mut mesh = Mesh::new(&camera, size);
+            // The evaluated board has a notch in the middle of this contour.
+            for (lo, hi) in [(20., 45.), (55., 80.)] {
+                occluding_rectangle(
+                    &mut mesh.occlusion,
+                    DVec2::new(lo, 20.),
+                    DVec2::new(hi, 80.),
+                    0.6,
+                );
+            }
+            if foreground {
+                occluding_rectangle(
+                    &mut mesh.occlusion,
+                    DVec2::new(48., 20.),
+                    DVec2::new(52., 80.),
+                    0.2,
+                );
+            }
+            let p = [
+                world(20., 20., 0.4),
+                world(80., 20., 0.4),
+                world(80., 80., 0.4),
+                world(20., 80., 0.4),
+            ];
+            let mut surface = mesh.joint_surface([[p[0], p[1], p[2]], [p[0], p[2], p[3]]]);
+            mesh.joint_guide(
+                world(30., 50., 0.8),
+                world(70., 50., 0.8),
+                &mut surface,
+                1.8,
+                Color32::WHITE,
+                false,
+            );
+            let center = DVec2::new(0., 0.);
+            let covers_center = mesh.indices.chunks_exact(3).any(|indices| {
+                let p = [indices[0], indices[1], indices[2]].map(|i| {
+                    let p = mesh.vertices[i as usize].position;
+                    DVec2::new(f64::from(p[0]), f64::from(p[1]))
+                });
+                let winding = (p[1] - p[0]).perp_dot(p[2] - p[0]).signum();
+                [(p[0], p[1]), (p[1], p[2]), (p[2], p[0])]
+                    .into_iter()
+                    .all(|(a, b)| winding * (b - a).perp_dot(center - a) >= -1e-10)
+            });
+            assert_eq!(
+                covers_center, !foreground,
+                "a notch must not interrupt its own contour, while another foreground piece must"
+            );
+        }
+    }
+
+    #[test]
+    fn projected_joint_guides_stay_inside_their_owner_silhouette_and_leave_gaps_clear() {
+        let camera = Camera::default();
+        let size = DVec2::splat(100.);
+        let inverse = camera.matrix(size).inverse();
+        let world = |x: f64, y: f64, z: f64| {
+            inverse.project_point3(DVec3::new(x / 50. - 1., 1. - y / 50., z))
+        };
+        for dashed in [false, true] {
+            let mut mesh = Mesh::new(&camera, size);
+            let mut triangles = Vec::new();
+            // Two disconnected visible patches leave an opening in the owner.
+            for (lo, hi) in [(20., 45.), (55., 80.)] {
+                let p = [
+                    world(lo, 40., 0.4),
+                    world(hi, 40., 0.4),
+                    world(hi, 60., 0.4),
+                    world(lo, 60., 0.4),
+                ];
+                triangles.extend([[p[0], p[1], p[2]], [p[0], p[2], p[3]]]);
+            }
+            let mut surface = mesh.joint_surface(triangles);
+            // Geometry behind the exterior but ahead of the internal cut must
+            // not hide a guide projected onto the exterior.
+            occluding_rectangle(&mut mesh.occlusion, DVec2::ZERO, size, 0.6);
+            mesh.joint_guide(
+                world(0., 50., 0.8),
+                world(100., 50., 0.8),
+                &mut surface,
+                30.,
+                Color32::WHITE,
+                dashed,
+            );
+            assert!(!mesh.indices.is_empty());
+            for triangle in mesh.indices.chunks_exact(3) {
+                let points = triangle
+                    .iter()
+                    .map(|&i| mesh.vertices[i as usize].position)
+                    .map(|p| [(p[0] + 1.) * 50., (1. - p[1]) * 50., p[2]])
+                    .collect::<Vec<_>>();
+                assert!(points.iter().all(|p| p[0] >= 20. - 1e-4
+                    && p[0] <= 80. + 1e-4
+                    && p[1] >= 40. - 1e-4
+                    && p[1] <= 60. + 1e-4
+                    && (p[2] - 0.4).abs() < 1e-5));
+                assert!(
+                    points.iter().all(|p| p[0] <= 45. + 1e-4)
+                        || points.iter().all(|p| p[0] >= 55. - 1e-4),
+                    "guides must not bridge the owner's opening"
+                );
+            }
         }
     }
 
@@ -2411,7 +4104,8 @@ mod tests {
     #[ignore = "Requires a GPU adapter; verifies only shadow pixels change through the shadow mask resolve"]
     fn shadow_antialiasing_smooths_shadows_without_smoothing_silhouettes() {
         use egui_wgpu::CallbackTrait;
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
         eprintln!("Shadow mask backend: {:?}", adapter.get_info().backend);
         let (device, queue) =
@@ -2441,6 +4135,7 @@ mod tests {
                     [-0.8, 0.8, 0.5],
                 ]
                 .map(|position| Vertex {
+                    dash_phase: -1.,
                     position,
                     color: [255, 0, 0, 255],
                     lateral: 0.,
@@ -2454,6 +4149,7 @@ mod tests {
                         [0.1, 0.6, 0.5_f32.next_down()],
                     ]
                     .map(|position| Vertex {
+                        dash_phase: -1.,
                         position,
                         color: if enabled { [255; 4] } else { [0, 0, 0, 255] },
                         lateral: 0.,
@@ -2517,6 +4213,7 @@ mod tests {
                     let y1 = -0.8 + 1.6 * (y + 1) as f32 / 48.;
                     for [x, y] in [[x0, y0], [x1, y0], [x1, y1], [x0, y0], [x1, y1], [x0, y1]] {
                         fragmented_mesh.shadow_vertices.push(Vertex {
+                            dash_phase: -1.,
                             position: [x, y, depth(x, y)],
                             color: [255; 4],
                             lateral: 0.,
@@ -2658,17 +4355,27 @@ mod tests {
                 receive.recv().unwrap().unwrap();
                 let mapped = readback.slice(..).get_mapped_range().unwrap();
                 if visible_shadow {
-                    assert!(mapped.chunks_exact(4).any(|pixel| pixel[0] == 0),
-                        "coplanar shadow must render, including after a rounding step");
+                    assert!(
+                        mapped.chunks_exact(4).any(|pixel| pixel[0] == 0),
+                        "coplanar shadow must render, including after a rounding step"
+                    );
                 }
                 let center = &mapped[(32 * 64 + 32) * 4..(32 * 64 + 32) * 4 + 4];
-                assert!(if visible_shadow { center[0] < 8 } else { center[0] > 248 },
-                    "coplanar rounding must not erase shadows or expose hidden ones: {center:?}");
+                assert!(
+                    if visible_shadow {
+                        center[0] < 8
+                    } else {
+                        center[0] > 248
+                    },
+                    "coplanar rounding must not erase shadows or expose hidden ones: {center:?}"
+                );
                 if std::ptr::eq(callback, &fragmented) {
                     for y in 10..54 {
                         for x in 10..54 {
-                            assert!(mapped[(y * 64 + x) * 4] < 8,
-                                "fragmented isometric shadow must have no lit holes at {x},{y}");
+                            assert!(
+                                mapped[(y * 64 + x) * 4] < 8,
+                                "fragmented isometric shadow must have no lit holes at {x},{y}"
+                            );
                         }
                     }
                 }
@@ -2823,6 +4530,7 @@ mod tests {
         mesh.vertices = depths
             .into_iter()
             .map(|z| Vertex {
+                dash_phase: -1.,
                 position: [0., 0., z],
                 color: Color32::WHITE.to_array(),
                 lateral: 0.,
@@ -2851,7 +4559,9 @@ mod tests {
 
     #[test]
     fn indexed_strokes_preserve_coverage_with_compact_vertices() {
-        assert_eq!(std::mem::size_of::<Vertex>(), 20);
+        assert_eq!(std::mem::size_of::<Vertex>(), 28);
+        assert_eq!(std::mem::offset_of!(Vertex, shadow_color), 20);
+        assert_eq!(std::mem::offset_of!(Vertex, dash_phase), 24);
         assert_eq!(std::mem::offset_of!(Vertex, color), 12);
         assert_eq!(std::mem::offset_of!(Vertex, lateral), 16);
         let size = DVec2::new(1000., 800.);
@@ -2964,6 +4674,7 @@ mod tests {
         let callback = || SceneCallback {
             shadow_range: 1..1,
             vertices: vec![Vertex {
+                dash_phase: -1.,
                 position: [0., 0., 0.5],
                 color: [255; 4],
                 lateral: 0.,
@@ -3028,9 +4739,11 @@ mod tests {
     #[ignore = "Requires a GPU adapter; verifies incident face depth outside its silhouette"]
     fn rear_face_boundary_does_not_hide_foreground_selection_outside_the_face() {
         use wgpu::util::DeviceExt;
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
-        let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(include_str!("edges.wgsl").into()),

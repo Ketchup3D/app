@@ -49,6 +49,10 @@ pub struct JointSettings {
     pub width_ratio: f64,
     pub height_ratio: f64,
     pub fingers: u32,
+    /// Number of evenly spaced dovetail tails across the joint width.
+    pub dovetails: u32,
+    /// Tail width in metres; absent for legacy count-based joints.
+    pub dovetail_width: Option<f64>,
     pub taper_degrees: f64,
     /// Extra lateral clearance removed from the receiving part, in metres.
     pub clearance: f64,
@@ -62,12 +66,26 @@ impl Default for JointSettings {
             width_ratio: 0.5,
             height_ratio: 0.5,
             fingers: 4,
+            dovetails: 1,
+            dovetail_width: None,
             taper_degrees: 8.,
             clearance: 0.0001,
         }
     }
 }
 impl JointSettings {
+    /// Fit fixed-width tails evenly across the overlap, retaining legacy layouts.
+    pub fn dovetail_layout(&self, span: f64) -> Option<(u32, f64)> {
+        if !span.is_finite() || span <= 0. { return None; }
+        if let Some(width) = self.dovetail_width {
+            if !width.is_finite() || width <= 0. || width >= span { return None; }
+            let count = (span * self.width_ratio / width).floor().max(1.);
+            if count > 64. { return None; }
+            Some((count as u32, width))
+        } else {
+            (self.dovetails > 0).then(|| (self.dovetails, span * self.width_ratio / self.dovetails as f64))
+        }
+    }
     pub fn valid(&self) -> bool {
         self.depth_axis < 3
             && self.width_axis < 3
@@ -77,6 +95,8 @@ impl JointSettings {
             && self.height_ratio.is_finite()
             && (0.1..=0.9).contains(&self.height_ratio)
             && (2..=16).contains(&self.fingers)
+            && (1..=16).contains(&self.dovetails)
+            && self.dovetail_width.is_none_or(|width| width.is_finite() && width > 0.)
             && self.taper_degrees.is_finite()
             && (1. ..=30.).contains(&self.taper_degrees)
             && self.clearance.is_finite()
@@ -177,7 +197,77 @@ fn box_points(lo: DVec3, hi: DVec3) -> [DVec3; 8] {
         DVec3::new(lo.x, hi.y, hi.z),
     ]
 }
+// The tail/tenon needs a shoulder on its own board. The receiver can
+// continue along a different axis, as in a cabinet corner or a T joint.
+fn joint_direction(a: (DVec3, DVec3), b: (DVec3, DVec3), lo: DVec3, hi: DVec3, d: usize) -> Option<bool> {
+    let lower = lo[d] - a.0[d] > EPS;
+    let upper = a.1[d] - hi[d] > EPS;
+    let receiver_stock = (0..3).any(|axis| lo[axis] - b.0[axis] > EPS || b.1[axis] - hi[axis] > EPS);
+    if (!lower && !upper) || !receiver_stock { return None; }
+    Some(lower && (!upper || a.0[d] + a.1[d] < b.0[d] + b.1[d]))
+}
 impl Model {
+    /// Complete contours of material removed from one source board. Edges on
+    /// the original stock rim can disappear from the retained solid entirely,
+    /// but still belong to the closed cut outline shown by the viewport.
+    pub fn joinery_cut_edges(
+        &self,
+        evaluated: &Model,
+        member: u64,
+    ) -> Result<Vec<[DVec3; 2]>, &'static str> {
+        let roots = BTreeSet::from([member]);
+        let stock = self.copy_entities(&roots);
+        let retained = evaluated.copy_entities(&roots);
+        let frame = Frame::new(&[&stock, &retained])?;
+        let removed = csg::apply(
+            solids::import(&stock, frame)?,
+            solids::import(&retained, frame)?,
+            Boolean::Difference,
+            frame.epsilon,
+        )?;
+        if removed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut cut = Model::default();
+        solids::output(&mut cut, removed, frame, "Joint cut", false, true)?;
+        Ok(cut
+            .edges
+            .values()
+            .map(|edge| {
+                let (a, b) = cut.points(edge);
+                [a, b]
+            })
+            .collect())
+    }
+
+    /// Axis pairs that can cut the selected stock with the current profile.
+    pub fn supported_joinery_axes(&self, members: [u64; 2], settings: &JointSettings) -> Vec<(usize, usize)> {
+        if members[0] == members[1] { return Vec::new(); }
+        let (Ok(a), Ok(b)) = (board(self, members[0]), board(self, members[1])) else {
+            return Vec::new();
+        };
+        let (lo, hi) = (a.0.max(b.0), a.1.min(b.1));
+        let size = hi - lo;
+        if size.min_element() <= EPS * 10. { return Vec::new(); }
+        let mut supported = Vec::new();
+        for d in 0..3 {
+            if joint_direction(a, b, lo, hi, d).is_none() { continue; }
+            for u in 0..3 {
+                if u == d { continue; }
+                let v = 3 - d - u;
+                let mut candidate = settings.clone();
+                candidate.depth_axis = d;
+                candidate.width_axis = u;
+                if !candidate.valid() || settings.clearance * 2. >= size[u].min(size[v]) * 0.1 { continue; }
+                if settings.kind == JointKind::Dovetail {
+                    let Some((_, width)) = settings.dovetail_layout(size[u]) else { continue; };
+                    if size[d] * settings.taper_degrees.to_radians().tan() * 2. >= width - EPS { continue; }
+                }
+                supported.push((d, u));
+            }
+        }
+        supported
+    }
     /// Apply a relation to a disposable evaluated model. Original board bounds
     /// always come from stock, allowing multiple joints to affect the same board.
     pub(crate) fn cut_joint(
@@ -199,18 +289,9 @@ impl Model {
         }
         let (d, u) = (settings.depth_axis, settings.width_axis);
         let v = 3 - d - u;
-        // Both parts must have stock outside opposite ends of the joint.
-        let forward = (a.0[d] + a.1[d]) < (b.0[d] + b.1[d]);
-        let (first_end, second_end) = if forward {
-            (a.0[d], b.1[d])
-        } else {
-            (b.0[d], a.1[d])
-        };
-        if lo[d] - first_end <= EPS || second_end - hi[d] <= EPS {
-            return Err(
-                "Choose a depth axis along which both boards extend beyond opposite ends of their overlap",
-            );
-        }
+        let forward = joint_direction(a, b, lo, hi, d).ok_or(
+            "Choose an orientation with a shoulder on the first board and stock remaining on the receiving board",
+        )?;
         if settings.clearance * 2. >= size[u].min(size[v]) * 0.1 {
             return Err("Clearance is too large for this joint");
         }
@@ -223,8 +304,13 @@ impl Model {
         let overlap = prism(box_points(lo, hi), frame)?;
         let mut profiles = Vec::new();
         let mut pockets = Vec::new();
+        let dovetail = if settings.kind == JointKind::Dovetail {
+            Some(settings.dovetail_layout(size[u]).ok_or("Choose a tail width that fits the overlap and produces at most 64 tails")?)
+        } else { None };
         let count = if settings.kind == JointKind::Finger {
             settings.fingers * 2
+        } else if let Some((count, _)) = dovetail {
+            count
         } else {
             1
         };
@@ -235,9 +321,11 @@ impl Model {
             let (mut l, mut h) = (lo, hi);
             match settings.kind {
                 JointKind::MortiseTenon | JointKind::TongueGroove | JointKind::Dovetail => {
-                    let margin = size[u] * (1. - settings.width_ratio) * 0.5;
-                    l[u] += margin;
-                    h[u] -= margin;
+                    let slot_width = size[u] / count as f64;
+                    let tail_width = dovetail.map_or(slot_width * settings.width_ratio, |(_, width)| width);
+                    let margin = (slot_width - tail_width) * 0.5;
+                    l[u] = lo[u] + slot_width * i as f64 + margin;
+                    h[u] = lo[u] + slot_width * (i + 1) as f64 - margin;
                     if settings.kind == JointKind::MortiseTenon {
                         let margin = size[v] * (1. - settings.height_ratio) * 0.5;
                         l[v] += margin;
@@ -622,6 +710,121 @@ mod tests {
         assert_eq!(restored.model, doc.model);
     }
     #[test]
+    fn perpendicular_boards_support_corner_joinery_in_both_part_orders() {
+        for reverse in [false, true] {
+            for kind in JointKind::ALL {
+                let mut model = Model::default();
+                let horizontal = board_at(&mut model, DVec3::ZERO, DVec3::new(0.3, 0.3, 0.04), false);
+                let vertical = board_at(&mut model, DVec3::new(0.26, 0., 0.), DVec3::new(0.3, 0.3, 0.3), false);
+                let members = if reverse { [vertical, horizontal] } else { [horizontal, vertical] };
+                let mut settings = JointSettings { kind, clearance: 0., ..Default::default() };
+                let orientations = model.supported_joinery_axes(members, &settings);
+                assert!(!orientations.is_empty(), "{kind:?}, reverse={reverse}");
+                (settings.depth_axis, settings.width_axis) = orientations[0];
+                model.test_cut_joint(members, &settings).unwrap();
+                model.validate().unwrap();
+                let total: f64 = members.into_iter().map(|id| model.solid_volume(id).unwrap()).sum();
+                assert!((total - (0.3 * 0.3 * 0.04 + 0.04 * 0.3 * 0.3 - 0.04 * 0.3 * 0.04)).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn only_one_wood_joint_is_allowed_per_unordered_pair() {
+        let (mut model, members) = pair();
+        let connection = Connection {
+            members, entry_face: None,
+            operation: ConnectionOperation::Joinery(JointSettings::default()),
+        };
+        let id = model.add_connection(connection.clone()).unwrap();
+        let saved = model.clone();
+        assert!(model.has_joinery_between(members));
+        assert!(model.has_joinery_between([members[1], members[0]]));
+        for reversed in [false, true] {
+            let mut duplicate = connection.clone();
+            if reversed { duplicate.members.swap(0, 1); }
+            assert!(model.add_connection(duplicate).unwrap_err().contains("already have a wood joint"));
+            assert_eq!(model, saved);
+        }
+        model.connections.remove(&id);
+        assert!(!model.has_joinery_between(members));
+        assert!(model.add_connection(connection).is_ok());
+    }
+
+    #[test]
+    fn multiple_dovetails_cut_matching_tails_and_sockets() {
+        for reverse in [false, true] {
+            let mut previous = f64::INFINITY;
+            for dovetails in 1..=4 {
+                let (mut model, mut members) = pair();
+                if reverse { members.swap(0, 1); }
+                let settings = JointSettings {
+                    kind: JointKind::Dovetail, dovetails, taper_degrees: 1.,
+                    clearance: 0., ..Default::default()
+                };
+                assert!(model.supported_joinery_axes(members, &settings).contains(&(0, 1)));
+                model.test_cut_joint(members, &settings).unwrap();
+                model.validate().unwrap();
+                let volumes = members.map(|id| model.solid_volume(id).unwrap());
+                assert!((volumes[0] + volumes[1] - 0.0022).abs() < 1e-9);
+                assert!(volumes[0] < previous, "each additional tapered tail removes more neck material");
+                previous = volumes[0];
+            }
+        }
+    }
+
+    #[test]
+    fn dovetail_width_fits_cuts_and_remains_fixed_when_span_changes() {
+        let settings = JointSettings {
+            kind: JointKind::Dovetail, dovetail_width: Some(0.01),
+            taper_degrees: 1., clearance: 0., ..Default::default()
+        };
+        assert_eq!(settings.dovetail_layout(0.1), Some((5, 0.01)));
+        assert_eq!(settings.dovetail_layout(0.2), Some((10, 0.01)));
+        assert_eq!(settings.dovetail_layout(0.005), None);
+        let (mut model, members) = pair();
+        model.test_cut_joint(members, &settings).unwrap();
+        model.validate().unwrap();
+        let total: f64 = members.into_iter().map(|id| model.solid_volume(id).unwrap()).sum();
+        assert!((total - 0.0022).abs() < 1e-9);
+        let restored: JointSettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.dovetail_width, Some(0.01));
+        assert!(!JointSettings { dovetail_width: Some(0.), ..Default::default() }.valid());
+    }
+
+    #[test]
+    fn dovetail_count_defaults_and_round_trips() {
+        let old: JointSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.dovetails, 1);
+        assert_eq!(old.dovetail_width, None);
+        let settings = JointSettings { dovetails: 4, ..Default::default() };
+        let restored: JointSettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored, settings);
+        assert!(!JointSettings { dovetails: 0, ..Default::default() }.valid());
+        assert!(!JointSettings { dovetails: 17, ..Default::default() }.valid());
+    }
+
+    #[test]
+    fn supported_orientations_match_stock_and_profile_limits() {
+        let (model, members) = pair();
+        for kind in JointKind::ALL {
+            let settings = JointSettings { kind, ..Default::default() };
+            let supported = model.supported_joinery_axes(members, &settings);
+            assert!(!supported.is_empty());
+            for (depth_axis, width_axis) in supported {
+                assert_ne!(depth_axis, width_axis);
+                let mut evaluated = model.clone();
+                evaluated.test_cut_joint(members, &JointSettings {
+                    depth_axis, width_axis, ..settings.clone()
+                }).unwrap();
+            }
+        }
+        assert!(model.supported_joinery_axes([members[0], members[0]], &JointSettings::default()).is_empty());
+        let invalid = JointSettings { clearance: 0.01, ..Default::default() };
+        assert!(model.supported_joinery_axes(members, &invalid).is_empty());
+    }
+
+    #[test]
     fn all_axis_pairs_and_nested_editing_contexts_work() {
         for d in 0..3 {
             for u in 0..3 {
@@ -637,6 +840,8 @@ mod tests {
                     q[3 - d - u] = p.z;
                     vertex.position = q;
                 }
+                assert!(model.supported_joinery_axes(members, &JointSettings::default())
+                    .contains(&(d, u)));
                 let container = model
                     .make_object(&BTreeSet::from(members), true, "Assembly")
                     .unwrap();

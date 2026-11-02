@@ -269,8 +269,17 @@ impl Member {
     }
 }
 impl Model {
+    pub fn has_joinery_between(&self, members: [u64; 2]) -> bool {
+        self.connections.values().any(|connection|
+            matches!(connection.operation, ConnectionOperation::Joinery(_))
+                && (connection.members == members || connection.members == [members[1], members[0]]))
+    }
+
     pub fn add_connection(&mut self, mut connection: Connection) -> Result<u64, String> {
         if matches!(connection.operation, ConnectionOperation::Joinery(_)) {
+            if self.has_joinery_between(connection.members) {
+                return Err("These pieces already have a wood joint. Edit or delete the existing joint first.".into());
+            }
             let pair = BTreeSet::from(connection.members);
             if pair.len() != 2
                 || self.selection_protected(&pair)

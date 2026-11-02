@@ -837,7 +837,10 @@ impl KetchupApp {
                     ACCENT,
                 );
             }
-            if *id == self.viewports.active && !touch_navigation { self.fastener_face_handles(ui,*rect); }
+            if *id == self.viewports.active && !touch_navigation {
+                self.fastener_face_handles(ui,*rect);
+                self.joint_marker_handles(ui, *rect);
+            }
             self.paint_shared_presence(ui, *rect);
             self.paint_compass(ui, response);
             self.paint_section_handles(ui, response, *id == self.viewports.active);

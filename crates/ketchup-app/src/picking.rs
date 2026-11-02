@@ -184,6 +184,38 @@ impl PickingCache {
         scoped: bool,
         visited: &mut usize,
     ) -> Option<(u64, f64, DVec3)> {
+        self.nearest_matching(faces, entities, ray, editable, scoped, visited, |_| true)
+    }
+
+    /// World markers remain visible over their owners, but not through other objects.
+    pub fn marker_visible(
+        &self,
+        faces: &FaceCache,
+        entities: &EntityCache,
+        camera: &Camera,
+        size: DVec2,
+        point: DVec3,
+        owners: &std::collections::BTreeSet<u64>,
+    ) -> bool {
+        let view = camera.view(size);
+        let Some(pixel) = view.project(point) else { return false; };
+        if !self.display.section_contains(point) { return false; }
+        let ray = view.ray(pixel);
+        self.nearest_matching(faces, entities, ray, false, false, &mut 0,
+            |id| !owners.contains(&id))
+            .is_none_or(|(_, t, _)| t + 1e-5 >= point.distance(ray.origin))
+    }
+
+    fn nearest_matching(
+        &self,
+        faces: &FaceCache,
+        entities: &EntityCache,
+        ray: Ray,
+        editable: bool,
+        scoped: bool,
+        visited: &mut usize,
+        include: impl Fn(u64) -> bool,
+    ) -> Option<(u64, f64, DVec3)> {
         if self.nodes.is_empty() {
             return None;
         }
@@ -228,7 +260,8 @@ impl PickingCache {
             }
             for item in &self.items[node.start..node.end] {
                 let state = entities.get(item.id);
-                if state.hidden
+                if !include(item.id)
+                    || state.hidden
                     || scoped && state.context.is_none()
                     || editable && state.context != Some(item.id)
                 {

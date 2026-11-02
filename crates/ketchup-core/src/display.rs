@@ -32,6 +32,8 @@ impl FaceStyle {
 #[serde(default)]
 pub struct DisplaySettings {
     pub joinery_preview: bool,
+    /// Show clickable markers at saved wood joints.
+    pub wood_joinery: bool,
     pub fasteners: bool,
     pub fastener_preview: bool,
     pub fastener_face_handles: bool,
@@ -90,6 +92,7 @@ impl Default for DisplaySettings {
     fn default() -> Self {
         Self {
             joinery_preview: true,
+            wood_joinery: false,
             fasteners: true,
             fastener_preview: false,
             fastener_face_handles: false,

@@ -390,7 +390,7 @@ pub(super) fn remember_section(ctx: &egui::Context, id: egui::Id, key: &str) {
     }
 }
 
-fn set_section_open(ctx: &egui::Context, key: &str, open: bool) {
+pub(super) fn set_section_open(ctx: &egui::Context, key: &str, open: bool) {
     ctx.data_mut(|data| {
         let memory = data.get_temp_mut_or_default::<SectionMemory>(section_memory_id());
         memory.0.insert(key.to_owned(), open);
@@ -712,6 +712,8 @@ mod preference_tests {
         app.joinery.settings.width_ratio=0.6;
         app.joinery.settings.height_ratio=0.7;
         app.joinery.settings.fingers=6;
+        app.joinery.settings.dovetails=3;
+        app.joinery.settings.dovetail_width=Some(0.02);
         app.joinery.settings.clearance=0.0002;
         app.joinery.settings.taper_degrees=12.;
         app.joinery.open=true;
@@ -1642,6 +1644,28 @@ mod preference_tests {
             assert_eq!(restored.doc.display.group_names, enabled);
             restored.new_model(&ctx);
             assert_eq!(restored.doc.display.group_names, enabled);
+        }
+    }
+
+    #[test]
+    fn wood_joinery_save_without_model_edits_and_default_off() {
+        let old: DisplaySettings = serde_json::from_str("{}").unwrap();
+        assert!(!old.wood_joinery);
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        for enabled in [true, false] {
+            app.doc.display.wood_joinery = enabled;
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.doc.display.wood_joinery, enabled);
+            restored.new_model(&ctx);
+            assert_eq!(restored.doc.display.wood_joinery, enabled);
         }
     }
 
@@ -4288,6 +4312,7 @@ impl KetchupApp {
         for (value, label) in [
             (&mut d.group_names, "Group names"),
             (&mut d.dimensions, "Dimensions"),
+            (&mut d.wood_joinery, "Wood Joinery"),
         ] {
             Self::menu_checkbox(ui, value, label);
         }

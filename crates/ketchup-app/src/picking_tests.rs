@@ -395,3 +395,30 @@ fn edge_world_endpoints_follow_same_size_topology_edits_and_document_replacement
     actual.sort_unstable_by_key(|edge| edge.0);
     assert_eq!(actual, expected);
 }
+
+#[test]
+fn markers_ignore_owners_but_are_occluded_by_other_objects() {
+    let camera = Camera::default();
+    let size = DVec2::new(1000., 800.);
+    let anchor = DVec3::new(0.25, 0.25, 0.);
+    let view = camera.view(size);
+    let ray = view.ray(view.project(anchor).unwrap());
+    for foreground in [true, false] {
+        let mut model = triangle_grid(2);
+        let offset = ray.direction * if foreground { -0.1 } else { 0.1 };
+        for id in [8, 9, 10] {
+            model.vertices.get_mut(&id).unwrap().position += offset - DVec3::X * 3.;
+        }
+        let mut faces = FaceCache::default();
+        faces.update(&model);
+        let mut entities = EntityCache::default();
+        entities.update(&model);
+        let mut picking = PickingCache::default();
+        picking.update(&faces);
+        let owners = std::collections::BTreeSet::from([7]);
+        assert_eq!(picking.marker_visible(&faces, &entities, &camera, size, anchor, &owners),
+            !foreground);
+        let both = std::collections::BTreeSet::from([7, 14]);
+        assert!(picking.marker_visible(&faces, &entities, &camera, size, anchor, &both));
+    }
+}

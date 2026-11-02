@@ -90,3 +90,37 @@ fn transient_previews_bypass_reuse_and_return_to_the_static_path_after_cancel() 
     render(&mut app, &ctx, rect);
     assert_eq!(app.scene_cache.mesh_builds, 4);
 }
+
+#[test]
+fn joinery_and_annotations_remain_retained_while_the_outliner_is_open() {
+    let ctx = egui::Context::default();
+    let mut app = KetchupApp::with_document(Document::default(), None, true);
+    let members = [
+        ui_solid_box(&mut app.doc.model, DVec3::ZERO, DVec3::new(0.3, 0.1, 0.04)),
+        ui_solid_box(&mut app.doc.model, DVec3::new(0.2, 0., 0.), DVec3::new(0.5, 0.1, 0.04)),
+    ];
+    app.selected = BTreeSet::from(members);
+    app.doc.model.add_connection(ketchup_core::connections::Connection {
+        members, entry_face: None,
+        operation: ketchup_core::connections::ConnectionOperation::Joinery(Default::default()),
+    }).unwrap();
+    app.doc.display.wood_joinery = true;
+    app.doc.model.add_dimension(DVec3::ZERO, DVec3::X, DVec3::Y).unwrap();
+    let text = app.doc.model.add_text(DVec3::ZERO, DVec3::Y, "Board").unwrap();
+    let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(800., 600.));
+    let render_with_outliner = |app: &mut KetchupApp| {
+        let _ = ctx.run_test_ui(egui::RawInput::default(), |ui| {
+            app.outliner_contents(ui);
+            app.paint_scene(ui, rect);
+        });
+    };
+    render_with_outliner(&mut app);
+    // Allow an initial font-atlas resize to settle before checking retention.
+    render_with_outliner(&mut app);
+    let builds = app.scene_cache.mesh_builds;
+    for _ in 0..4 { render_with_outliner(&mut app); }
+    assert_eq!(app.scene_cache.mesh_builds, builds);
+    app.doc.model.texts.get_mut(&text).unwrap().text = "Changed".into();
+    render_with_outliner(&mut app);
+    assert_eq!(app.scene_cache.mesh_builds, builds + 1);
+}
