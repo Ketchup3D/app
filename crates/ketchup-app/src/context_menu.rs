@@ -36,7 +36,6 @@ impl KetchupApp {
 
     pub(super) fn context_action(&mut self, ctx: &egui::Context, action: ContextAction) {
         use ContextAction::*;
-        if (self.fasteners.open || self.joinery.open) && !matches!(action,AutomaticFasteners | WoodJoinery) {return;}
         let locked = self.doc.model.selection_protected(&self.selected);
         if !matches!(action, ContextAction::Copy) {
             self.last_move_copy = None;
@@ -319,12 +318,15 @@ impl KetchupApp {
             );
             ui.separator();
         }
-        item(ui, "Wood Joinery…", self.selected_fastener_pair(ui.ctx()).is_some(), ContextAction::WoodJoinery);
-        item(ui, "Automatic Fasteners…", self.selected_fastener_pair(ui.ctx()).is_some(), ContextAction::AutomaticFasteners);
         item(ui, "Make Group…", editable, ContextAction::Group);
         item(ui, "Create Component…", editable, ContextAction::Component);
         item(ui, "Ungroup", editable && groups, ContextAction::Ungroup);
         item(ui, "Explode", editable && objects, ContextAction::Explode);
+        ui.separator();
+        // Shared assembly actions appear together in Edit, viewport and Outliner menus.
+        let pair_editable = self.selected_fastener_pair(ui.ctx()).is_some();
+        item(ui, "Wood Joinery", pair_editable, ContextAction::WoodJoinery);
+        item(ui, "Automatic Fasteners", pair_editable, ContextAction::AutomaticFasteners);
         ui.separator();
         item(ui, "Cut", editable, ContextAction::Cut);
         item(ui, "Copy", selected, ContextAction::Copy);

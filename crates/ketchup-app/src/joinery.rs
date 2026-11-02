@@ -3,6 +3,11 @@ use crate::inspector_table::inspector_field;
 use ketchup_core::connections::{Connection, ConnectionOperation};
 use ketchup_core::joinery::{GeometryEvaluation, JointKind, JointSettings};
 
+#[path = "joinery_cards.rs"]
+mod cards;
+#[path = "joint_highlight.rs"]
+mod highlight;
+
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(super) struct Preferences {
@@ -27,12 +32,14 @@ struct Preview {
     members: [u64; 2],
     settings: JointSettings,
     result: Result<Model, String>,
+    region: highlight::Region,
 }
 /// Cache by source geometry, including transient Move previews. Camera changes
 /// do not repeat boolean operations; every actual board move invalidates it.
 #[derive(Default)]
 pub(super) struct GeometryCache {
     source: Option<Model>,
+    regions: Vec<highlight::Region>,
     pub result: Option<GeometryEvaluation>,
     faces: crate::renderer::FaceCache,
     entities: crate::renderer::EntityCache,
@@ -69,7 +76,12 @@ impl GeometryCache {
     }
     pub fn update(&mut self, source: &Model) {
         if self.source.as_ref() != Some(source) {
-            self.result = Some(source.evaluate_joinery());
+            let evaluation=source.evaluate_joinery();
+            self.regions=source.connections.iter().filter(|(id,c)|
+                matches!(c.operation,ConnectionOperation::Joinery(_))
+                && !evaluation.errors.iter().any(|(invalid,_)|invalid==*id))
+                .map(|(_,c)|highlight::Region::build(source,&evaluation.model,c.members)).collect();
+            self.result=Some(evaluation);
             self.source = Some(source.clone());
         }
     }
@@ -89,16 +101,7 @@ fn fraction(ui: &mut egui::Ui, id: &str, label: &str, value: &mut f64) {
     }
 }
 fn fields(ui: &mut egui::Ui, settings: &mut JointSettings) {
-    inspector_field(ui, "wood_joint_kind", "Joint", |ui| {
-        egui::ComboBox::from_id_salt("kind")
-            .selected_text(settings.kind.label())
-            .show_ui(ui, |ui| {
-                for kind in JointKind::ALL {
-                    ui.selectable_value(&mut settings.kind, kind, kind.label());
-                }
-            })
-            .response
-    });
+    cards::selector(ui, &mut settings.kind);
     for (id, label, depth) in [
         ("depth_axis", "Depth axis", true),
         ("width_axis", "Width axis", false),
@@ -188,6 +191,7 @@ impl KetchupApp {
         };
         self.fasteners.open = false;
         self.joinery.open = true;
+        self.inspector = true;
         self.set_tool(Tool::Select);
     }
     fn refresh_joint_preview(&mut self) {
@@ -224,11 +228,13 @@ impl KetchupApp {
                         .join(" · "))
                 }
             });
+        let region=result.as_ref().map(|model|highlight::Region::build(&self.doc.model,model,members)).unwrap_or_default();
         self.joinery_dialog.preview = Some(Preview {
             source: self.doc.model.clone(),
             members,
             settings: self.joinery.settings.clone(),
             result,
+            region,
         });
     }
     fn apply_joint_preview(&mut self, ctx: &egui::Context) -> bool {
@@ -260,7 +266,6 @@ impl KetchupApp {
             Ok(_) => {
                 self.finish_edit("Create dynamic wood joint", before, ctx);
                 self.joinery_dialog.preview = None;
-                self.joinery.open = false;
                 true
             }
             Err(error) => {
@@ -288,6 +293,14 @@ impl KetchupApp {
                 let mut changed = original.clone();
                 let mut remove = false;
                 let eligible = self.fastener_pair_eligible(ui.ctx(), original.members);
+                if !eligible {
+                    ui.colored_label(Color32::LIGHT_RED,
+                        self.fastener_pair_block_reason(ui.ctx(), original.members));
+                    if self.account.sharing_available() && self.doc.shared_project.is_some()
+                        && ui.button("Review sharing status…").clicked() {
+                        self.sharing.preferences.open = true;
+                    }
+                }
                 ui.add_enabled_ui(eligible, |ui| {
                     if let ConnectionOperation::Joinery(settings) = &mut changed.operation {
                         fields(ui, settings);
@@ -322,24 +335,20 @@ impl KetchupApp {
             });
         }
     }
-    pub(super) fn wood_joinery_window(&mut self, ctx: &egui::Context) {
-        if !self.joinery.open {
-            self.joinery_dialog = Default::default();
-            return;
-        }
-        if self.joinery_dialog.members.is_none() {
-            self.joinery_dialog.members = self.selected_fastener_pair(ctx);
-        }
-        let mut close = false;
-        let response=Modal::new("connections/wood_joinery",600.).resizable(true).show(ctx,|modal| {
-            modal.header(|ui| {
-                ui.text_heading("Wood Joinery");
-                ui.text_weak("Create a dynamic relation. Moving either board updates the joint automatically.");
-            });
-            modal.body(|ui| {
-                let scroll=sidebar::restored_scroll_area(ui,"connections/wood_joinery",egui::ScrollArea::vertical().id_salt("wood_joinery_scroll").max_height((ctx.viewport_rect().height()-230.).max(180.))).show(ui,|ui| {
+    pub(super) fn wood_joinery_sidebar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let scroll = sidebar::restored_scroll_area(
+            ui, "connections/wood_joinery",
+            egui::ScrollArea::vertical().id_salt("wood_joinery_scroll")
+                .content_margin(18)
+                .auto_shrink([false, false]),
+        ).show(ui, |ui| {
+            sidebar::inspector_section(ui, "Wood Joinery", "connections/wood_joinery", true, |ui| {
+        ui.text_weak("Create a dynamic relation. Moving either board updates the joint automatically.");
+        ui.text_weak("Change the selection to return to the inspector.");
+        ui.text_weak("Teal outlines and faint dashed hatching mark saved joint regions. Gold dashed guides mark the uncommitted preview; selected parts keep their usual selection color.");
                     let Some(members)=self.joinery_dialog.members else {
-                        ui.text_weak("Select exactly two boards and reopen Wood Joinery from the object menu.");return;
+                        ui.text_weak("Select exactly two boards and reopen Wood Joinery from the Edit menu.");return;
                     };
                     ui.text_weak("Use rectangular boards aligned with the project axes. Position them with an overlap equal to the joint depth; both boards must extend past opposite ends of the overlap along the depth axis. Touching faces alone do not provide stock for a cut joint.");
                     ui.text_weak("The first part retains the tenon, tongue, tail or fingers; the second receives the matching cut. Half laps divide the overlap along the remaining axis. Source boards, components and material assignments stay intact. Separating the parts suspends the joint; bringing them back reactivates it.");
@@ -353,8 +362,8 @@ impl KetchupApp {
                     fields(ui,&mut self.joinery.settings);
                     ui.checkbox(&mut self.doc.display.joinery_preview,"Show resulting edges through the model");
                     self.refresh_joint_preview();
-                    let eligible=self.fastener_pair_eligible(ctx,members);
-                    if !eligible {ui.colored_label(Color32::LIGHT_RED,"The selected pair is no longer editable. Check selection, locks and shared editing approval.");}
+                    let eligible=self.fastener_pair_eligible(&ctx,members);
+                    if !eligible {ui.colored_label(Color32::LIGHT_RED,self.fastener_pair_block_reason(&ctx,members));}
                     let mut valid=false;
                     if let Some(preview)=&self.joinery_dialog.preview {
                         match &preview.result {
@@ -362,17 +371,14 @@ impl KetchupApp {
                             Ok(_)=>{valid=true;ui.text_label("Preview ready: cyan edges = first part; amber edges = second part.");}
                         }
                     }
-                    if ui.add_enabled(eligible&&valid,egui::Button::new("Create dynamic joint")).clicked() {self.apply_joint_preview(ctx);}
-                });
-                sidebar::remember_scroll(ctx,"connections/wood_joinery",scroll.state.clamped_offset());
+                    if ui.add_enabled(eligible&&valid,egui::Button::new("Create dynamic joint")).clicked() {self.apply_joint_preview(&ctx);}
             });
-            modal.footer(|ui| {close=ui.button("Close").clicked();});
         });
-        close |= response.should_close();
-        if close {
-            self.joinery.open = false;
-            self.joinery_dialog = Default::default();
-        }
+        sidebar::remember_scroll(
+            &ctx,
+            "connections/wood_joinery",
+            scroll.state.clamped_offset(),
+        );
     }
     pub(super) fn paint_joinery(&self, p: &egui::Painter, rect: Rect) {
         if let Some(evaluation) = &self.joinery_geometry.result {
@@ -386,37 +392,17 @@ impl KetchupApp {
                 );
             }
         }
-        if !self.joinery.open || !self.doc.display.joinery_preview || self.history_preview.is_some()
-        {
-            return;
-        }
-        let Some(preview) = &self.joinery_dialog.preview else {
-            return;
-        };
-        if preview.source != self.doc.model || preview.settings != self.joinery.settings {
-            return;
-        }
-        let Ok(model) = &preview.result else {
-            return;
-        };
-        let view = self.doc.camera.view(dv(rect.size()));
-        for (i, id) in preview.members.into_iter().enumerate() {
-            let color = if i == 0 {
-                Color32::from_rgb(80, 210, 240)
-            } else {
-                Color32::from_rgb(255, 190, 70)
-            };
-            for entity in model.expand_entities(&BTreeSet::from([id])) {
-                let Some(edge) = model.edges.get(&entity) else {
-                    continue;
-                };
-                if let (Some(a), Some(b)) = (
-                    view.project(model.vertices[&edge.a].position),
-                    view.project(model.vertices[&edge.b].position),
-                ) {
-                    p.line_segment([rect.min + pv(a), rect.min + pv(b)], Stroke::new(2., color));
-                }
-            }
+    }
+    pub(super) fn joint_highlight_preview_key(&self)->Option<([u64;2],JointSettings)> {
+        if !self.joinery.open || !self.doc.display.joinery_preview || self.history_preview.is_some() {return None;}
+        let preview=self.joinery_dialog.preview.as_ref()?;
+        (preview.source==self.doc.model && preview.settings==self.joinery.settings && preview.result.is_ok())
+            .then(||(preview.members,preview.settings.clone()))
+    }
+    pub(super) fn paint_joint_highlights(&self,mesh:&mut renderer::Mesh,model:&Model,display:&ketchup_core::DisplaySettings,dark:bool) {
+        for region in &self.joinery_geometry.regions {region.paint(mesh,model,display,dark,false);}
+        if self.joint_highlight_preview_key().is_some() {
+            if let Some(preview)=&self.joinery_dialog.preview {preview.region.paint(mesh,model,display,dark,true);}
         }
     }
 }
@@ -465,7 +451,7 @@ mod tests {
         app.open_joinery(&ctx);
         app.refresh_joint_preview();
         assert!(app.apply_joint_preview(&ctx));
-        assert!(!app.joinery.open);
+        assert!(app.joinery.open);
         assert_eq!(app.doc.model.vertices, source.vertices);
         assert_eq!(app.doc.model.faces, source.faces);
         assert_eq!(app.doc.model.objects, source.objects);

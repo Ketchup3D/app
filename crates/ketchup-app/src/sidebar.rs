@@ -727,6 +727,49 @@ mod preference_tests {
     }
 
     #[test]
+    fn recent_projects_save_immediately_without_model_edit() {
+        let defaults: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert!(defaults.recent_projects.is_empty());
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.project.path = Some("recent.ketchup".into());
+        app.remember_recent_project(None);
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!(restored.project.recent, app.project.recent);
+        assert!(!restored.project.modified);
+    }
+
+    #[test]
+    fn connection_sidebar_sections_restore_without_model_edits() {
+        for key in ["connections/wood_joinery", "connections/fasteners"] {
+            for open in [false, true] {
+                let ctx = egui::Context::default();
+                let mut storage = SavedPreferences::default();
+                let mut app = KetchupApp::with_document(Document::default(), None, true);
+                set_section_open(&ctx, key, open);
+                let _ = ctx.run_test_ui(egui::RawInput::default(), |ui| {
+                    if key == "connections/wood_joinery" {
+                        app.wood_joinery_sidebar(ui);
+                    } else {
+                        app.automatic_fasteners_sidebar(ui);
+                    }
+                });
+                app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+                let restored_ctx = egui::Context::default();
+                let mut restored = KetchupApp::with_document(Document::default(), None, true);
+                restored.restore_inspector_preferences(&restored_ctx, Some(&storage));
+                let _ = restored_ctx.run_test_ui(egui::RawInput::default(), |ui| {
+                    assert_eq!(restored_header_open(ui, key, true), Some(open));
+                });
+                assert!(!restored.project.modified);
+            }
+        }
+    }
+
+    #[test]
     fn fastener_preferences_save_immediately_without_model_edit() {
         let defaults: InspectorPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(defaults.fasteners, fasteners::Preferences::default());
@@ -3527,7 +3570,7 @@ fn inspector_icon_color(ui: &egui::Ui, id: &str) -> Color32 {
         "entity_info" => ([17, 129, 133], [103, 207, 211]),
         "units" => ([67, 131, 68], [143, 205, 144]),
         "time_cost_estimates" => ([183, 92, 19], [242, 170, 100]),
-        "materials" => ([160, 111, 22], [230, 190, 104]),
+        "materials" | "connections/wood_joinery" => ([160, 111, 22], [230, 190, 104]),
         "time_estimates_sanding" => ([160, 111, 22], [230, 190, 104]),
         "time_estimates_finishing" | "settings/stock/finishes" => ([126, 83, 183], [188, 153, 239]),
         "time_estimates_pre_stain" => ([17, 129, 133], [103, 207, 211]),
@@ -3538,7 +3581,7 @@ fn inspector_icon_color(ui: &egui::Ui, id: &str) -> Color32 {
         "display" => ([198, 76, 58], [246, 142, 125]),
         "view" | "view_camera" => ([48, 111, 173], [131, 185, 239]),
         "view_standard_views" => ([17, 129, 133], [103, 207, 211]),
-        "edge_style" => ([88, 109, 135], [159, 181, 209]),
+        "edge_style" | "connections/fasteners" => ([88, 109, 135], [159, 181, 209]),
         "sections" => ([176, 67, 113], [237, 142, 181]),
         "shadows" => ([183, 92, 19], [242, 170, 100]),
         "fog" => ([117, 105, 155], [181, 169, 219]),

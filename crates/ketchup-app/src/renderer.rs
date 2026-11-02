@@ -88,6 +88,7 @@ impl ModelSnapshot {
 
 #[derive(Clone, PartialEq)]
 pub struct SceneKey {
+    pub joint_preview: Option<([u64;2], ketchup_core::joinery::JointSettings)>,
     pub model_revision: u64,
     pub camera: Camera,
     pub size: DVec2,
@@ -258,6 +259,28 @@ impl Mesh {
                 }
             } else {
                 self.line(a.extend(0.), b.extend(0.), width, color);
+            }
+        }
+    }
+    /// Joint guides keep the source surface depth and existing occlusion rules.
+    /// The segment cap bounds dash work even when a joint fills the viewport.
+    pub fn surface_guide(&mut self,a:DVec3,b:DVec3,face:[DVec3;3],width:f64,color:Color32,dashed:bool) {
+        let Some((a,b))=self.section_line(a,b) else {return;};
+        let color=self.fog_color(color,(a+b)*0.5);
+        let Some((a,b))=self.view.segment_depth(a,b) else {return;};
+        let mut gradient=None;
+        self.view.for_each_triangle_depth(face,|triangle| {gradient=gradient.or_else(||depth_gradient(triangle));});
+        let surfaces:Vec<_>=gradient.into_iter().map(EdgeSurface::unbounded).collect();
+        for (start,end) in self.occlusion.visible_intervals(a,b) {
+            if !dashed {self.surface_stroke(a.lerp(b,start),a.lerp(b,end),width,color,&surfaces);continue;}
+            let length=(b.truncate()-a.truncate()).length().max(1.);
+            let period=8_f64.max(length/64.);
+            let first=(start*length/period).floor() as usize;
+            let last=(end*length/period).ceil() as usize;
+            for i in first..last {
+                let lo=start.max(i as f64*period/length);
+                let hi=end.min((i as f64*period+period*0.4)/length);
+                if hi>lo {self.surface_stroke(a.lerp(b,lo),a.lerp(b,hi),width,color,&surfaces);}
             }
         }
     }
@@ -2256,6 +2279,25 @@ impl CachedFace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joint_surface_guides_keep_real_depth_and_hide_behind_nearer_faces() {
+        let camera=Camera::default();let size=DVec2::splat(100.);
+        let inverse=camera.matrix(size).inverse();
+        let world=|x:f64,y:f64,z:f64|inverse.project_point3(DVec3::new(x/50.-1.,1.-y/50.,z));
+        let a=world(30.,50.,0.6);let b=world(70.,50.,0.6);
+        let face=[world(10.,10.,0.6),world(90.,10.,0.6),world(50.,90.,0.6)];
+        for dashed in [false,true] {
+            let mut mesh=Mesh::new(&camera,size);
+            mesh.surface_guide(a,b,face,1.,Color32::WHITE,dashed);
+            assert!(!mesh.vertices.is_empty());
+            assert!(mesh.vertices.iter().all(|v|(v.position[2]-0.6).abs()<1e-5));
+            let mut occluded=Mesh::new(&camera,size);
+            occluding_rectangle(&mut occluded.occlusion,DVec2::ZERO,size,0.5);
+            occluded.surface_guide(a,b,face,1.,Color32::WHITE,dashed);
+            assert!(occluded.vertices.is_empty());
+        }
+    }
 
     #[test]
     fn shadow_antialiasing_leaves_faces_strokes_and_grid_unchanged() {

@@ -692,6 +692,26 @@ pub(crate) fn line_icon_vectors(p: &egui::Painter, c: Pos2, kind: &str, color: C
 fn paint_line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
     let s = Stroke::new(1.5, color);
     match kind {
+        "connections/fasteners" => {
+            // Screw head, shaft and thread marks.
+            p.line_segment([c + egui::vec2(-6., -7.), c + egui::vec2(6., -7.)], s);
+            p.line_segment([c + egui::vec2(-6., -7.), c + egui::vec2(-3., -3.)], s);
+            p.line_segment([c + egui::vec2(6., -7.), c + egui::vec2(3., -3.)], s);
+            p.line_segment([c + egui::vec2(-3., -3.), c + egui::vec2(0., 8.)], s);
+            p.line_segment([c + egui::vec2(3., -3.), c + egui::vec2(0., 8.)], s);
+            for y in [-2., 1., 4.] {
+                p.line_segment([c + egui::vec2(-3., y + 1.), c + egui::vec2(3., y - 1.)], s);
+            }
+        }
+        "connections/wood_joinery" => {
+            // Two boards with a stepped mating joint.
+            p.rect_stroke(Rect::from_center_size(c, egui::vec2(18., 14.)), 1, s, egui::StrokeKind::Middle);
+            p.add(egui::Shape::line(
+                [(-2., -7.), (-2., -3.), (3., -3.), (3., 3.), (-2., 3.), (-2., 7.)]
+                    .map(|(x, y)| c + egui::vec2(x, y)).to_vec(),
+                s,
+            ));
+        }
         "suggest_feature" => {
             p.circle_stroke(c + egui::vec2(0., -2.), 4.5, s);
             p.line_segment([c + egui::vec2(-2.5, 2.), c + egui::vec2(-2.5, 5.)], s);

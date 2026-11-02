@@ -1554,7 +1554,7 @@ impl KetchupApp {
             return;
         }
 
-        if self.project.blocked() || self.screenshot.open || self.fasteners.open || self.joinery.open {
+        if self.project.blocked() || self.screenshot.open {
             return;
         }
         if self.section_drag.is_some() {
@@ -2973,11 +2973,12 @@ impl KetchupApp {
     }
 
     fn inspector_panel(&mut self, ui: &mut egui::Ui) {
+        self.connection_sidebar_selection(ui.ctx());
         let colors = Palette::for_ui(ui);
         if !self.inspector {
             return;
         }
-        if ui.available_width() >= 900. {
+        if ui.available_width() >= 900. || self.fasteners.open || self.joinery.open {
             let panel = egui::Panel::right("inspector")
                 .default_size(self.inspector_width)
                 .size_range(260. ..=ui.available_width() * 0.5)
@@ -2985,7 +2986,13 @@ impl KetchupApp {
                 .frame(egui::Frame::new().fill(colors.paper))
                 .show(ui, |ui| {
                     ui.spacing_mut().scroll.bar_outer_margin = 0.;
-                    self.inspector_contents(ui);
+                    if self.fasteners.open {
+                        self.automatic_fasteners_sidebar(ui);
+                    } else if self.joinery.open {
+                        self.wood_joinery_sidebar(ui);
+                    } else {
+                        self.inspector_contents(ui);
+                    }
                 });
             self.inspector_width = panel.response.rect.width();
         } else {
@@ -2996,7 +3003,13 @@ impl KetchupApp {
                 .default_height(560.)
                 .default_pos(egui::pos2(90., 120.))
                 .show(ui.ctx(), |ui| {
-                    self.inspector_contents(ui);
+                    if self.fasteners.open {
+                        self.automatic_fasteners_sidebar(ui);
+                    } else if self.joinery.open {
+                        self.wood_joinery_sidebar(ui);
+                    } else {
+                        self.inspector_contents(ui);
+                    }
                 });
             if !open {
                 self.inspector = false;
@@ -3386,9 +3399,7 @@ impl KetchupApp {
         if self.project.blocked() || self.screenshot.open {
             return;
         }
-        if self.fasteners.open
-            || self.joinery.open
-            || self.settings_open
+        if self.settings_open
             || self.help
             || self.about
             || self.release_notes.open
@@ -3962,6 +3973,7 @@ impl KetchupApp {
                 })
             ))
         .then(|| renderer::SceneKey {
+            joint_preview: self.joint_highlight_preview_key(),
             model_revision,
             camera: camera.clone(),
             size,
@@ -4299,6 +4311,7 @@ impl KetchupApp {
                     mesh.world_line(camera, a + offset, b + offset, 2.4, colors.green);
                 }
             }
+            self.paint_joint_highlights(&mut mesh,model,display,ui.visuals().dark_mode);
             mesh.occlude_annotations_with_edges();
             let dimensions = self.dimension_shapes(&mut mesh, &p, rect, model);
             let texts = self.text_shapes(&mut mesh, &p, rect, model);
@@ -5187,8 +5200,7 @@ impl eframe::App for KetchupApp {
         }
         self.object_creation_window(&ctx);
         self.rename_object_window(&ctx);
-        self.automatic_fasteners_window(&ctx);
-        self.wood_joinery_window(&ctx);
+        self.connection_sidebar_selection(&ctx);
         self.rename_viewport_window(&ctx);
         self.text_editor_window(&ctx);
         if self.help {

@@ -158,13 +158,13 @@ impl KetchupApp {
     pub(super) fn fastener_contents(&mut self, ui: &mut egui::Ui) {
         let Some(members) = self.fastener_dialog.members else {
             ui.text_weak(
-                "Select exactly two objects and reopen Automatic Fasteners from the object menu.",
+                "Select exactly two objects and reopen Automatic Fasteners from the Edit menu.",
             );
             return;
         };
         let eligible = self.fastener_pair_eligible(ui.ctx(), members);
         if !eligible {
-            ui.colored_label(Color32::LIGHT_RED,"The selected pair is no longer editable. Check object selection, editing context, locks and shared editing approval.");
+            ui.colored_label(Color32::LIGHT_RED, self.fastener_pair_block_reason(ui.ctx(), members));
         }
         let mut objects = members.to_vec();
         ui.checkbox(
@@ -254,7 +254,7 @@ impl KetchupApp {
             "Simpson Strong-Tie technical guides",
             "https://www.strongtie.com/resources/literature/fastening-systems-technical-supplement",
         );
-        ui.text_weak("For cut joints, close this dialog and choose Wood Joinery from the object menu. Fasteners do not modify geometry.");
+        ui.text_weak("For cut joints, choose Wood Joinery from the Edit menu. Fasteners do not modify geometry.");
         let connections: Vec<_> = self
             .doc
             .model
@@ -558,7 +558,27 @@ fn same_pair(a: [u64; 2], b: [u64; 2]) -> bool {
 }
 
 impl KetchupApp {
+    pub(super) fn fastener_pair_block_reason(&self, ctx: &egui::Context, members: [u64; 2]) -> &'static str {
+        let pair = BTreeSet::from(members);
+        if self.selected != pair {
+            "Select both objects belonging to this joint to edit or remove it."
+        } else if self.doc.model.selection_protected(&pair) {
+            "Unlock both objects before editing or removing their joint."
+        } else if !members.iter().all(|id| self.doc.model.objects.contains_key(id)
+            && self.doc.model.entity_in_context(*id) == Some(*id)
+            && !self.doc.model.is_hidden(*id)) {
+            "Both objects must be visible and selectable in the current editing context."
+        } else if self.project.blocked() || self.screenshot.open || self.history_preview.is_some() {
+            "Finish the current dialog or history preview before editing this joint."
+        } else {
+            self.shared_edit_block_reason(ctx)
+        }
+    }
     pub(super) fn fastener_pair_eligible(&self, ctx: &egui::Context, members: [u64; 2]) -> bool {
+        self.fastener_pair_selected(members)
+            && self.shared_fastener_edit_allowed(ctx, &BTreeSet::from(members))
+    }
+    fn fastener_pair_selected(&self, members: [u64; 2]) -> bool {
         let pair = BTreeSet::from(members);
         members[0] != members[1]
             && self.selected == pair
@@ -571,15 +591,16 @@ impl KetchupApp {
                     && !self.doc.model.is_hidden(*id)
             })
             && !self.doc.model.selection_protected(&pair)
-            && self.shared_fastener_edit_allowed(ctx, &pair)
     }
-    pub(super) fn selected_fastener_pair(&self, ctx: &egui::Context) -> Option<[u64; 2]> {
+    pub(super) fn selected_fastener_pair(&self, _ctx: &egui::Context) -> Option<[u64; 2]> {
         if self.selected.len() != 2 {
             return None;
         }
         let mut selected = self.selected.iter().copied();
         let pair = [selected.next()?, selected.next()?];
-        self.fastener_pair_eligible(ctx, pair).then_some(pair)
+        // Opening a preview must not depend on a network round trip. Applying
+        // any change still uses fastener_pair_eligible and its exclusive lease.
+        self.fastener_pair_selected(pair).then_some(pair)
     }
     pub(super) fn open_fasteners(&mut self, ctx: &egui::Context) {
         let Some(members) = self.selected_fastener_pair(ctx) else {
@@ -591,6 +612,7 @@ impl KetchupApp {
         };
         self.joinery.open = false;
         self.fasteners.open = true;
+        self.inspector = true;
         self.set_tool(Tool::Select);
     }
     fn create_fasteners(&mut self, ctx: &egui::Context, connection: Connection) -> bool {
@@ -651,79 +673,62 @@ impl KetchupApp {
         self.finish_edit("Edit fasteners", before, ctx);
         true
     }
-    pub(super) fn automatic_fasteners_window(&mut self, ctx: &egui::Context) {
+    pub(super) fn connection_sidebar_selection(&mut self, ctx: &egui::Context) {
+        let pair = if self.selected.len() == 2 {
+            let mut selected = self.selected.iter().copied();
+            Some([selected.next().unwrap(), selected.next().unwrap()])
+        } else {
+            None
+        };
+        if self.fasteners.open {
+            if self.fastener_dialog.members.is_none() {
+                self.fastener_dialog.members = self.selected_fastener_pair(ctx);
+            }
+            if pair.is_none() || self.fastener_dialog.members != pair {
+                self.fasteners.open = false;
+            }
+        }
+        if self.joinery.open {
+            if self.joinery_dialog.members.is_none() {
+                self.joinery_dialog.members = self.selected_fastener_pair(ctx);
+            }
+            if pair.is_none() || self.joinery_dialog.members != pair {
+                self.joinery.open = false;
+            }
+        }
         if !self.fasteners.open {
             self.fastener_dialog = Default::default();
-            return;
         }
-        // Restoring the dialog never restores member IDs from global preferences.
-        if self.fastener_dialog.members.is_none() {
-            self.fastener_dialog.members = self.selected_fastener_pair(ctx);
-        }
-        if self.fastener_dialog.picking.is_some() {
-            egui::Area::new(egui::Id::unique("automatic_fasteners_face_prompt"))
-                .anchor(Align2::CENTER_TOP, egui::vec2(0., 70.))
-                .order(egui::Order::Foreground)
-                .show(ctx, |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.text_heading("Automatic Fasteners");
-                        if self
-                            .fastener_dialog
-                            .members
-                            .is_some_and(|pair| self.fastener_pair_eligible(ctx, pair))
-                            && self.fastener_pick_connection().is_some()
-                        {
-                            ui.text_label("Click a numbered entry-face handle in the viewport.");
-                        } else {
-                            ui.colored_label(
-                                Color32::LIGHT_RED,
-                                "The object pair or connection is no longer editable.",
-                            );
-                        }
-                        if ui.button("Back to Automatic Fasteners").clicked() {
-                            self.fastener_dialog.picking = None;
-                        }
-                    });
-                });
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
-                self.fastener_dialog.picking = None;
-            }
-            return;
-        }
-        let mut close = false;
-        let response = Modal::new("connections/fasteners", 600.)
-            .resizable(true)
-            .show(ctx, |modal| {
-                modal.header(|ui| {
-                    ui.text_heading("Automatic Fasteners");
-                    ui.text_weak(
-                        "Changes apply immediately and can be undone after closing this dialog.",
-                    );
-                });
-                modal.body(|ui| {
-                    let scroll = sidebar::restored_scroll_area(
-                        ui,
-                        "connections/fasteners",
-                        egui::ScrollArea::vertical()
-                            .id_salt("automatic_fasteners_scroll")
-                            .max_height((ctx.viewport_rect().height() - 220.).max(180.)),
-                    )
-                    .show(ui, |ui| self.fastener_contents(ui));
-                    sidebar::remember_scroll(
-                        ctx,
-                        "connections/fasteners",
-                        scroll.state.clamped_offset(),
-                    );
-                });
-                modal.footer(|ui| {
-                    close = ui.button("Close").clicked();
-                });
-            });
-        if close || response.should_close() {
-            self.fasteners.open = false;
-            self.fastener_dialog = Default::default();
+        if !self.joinery.open {
+            self.joinery_dialog = Default::default();
         }
     }
+
+    pub(super) fn automatic_fasteners_sidebar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let scroll = sidebar::restored_scroll_area(
+            ui, "connections/fasteners",
+            egui::ScrollArea::vertical().id_salt("automatic_fasteners_scroll")
+                .content_margin(18)
+                .auto_shrink([false, false]),
+        ).show(ui, |ui| {
+            sidebar::inspector_section(ui, "Automatic Fasteners", "connections/fasteners", true, |ui| {
+        ui.text_weak("Changes apply immediately. Change the selection to return to the inspector.");
+            if self.fastener_dialog.picking.is_some() {
+                ui.text_label("Click a numbered entry-face handle in the viewport.");
+                if ui.button("Back to Automatic Fasteners").clicked()
+                    || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape))
+                {
+                    self.fastener_dialog.picking = None;
+                }
+            } else {
+                self.fastener_contents(ui);
+            }
+            });
+        });
+        sidebar::remember_scroll(&ctx, "connections/fasteners", scroll.state.clamped_offset());
+    }
+
 }
 
 #[cfg(test)]
@@ -751,6 +756,33 @@ mod tests {
         (app, egui::Context::default(), members)
     }
     #[test]
+    fn connection_sidebars_stay_open_until_selection_changes() {
+        let (mut app, ctx, members) = fixture();
+        app.selected = BTreeSet::from(members);
+        app.inspector = false;
+        app.open_fasteners(&ctx);
+        assert!(app.inspector);
+        app.connection_sidebar_selection(&ctx);
+        assert!(app.fasteners.open);
+        app.fastener_dialog.picking = Some(PickTarget::Draft);
+        app.selected.remove(&members[0]);
+        app.connection_sidebar_selection(&ctx);
+        assert!(!app.fasteners.open);
+        assert!(app.fastener_dialog.picking.is_none());
+        assert!(app.fastener_dialog.members.is_none());
+
+        app.selected = BTreeSet::from(members);
+        app.open_joinery(&ctx);
+        app.connection_sidebar_selection(&ctx);
+        assert!(app.joinery.open);
+        assert!(!app.fasteners.open);
+        app.selected.clear();
+        app.connection_sidebar_selection(&ctx);
+        assert!(!app.joinery.open);
+        assert!(app.joinery_dialog.members.is_none());
+    }
+
+    #[test]
     fn menu_requires_exactly_two_editable_objects_in_current_context() {
         let (mut app, ctx, members) = fixture();
         assert!(app.selected_fastener_pair(&ctx).is_none());
@@ -771,6 +803,25 @@ mod tests {
         app.open_fasteners(&ctx);
         assert!(app.fasteners.open);
         app.doc.model.edit_context = Some(members[0]);
+        assert!(!app.fastener_pair_eligible(&ctx, members));
+    }
+    #[test]
+    fn shared_pair_can_open_both_dialogs_while_awaiting_its_lease() {
+        let (mut app, ctx, members) = fixture();
+        app.selected = BTreeSet::from(members);
+        app.doc.shared_project = Some(ketchup_core::SharedProject {
+            server: "https://sharing.example".into(),
+            id: "a".repeat(48),
+            revision: 1,
+            server_updated_at: 0,
+            file_updated_at: 0,
+        });
+        assert!(app.selected_fastener_pair(&ctx).is_some());
+        assert!(!app.fastener_pair_eligible(&ctx, members));
+        app.open_fasteners(&ctx);
+        assert!(app.fasteners.open);
+        app.open_joinery(&ctx);
+        assert!(app.joinery.open);
         assert!(!app.fastener_pair_eligible(&ctx, members));
     }
     #[test]
