@@ -62,6 +62,8 @@ mod move_tool;
 mod precision;
 #[path = "projects.rs"]
 mod projects;
+#[path = "drawing_groups.rs"]
+mod drawing_groups;
 #[path = "joinery.rs"]
 mod joinery;
 
@@ -313,10 +315,12 @@ pub struct KetchupApp {
     outliner_cache: sidebar::OutlinerCache,
     focus_outliner_search: bool,
     line_start: Option<DVec3>,
+    line_group: Option<u64>,
     snap: Option<Snap>,
     snap_to_grid: bool,
     snap_to_edge: bool,
     snap_to_face: bool,
+    snap_to_face_center: bool,
     drawing_reference: Option<drawing_inference::DrawingReference>,
     drawing_guide: Option<AxisGuide>,
     drawing_axis_guides: Vec<AxisGuide>,
@@ -461,10 +465,12 @@ impl KetchupApp {
             outliner_cache: Default::default(),
             focus_outliner_search: false,
             line_start: None,
+            line_group: None,
             snap: None,
             snap_to_grid: false,
             snap_to_edge: true,
             snap_to_face: true,
+            snap_to_face_center: true,
             drawing_reference: None,
             drawing_guide: None,
             drawing_axis_guides: vec![],
@@ -572,6 +578,7 @@ impl KetchupApp {
         }
         self.modeling = None;
         self.line_start = None;
+        self.line_group = None;
         self.snap = None;
         self.lock = None;
         self.length_input.clear();
@@ -672,6 +679,7 @@ impl KetchupApp {
         self.gesture = None;
         self.paste_preview = None;
         self.line_start = None;
+        self.line_group = None;
         self.snap = None;
         self.length_input.clear();
         let path = self.doc.model.edit_path();
@@ -866,6 +874,7 @@ impl KetchupApp {
         self.drawing = None;
         self.gesture = None;
         self.line_start = None;
+        self.line_group = None;
         self.snap = None;
         self.lock = None;
         self.length_input.clear();
@@ -896,12 +905,15 @@ impl KetchupApp {
             }
         }
         let before = self.doc.model.clone();
-        match self.doc.model.add_edge(start, end) {
-            Ok(_) => {
-                let closed_shape = self.doc.model.faces.len() > before.faces.len();
+        match self.drawn_geometry(&[start, end], self.line_group) {
+            Ok((model, group, closed_shape)) => {
+                self.doc.model = model;
+                self.line_group = group;
+                if let Some(group) = group { self.selected = BTreeSet::from([group]); }
                 self.finish_edit("Draw line", before, ctx);
                 if closed_shape {
                     self.stop_drawing();
+                    self.prompt_drawn_group_name(ctx, group);
                 } else {
                     self.line_start = Some(end);
                     self.length_input.clear();
@@ -1116,23 +1128,40 @@ impl KetchupApp {
             return;
         }
         let before = self.doc.model.clone();
-        let mut model = before.clone();
-        for pair in points.windows(2) {
-            match model.add_edge(pair[0], pair[1]) {
-                Ok(_) | Err("That edge already exists") => {}
-                Err(message) => {
-                    self.say(ctx, message);
-                    return;
-                }
-            }
-        }
+        let (model, group, _) = match self.drawn_geometry(&points, None) {
+            Ok(result) => result,
+            Err(message) => { self.say(ctx, message); return; }
+        };
         self.doc.model = model;
+        if let Some(group) = group { self.selected = BTreeSet::from([group]); }
         self.finish_edit(
             &format!("Draw {}", self.tool.label().to_lowercase()),
             before,
             ctx,
         );
         self.stop_drawing();
+        self.prompt_drawn_group_name(ctx, group);
+    }
+    // A selected flat group can be extruded without opening its edit context.
+    fn selected_push_pull_face(&self) -> Option<u64> {
+        if self.tool != Tool::PushPull || self.selected.len() != 1 {
+            return None;
+        }
+        let group = *self.selected.first()?;
+        let model = &self.doc.model;
+        if !model.objects.contains_key(&group)
+            || model.entity_in_context(group) != Some(group)
+            || model.is_locked(group)
+            || model.is_hidden(group)
+        {
+            return None;
+        }
+        let mut faces = model.faces.keys().copied().filter(|id| {
+            model.entity_in_context(*id) == Some(group)
+        });
+        let face = faces.next()?;
+        (faces.next().is_none() && !model.is_hidden(face) && !model.is_locked(face))
+            .then_some(face)
     }
     fn begin_modeling(&mut self, pos: Pos2, ctx: &egui::Context) {
         self.last_move_copy = None;
@@ -1166,7 +1195,11 @@ impl KetchupApp {
         }
         let mut face_id = None;
         let (anchor, direction) = if matches!(self.tool, Tool::PushPull | Tool::Offset) {
-            let Some((id, _, point)) = self.doc.model.nearest_editable_face(ray) else {
+            let selected_face = self.selected_push_pull_face().and_then(|id| {
+                self.doc.model.face_hit(&self.doc.model.faces[&id], ray)
+                    .map(|(distance, point)| (id, distance, point))
+            });
+            let Some((id, _, point)) = selected_face.or_else(|| self.doc.model.nearest_editable_face(ray)) else {
                 self.say(ctx, "Click a filled face first");
                 return;
             };
@@ -1201,7 +1234,9 @@ impl KetchupApp {
                     .unwrap();
                 (point - closest).try_normalize().unwrap_or(plane.u)
             };
-            self.selected = BTreeSet::from([id]);
+            if selected_face.is_none() {
+                self.selected = BTreeSet::from([id]);
+            }
             (point, direction)
         } else {
             if self.selected.is_empty() {
@@ -1260,13 +1295,14 @@ impl KetchupApp {
         let pull_snap = if self.tool == Tool::PushPull
             && self.modeling.is_some()
             && self.length_input.trim().is_empty()
-            && self.doc.snap_to_geometry
+            && (self.doc.snap_to_geometry || self.doc.snap_to_axes)
         {
             self.prepare_picking();
-            self.infer_snap(pos, None, None, false).filter(|snap| {
+            self.infer_snap(pos, None, None, self.doc.snap_to_axes).filter(|snap| {
                 let edit = self.modeling.as_ref().unwrap();
                 matches!(snap.kind, Inference::Origin | Inference::Endpoint
-                    | Inference::Midpoint | Inference::OnEdge | Inference::OnFace)
+                    | Inference::Midpoint | Inference::FaceCenter | Inference::OnEdge | Inference::OnFace
+                    | Inference::OnAxis(_) | Inference::Axis(_))
                     // The unchanged starting surface must not swallow free
                     // movement while the preview moves away from it.
                     && (snap.kind != Inference::OnFace
@@ -1331,6 +1367,7 @@ impl KetchupApp {
                     ketchup_core::inference::SnapTargets {
                         edges: self.snap_to_edge,
                         faces: self.snap_to_face,
+                        face_centers: self.snap_to_face_center,
                     },
                 ) {
                     let snap = if self.snap_to_grid {
@@ -1349,6 +1386,15 @@ impl KetchupApp {
             }
             _ => return,
         };
+        // Exact object/axis references and typed dimensions take precedence.
+        // Grid steps apply only to free extrusion distance, along the face
+        // normal, so snapping cannot tilt or skew the resulting cap.
+        if self.tool == Tool::PushPull && self.snap_to_grid && pull_snap.is_none()
+            && self.length_input.trim().is_empty()
+        {
+            let spacing = grid::configured_spacing(&self.doc.camera, &self.doc.display);
+            edit.value = (edit.value / spacing).round() * spacing;
+        }
         let value =
             precision::modeling_value(self.tool, &self.length_input, self.doc.display.units.length)
                 .unwrap_or(edit.value);
@@ -1406,7 +1452,11 @@ impl KetchupApp {
                 let normal = ketchup_core::faces::plane(&model, &face.vertices)
                     .unwrap()
                     .normal;
-                model.push_pull(face.id, value * normal.dot(edit.direction))?;
+                let face_id = face.id;
+                let context = model.edit_context;
+                model.edit_context = model.parent(face_id);
+                model.push_pull(face_id, value * normal.dot(edit.direction))?;
+                model.edit_context = context;
             }
             Tool::Offset => model.offset_face(edit.face.unwrap(), value)?,
             Tool::Scale => model.scale_selection(&edit.entities, edit.center, value)?,
@@ -1453,7 +1503,9 @@ impl KetchupApp {
             Ok(model) => {
                 let before = edit.base.clone();
                 if self.tool == Tool::PushPull {
-                    self.selected = model
+                    let group = edit.face.and_then(|face| before.entity_in_context(face))
+                        .filter(|id| before.objects.contains_key(id));
+                    self.selected = group.into_iter().chain(model
                         .faces
                         .keys()
                         .filter(|id| {
@@ -1463,7 +1515,7 @@ impl KetchupApp {
                         .next_back()
                         .copied()
                         .or(edit.face)
-                        .into_iter()
+                        .filter(|_| group.is_none()))
                         .collect();
                 }
                 let copy = (self.tool == Tool::Move && edit.copy).then(|| MoveCopy {
@@ -1586,6 +1638,7 @@ impl KetchupApp {
             }
             self.move_copy = false;
             self.last_move_copy = None;
+            let completed_group = self.line_group;
             self.stop_drawing();
             self.modeling = None;
             self.notice = None;
@@ -1600,6 +1653,7 @@ impl KetchupApp {
                     m.surrender_focus(id);
                 }
             });
+            self.prompt_drawn_group_name(ctx, completed_group);
         }
         if ctx.egui_wants_keyboard_input()
             || self.help
@@ -1770,7 +1824,7 @@ impl KetchupApp {
                         Key::ArrowRight | Key::ArrowLeft | Key::ArrowUp
                             if self.tool.is_drawing()
                                 || self.tool == Tool::Move
-                                || self.tool.is_measuring() && self.tool != Tool::Text =>
+                                || self.tool.is_measuring() =>
                         {
                             let axis = match key {
                                 Key::ArrowRight => Axis::X,
@@ -2746,7 +2800,7 @@ impl KetchupApp {
         self.measurement_inspector(ui);
         self.text_entity_info(ui);
         if self.tool == Tool::Paint {
-            sidebar::inspector_section(ui, "Apparence", "entity_appearance", true, |ui| {
+            sidebar::inspector_section(ui, "Appearance", "entity_appearance", true, |ui| {
                 ui.text_label("Paint by");
                 let button_width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.;
                 ui.horizontal(|ui| {
@@ -2788,6 +2842,21 @@ impl KetchupApp {
                         }
                     }
                 });
+                if ui
+                    .add_enabled(
+                        !self.selected.is_empty()
+                            && !self.doc.model.selection_locked(&self.selected),
+                        egui::Button::new("Clear Color"),
+                    )
+                    .on_hover_text("Remove color from the selected items and all their children")
+                    .clicked()
+                {
+                    let before = self.doc.model.clone();
+                    match self.doc.model.clear_colors(&self.selected) {
+                        Ok(()) => self.finish_edit("Clear color", before, ui.ctx()),
+                        Err(message) => self.say(ui.ctx(), message),
+                    }
+                }
                 ui.text_label(self.paint_instructions());
             });
             ui.add_space(8.);
@@ -3019,6 +3088,7 @@ impl KetchupApp {
         ketchup_core::inference::SnapTargets {
             edges: self.snap_to_edge,
             faces: self.snap_to_face,
+                        face_centers: self.snap_to_face_center,
         }
     }
     fn infer_snap(
@@ -3086,6 +3156,10 @@ impl KetchupApp {
         let size = dv(self.viewport.size());
         self.hover = if self.tool == Tool::Erase {
             self.erase_target(pos)
+        } else if let Some(face) = self.selected_push_pull_face().filter(|face| {
+            self.doc.model.face_hit(&self.doc.model.faces[face], self.doc.camera.ray(local, size)).is_some()
+        }) {
+            Some(face)
         } else if matches!(self.tool, Tool::PushPull | Tool::Offset | Tool::Paint) {
             self.prepare_picking();
             self.picking_cache
@@ -3117,6 +3191,11 @@ impl KetchupApp {
         }
         if self.tool.is_measuring() {
             self.update_measurement(pos);
+        }
+        if self.tool == Tool::Move && self.paste_preview.is_none() {
+            // Match the first click's anchor query, before geometry starts moving.
+            self.prepare_picking();
+            self.snap = self.infer_snap(pos, None, None, self.doc.snap_to_axes);
         }
         if self.tool.is_drawing() || self.paste_preview.is_some() {
             self.snap = self.infer_snap(
@@ -4406,8 +4485,13 @@ impl KetchupApp {
                 );
             }
         }
-        if self.tool.is_drawing() {
-            if let Some(start) = self.line_start.or(self.drawing.as_ref().map(|d| d.origin)) {
+        let move_anchor = self.tool == Tool::Move
+            && self.modeling.is_none()
+            && self.paste_preview.is_none()
+            && !self.navigating()
+            && p.ctx().input(|i| i.pointer.hover_pos()).is_some_and(|pos| rect.contains(pos));
+        if self.tool.is_drawing() || move_anchor {
+            if let Some(start) = self.line_start.or(self.drawing.as_ref().map(|d| d.origin)).filter(|_| !move_anchor) {
                 if let Some(point) = screen(start) {
                     p.circle_filled(point, 3.5, colors.paper);
                     p.circle_stroke(point, 3.5, Stroke::new(1.5, colors.ink));
@@ -4426,7 +4510,7 @@ impl KetchupApp {
                     };
                     let color = self
                         .lock
-                        .filter(|_| self.tool != Tool::Line)
+                        .filter(|_| self.tool != Tool::Line && !move_anchor)
                         .map(|axis| self.axis_color(axis))
                         .unwrap_or(color);
                     match snap.kind {
@@ -4458,7 +4542,9 @@ impl KetchupApp {
                             p.circle_stroke(point, 4., Stroke::new(1.5, color));
                         }
                     }
-                    let label = if let Some(axis) = self.lock {
+                    let label = if move_anchor {
+                        format!("Move anchor · {}", snap.kind.label())
+                    } else if let Some(axis) = self.lock {
                         if self.tool != Tool::Line {
                             format!("{} · Plane locked", axis.label())
                         } else {
@@ -4744,13 +4830,16 @@ impl KetchupApp {
                 let faces_changed = Self::menu_checkbox(ui, &mut self.snap_to_face, "Snap to face")
                     .on_hover_text("Snap to object surfaces when Snap to objects is enabled.")
                     .changed();
+                let face_centers_changed = Self::menu_checkbox(ui, &mut self.snap_to_face_center, "Snap to face center")
+                    .on_hover_text("Snap to the area center of a visible face, independently of surface snapping. Requires Snap to objects.")
+                    .changed();
                 let axes_changed = Self::menu_checkbox(ui, &mut self.doc.snap_to_axes, "Snap to axes")
                     .on_hover_text("Automatically align drawing with the red, green, and blue axes. Hover an endpoint, midpoint, or edge to acquire axes through that position. Arrow keys can still lock an axis when this is off.")
                     .changed();
                 let grid_changed = Self::menu_checkbox(ui, &mut self.snap_to_grid, "Snap to grid")
                     .on_hover_text("Snap points and moves to the grid spacing at the current zoom. Object targets and axis locks take precedence.")
                     .changed();
-                if objects_changed || axes_changed || grid_changed || edges_changed || faces_changed {
+                if objects_changed || axes_changed || grid_changed || edges_changed || faces_changed || face_centers_changed {
                     self.drawing_reference = None;
                     self.drawing_axis_guides.clear();
                     self.snap = None;

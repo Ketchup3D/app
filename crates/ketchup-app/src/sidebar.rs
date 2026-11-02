@@ -173,6 +173,7 @@ struct SnappingPreferences {
     geometry: bool,
     edges: bool,
     faces: bool,
+    face_centers: bool,
     axes: bool,
     grid: bool,
 }
@@ -183,6 +184,7 @@ impl Default for SnappingPreferences {
             geometry: true,
             edges: true,
             faces: true,
+            face_centers: true,
             axes: true,
             grid: false,
         }
@@ -465,6 +467,7 @@ impl KetchupApp {
         }
         self.snap_to_edge = preferences.snapping.as_ref().is_none_or(|s| s.edges);
         self.snap_to_face = preferences.snapping.as_ref().is_none_or(|s| s.faces);
+        self.snap_to_face_center = preferences.snapping.as_ref().is_none_or(|s| s.face_centers);
         self.snap_to_grid = preferences
             .snapping
             .as_ref()
@@ -534,6 +537,7 @@ impl KetchupApp {
                 geometry: self.doc.snap_to_geometry,
                 edges: self.snap_to_edge,
                 faces: self.snap_to_face,
+                face_centers: self.snap_to_face_center,
                 axes: self.doc.snap_to_axes,
                 grid: self.snap_to_grid,
             }),
@@ -4385,5 +4389,33 @@ impl KetchupApp {
         } else if let Some(position) = preview {
             self.preview_history(position);
         }
+    }
+}
+
+#[cfg(test)]
+mod face_center_preference_tests {
+    use super::*;
+    #[derive(Default)]
+    struct SavedPreferences(std::collections::BTreeMap<String,String>);
+    impl eframe::Storage for SavedPreferences {
+        fn get_string(&self,key:&str)->Option<String>{self.0.get(key).cloned()}
+        fn set_string(&mut self,key:&str,value:String){self.0.insert(key.into(),value);}
+        fn remove_string(&mut self,key:&str){self.0.remove(key);}
+        fn flush(&mut self){}
+    }
+
+    #[test]
+    fn face_center_toggle_persists_without_an_edit_and_defaults_for_older_settings() {
+        let ctx=egui::Context::default();
+        let mut storage=SavedPreferences::default();
+        let mut app=KetchupApp::with_document(Document::default(),None,true);
+        assert!(app.snap_to_face_center);
+        app.snap_to_face_center=false;
+        app.persist_inspector_changes(&ctx,Some(&mut storage),false);
+        let mut restored=KetchupApp::with_document(Document::default(),None,true);
+        restored.restore_inspector_preferences(&egui::Context::default(),Some(&storage));
+        assert!(!restored.snap_to_face_center);
+        let older:SnappingPreferences=serde_json::from_str(r#"{"geometry":true,"faces":false}"#).unwrap();
+        assert!(older.face_centers);
     }
 }

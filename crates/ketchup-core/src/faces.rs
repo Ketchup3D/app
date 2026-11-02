@@ -176,6 +176,33 @@ fn contains_ring(model: &Model, outer: &[u64], inner: &[u64]) -> bool {
 }
 
 impl Model {
+    /// Area centroid of the actual face, excluding holes. A centroid in a
+    /// hole or outside a concave boundary is not an on-face snap target.
+    pub fn face_center(&self, face: &Face) -> Option<DVec3> {
+        let normal = plane(self, &face.vertices)?.normal;
+        let origin = self.vertices.get(face.vertices.first()?)?.position;
+        let mut weight = 0.;
+        let mut moment = DVec3::ZERO;
+        for (index, ring) in std::iter::once(&face.vertices).chain(&face.holes).enumerate() {
+            let mut signed_area = 0.;
+            let mut ring_moment = DVec3::ZERO;
+            for i in 0..ring.len() {
+                let a = self.vertices.get(&ring[i])?.position - origin;
+                let b = self.vertices.get(&ring[(i + 1) % ring.len()])?.position - origin;
+                let area = a.cross(b).dot(normal);
+                signed_area += area;
+                ring_moment += (a + b) * (area / 3.);
+            }
+            if signed_area.abs() <= 1e-14 { continue; }
+            let area = signed_area.abs() * if index == 0 { 1. } else { -1. };
+            moment += (ring_moment / signed_area) * area;
+            weight += area;
+        }
+        if weight <= 1e-14 { return None; }
+        let center = origin + moment / weight;
+        self.face_contains(face, center, false).then_some(center)
+    }
+
     pub fn face_triangles(&self, face: &Face) -> Vec<[DVec3; 3]> {
         let Some(p) = plane(self, &face.vertices) else {
             return vec![];

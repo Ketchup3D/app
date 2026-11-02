@@ -271,3 +271,6 @@ pub type MaterialId = uuid::Uuid;
 pub use document::SharedProject;
 
 pub use history::{HistoryAuthor, HistoryAction};
+
+#[cfg(test)]
+mod face_center_tests;

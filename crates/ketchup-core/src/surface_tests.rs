@@ -537,7 +537,7 @@ fn edge_and_face_targets_toggle_independently_and_preserve_point_targets() {
     );
     for edges in [false, true] {
         for faces in [false, true] {
-            let targets = SnapTargets { edges, faces };
+            let targets = SnapTargets { edges, faces, face_centers: false };
             let infer = |model: &Model, point, start, lock, geometry| {
                 infer_with_targets(
                     model,

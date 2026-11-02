@@ -1,4 +1,3 @@
-use crate::natural_text::TextUi as _;
 use super::*;
 use ketchup_core::{Dimension, DimensionAnchor, angle_arc, angle_degrees};
 
@@ -228,12 +227,16 @@ impl KetchupApp {
             return "Measurement complete · Click to start another · Esc to clear";
         }
         match (self.tool, m.points.len()) {
-            (Tool::Text, 1) => "Move to position the text · Click to place · Esc to cancel",
+            (Tool::Text, 1) => {
+                "Move to position the text · Arrow keys lock axes · Click to place · Esc to cancel"
+            }
             (Tool::TapeMeasure, 1) => {
                 "Click the second point · Arrow keys lock axes · Esc to cancel"
             }
-            (Tool::Protractor, 1) => "Click a baseline point · Esc to cancel",
-            (Tool::Protractor, 2) => "Click the angle point · Esc to cancel",
+            (Tool::Protractor, 1) => {
+                "Click a baseline point · Arrow keys lock axes · Esc to cancel"
+            }
+            (Tool::Protractor, 2) => "Click the angle point · Arrow keys lock axes · Esc to cancel",
             (Tool::Dimensions, 1) => {
                 "Click the second endpoint · Arrow keys align X / Y / Z · Esc to cancel"
             }

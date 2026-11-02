@@ -2674,6 +2674,39 @@ fn modeling_number(h: &mut Harness, value: &str) {
 }
 
 #[test]
+fn push_pull_selected_single_face_group_without_opening_it() {
+    let mut h = Harness::new();
+    let face = modeling_rectangle(&mut h);
+    let group = h.app.doc.model.make_object(
+        &h.app.doc.model.selectable_entities(), false, "Panel",
+    ).unwrap();
+    h.app.selected = BTreeSet::from([group]);
+    h.key(Key::P);
+    assert_eq!(h.app.selected_push_pull_face(), Some(face));
+    let before = h.app.doc.model.clone();
+    let at = h.at(DVec3::new(2., 2., 0.));
+    h.click(at);
+    assert_eq!(h.app.modeling.as_ref().unwrap().face, Some(face));
+    assert_eq!(h.app.doc.model.edit_context, None);
+    h.frame(vec![egui::Event::PointerMoved(h.at(DVec3::new(2., 2., 1.)))], egui::Modifiers::NONE);
+    assert!(h.app.modeling.as_ref().unwrap().preview.as_ref().unwrap()
+        .object_contents(group).unwrap().faces.len() > 1);
+    assert_eq!(h.app.doc.model, before);
+    h.key(Key::Escape);
+    assert_eq!(h.app.doc.model, before);
+    assert_eq!(h.app.selected, BTreeSet::from([group]));
+    h.click(at);
+    modeling_number(&mut h, "2");
+    assert_eq!(h.app.doc.model.object_contents(group).unwrap().faces.len(), 6);
+    assert_eq!(h.app.doc.model.edit_context, None);
+    assert_eq!(h.app.selected, BTreeSet::from([group]));
+    assert_eq!(h.app.selected_push_pull_face(), None, "Solid groups need explicit face editing");
+    h.app.doc.model.validate().unwrap();
+    h.app.undo(&h.ctx, false);
+    assert_eq!(h.app.doc.model, before);
+}
+
+#[test]
 fn push_pull_pointer_preview_numeric_commit_cancel_and_undo() {
     let mut h = Harness::new();
     let face = modeling_rectangle(&mut h);
@@ -5558,4 +5591,152 @@ fn history_hover_preview_leaves_document_history_and_dirty_state_unchanged() {
     assert_eq!(app.doc.model, initial);
     assert_eq!(app.doc.history.position(), 0);
     assert!(app.project.modified);
+}
+
+#[test]
+fn text_leader_axis_locks_preserve_attachment_and_constrain_label_placement() {
+    let anchor = DVec3::new(0.2, 0.3, 0.4);
+    for (key, axis) in [
+        (Key::ArrowRight, Axis::X),
+        (Key::ArrowLeft, Axis::Y),
+        (Key::ArrowUp, Axis::Z),
+    ] {
+        let mut h = Harness::new();
+        h.app.set_tool(Tool::Text);
+        h.app.measurement = Some(measurement_tools::Measurement {
+            points: vec![anchor],
+            ..Default::default()
+        });
+        let pos = h.at(anchor + DVec3::new(2., 3., 4.));
+        h.frame(vec![egui::Event::PointerMoved(pos)], egui::Modifiers::NONE);
+        h.key(key);
+        assert_eq!(h.app.lock, Some(axis));
+        let measurement = h.app.measurement.as_ref().unwrap();
+        assert_eq!(measurement.points, vec![anchor]);
+        assert!(measurement.offset.cross(axis.vector()).length() < 1e-7);
+        h.key(Key::ArrowDown);
+        assert_eq!(h.app.lock, None);
+        h.app.update_text_pointer(pos);
+        assert!(
+            h.app
+                .measurement
+                .as_ref()
+                .unwrap()
+                .offset
+                .cross(axis.vector())
+                .length()
+                > 1e-4
+        );
+    }
+}
+
+#[test]
+fn tape_measure_and_protractor_pointer_respect_each_explicit_axis() {
+    let origin = DVec3::new(0.2, 0.3, 0.4);
+    for tool in [Tool::TapeMeasure, Tool::Protractor] {
+        for (key, axis) in [
+            (Key::ArrowRight, Axis::X),
+            (Key::ArrowLeft, Axis::Y),
+            (Key::ArrowUp, Axis::Z),
+        ] {
+            let mut h = Harness::new();
+            h.app.set_tool(tool);
+            h.app.measurement = Some(measurement_tools::Measurement {
+                points: vec![origin],
+                normal: DVec3::Z,
+                ..Default::default()
+            });
+            let pos = h.at(origin + DVec3::new(2., 3., 4.));
+            h.frame(vec![egui::Event::PointerMoved(pos)], egui::Modifiers::NONE);
+            h.key(key);
+            h.app.update_measurement(pos);
+            let delta = h
+                .app
+                .snap
+                .expect("axis-constrained measurement preview")
+                .point
+                - origin;
+            assert!(delta.cross(axis.vector()).length() < 1e-7);
+            assert_eq!(h.app.measurement.as_ref().unwrap().points, vec![origin]);
+        }
+    }
+}
+
+#[test]
+fn push_pull_grid_steps_preserve_normal_and_yield_to_typed_distance() {
+    let mut h = Harness::new();
+    modeling_rectangle(&mut h);
+    h.app.doc.snap_to_geometry = false;
+    h.app.doc.snap_to_axes = false;
+    h.app.doc.display.grid_auto_size = false;
+    h.app.doc.display.grid_spacing = 0.5;
+    h.app.set_tool(Tool::PushPull);
+    h.app.begin_modeling(h.at(DVec3::new(2., 2., 0.)), &h.ctx);
+    let target = h.at(DVec3::new(2., 2., 1.37));
+    h.app.update_modeling(target);
+    let free = h.app.modeling.as_ref().unwrap().value;
+    h.app.snap_to_grid = true;
+    h.app.update_modeling(target);
+    let edit = h.app.modeling.as_ref().unwrap();
+    assert!((edit.value - (free / 0.5).round() * 0.5).abs() < 1e-7);
+    assert!(edit.direction.cross(DVec3::Z).length() < 1e-7);
+    h.app.snap_to_grid = false;
+    h.app.update_modeling(target);
+    assert!((h.app.modeling.as_ref().unwrap().value - free).abs() < 1e-7);
+    h.app.snap_to_grid = true;
+    h.app.length_input = "1.37m".into();
+    h.app.update_modeling(target);
+    let edit = h.app.modeling.as_ref().unwrap();
+    assert!(
+        edit.preview
+            .as_ref()
+            .unwrap()
+            .vertices
+            .values()
+            .any(|v| (v.position.z - 1.37).abs() < 1e-7)
+    );
+}
+
+#[test]
+fn push_pull_axis_references_work_independently_of_object_snapping() {
+    let mut h = Harness::new();
+    modeling_rectangle(&mut h);
+    h.app.set_tool(Tool::PushPull);
+    h.app.begin_modeling(h.at(DVec3::new(2., 2., 0.)), &h.ctx);
+    h.app.doc.snap_to_geometry = false;
+    h.app.snap_to_edge = false;
+    h.app.snap_to_face = false;
+    h.app.doc.snap_to_axes = true;
+    let target = h.at(DVec3::new(0., 0., 2.5));
+    h.app.update_modeling(target);
+    assert!(matches!(
+        h.app.modeling.as_ref().unwrap().snap.unwrap().kind,
+        Inference::OnAxis(Axis::Z) | Inference::Axis(Axis::Z)
+    ));
+    assert!((h.app.modeling.as_ref().unwrap().value.abs() - 2.5).abs() < 1e-6);
+    h.app.doc.snap_to_axes = false;
+    h.app.update_modeling(target);
+    assert!(h.app.modeling.as_ref().unwrap().snap.is_none());
+}
+
+#[test]
+fn move_hover_previews_the_anchor_used_by_first_click() {
+    for (point, kind) in [
+        (DVec3::new(2., 2., 0.), Inference::Endpoint),
+        (DVec3::new(3., 2., 0.), Inference::OnEdge),
+    ] {
+        let mut h = Harness::new();
+        h.app.doc.model.add_edge(DVec3::new(2., 2., 0.), DVec3::new(6., 2., 0.)).unwrap();
+        h.app.tool = Tool::Move;
+        h.app.doc.snap_to_geometry = true;
+        h.app.snap_to_edge = true;
+        let pos = h.at(point);
+        h.app.update_pointer(pos);
+        let snap = h.app.snap.expect("Move must preview an anchor before clicking");
+        assert_eq!(snap.kind, kind);
+        assert!(snap.point.distance(point) < 1e-7);
+        assert!(h.app.modeling.is_none());
+        h.app.begin_modeling(pos, &h.ctx);
+        assert!(h.app.modeling.as_ref().unwrap().anchor.distance(snap.point) < 1e-7);
+    }
 }

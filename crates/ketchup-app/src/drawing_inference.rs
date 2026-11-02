@@ -104,7 +104,7 @@ impl KetchupApp {
         let geometry = |snap: Snap| {
             matches!(
                 snap.kind,
-                Inference::Endpoint | Inference::Midpoint | Inference::Origin | Inference::OnEdge
+                Inference::Endpoint | Inference::Midpoint | Inference::FaceCenter | Inference::Origin | Inference::OnEdge
             )
         };
         // A lock or drawing plane may reject the hovered point as a target;

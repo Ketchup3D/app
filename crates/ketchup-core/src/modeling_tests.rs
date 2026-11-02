@@ -224,11 +224,19 @@ fn painting_a_group_includes_nested_faces_and_rejects_locks_atomically() {
         let before = model.clone();
         assert!(model.paint_object(group, [1, 2, 3]).is_err());
         assert_eq!(model, before);
+        assert!(model.clear_colors(&BTreeSet::from([group])).is_err());
+        assert_eq!(model, before);
         model.locked.remove(&locked);
     }
     let before = model.clone();
     assert!(model.paint_object(outside, color).is_err());
     assert_eq!(model, before);
+    model.paint_face(outside, [1, 2, 3]).unwrap();
+    model.clear_colors(&BTreeSet::from([group])).unwrap();
+    assert!(inside.iter().all(|id| !model.face_colors.contains_key(id)));
+    assert_eq!(model.face_colors.get(&outside), Some(&[1, 2, 3]));
+    model.clear_colors(&BTreeSet::from([outside])).unwrap();
+    assert!(model.face_colors.is_empty());
     model.validate().unwrap();
 }
 

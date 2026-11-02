@@ -28,6 +28,7 @@ pub enum Inference {
     Plane,
     Endpoint,
     Midpoint,
+    FaceCenter,
     Origin,
     OnEdge,
     OnFace,
@@ -41,6 +42,7 @@ impl Inference {
             Self::Plane => "On plane",
             Self::Endpoint => "Endpoint",
             Self::Midpoint => "Midpoint",
+            Self::FaceCenter => "Face center",
             Self::Origin => "Origin",
             Self::OnEdge => "On edge",
             Self::OnFace => "On face",
@@ -63,6 +65,7 @@ pub struct Snap {
 pub struct SnapTargets {
     pub edges: bool,
     pub faces: bool,
+    pub face_centers: bool,
 }
 
 impl Default for SnapTargets {
@@ -70,6 +73,7 @@ impl Default for SnapTargets {
         Self {
             edges: true,
             faces: true,
+            face_centers: true,
         }
     }
 }
@@ -390,7 +394,7 @@ fn combine_axis_guides(
     };
     if matches!(
         base.kind,
-        Inference::Endpoint | Inference::Midpoint | Inference::Origin
+        Inference::Endpoint | Inference::Midpoint | Inference::FaceCenter | Inference::Origin
     ) {
         return fallback;
     }
@@ -640,6 +644,11 @@ pub fn infer_with_targets(
                 ((a + b) * 0.5, Inference::Midpoint)
             }),
     );
+    if snap_to_geometry && targets.face_centers {
+        candidates.extend(model.faces.values()
+            .filter(|face| !is_hidden(face.id))
+            .filter_map(|face| model.face_center(face).map(|center| (center, Inference::FaceCenter))));
+    }
     let nearby = candidates
         .into_iter()
         .filter(|_| snap_to_geometry)

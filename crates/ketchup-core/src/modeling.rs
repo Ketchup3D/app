@@ -192,6 +192,26 @@ impl Model {
         if !self.faces.contains_key(&face) {
             return Err("Click a filled face to paint it");
         }
+        self.set_face_color(face, Some(color));
+        Ok(())
+    }
+
+    /// Remove paint from selected faces and all descendants as one atomic edit.
+    pub fn clear_colors(&mut self, selected: &BTreeSet<u64>) -> Result<(), &'static str> {
+        if self.edit_context.is_some() {
+            return self.edit_in_context(|model| model.clear_colors(selected));
+        }
+        let entities = self.expand_entities(selected);
+        if entities.iter().any(|id| self.is_locked(*id)) {
+            return Err("Unlock the selected items and their children before clearing color");
+        }
+        for face in entities.into_iter().filter(|id| self.faces.contains_key(id)).collect::<Vec<_>>() {
+            self.set_face_color(face, None);
+        }
+        Ok(())
+    }
+
+    fn set_face_color(&mut self, face: u64, color: Option<[u8; 3]>) {
         // A component's material belongs to its definition; update matching faces
         // in all instances while retaining each instance's position and scale.
         let definition = self
@@ -217,9 +237,12 @@ impl Model {
             }));
         }
         for face in faces {
-            self.face_colors.insert(face, color);
+            if let Some(color) = color {
+                self.face_colors.insert(face, color);
+            } else {
+                self.face_colors.remove(&face);
+            }
         }
-        Ok(())
     }
 
     /// Paint all descendant faces as one atomic edit, preserving component materials.

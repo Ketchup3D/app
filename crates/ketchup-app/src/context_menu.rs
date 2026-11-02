@@ -46,6 +46,7 @@ impl KetchupApp {
             self.modeling = None;
             self.gesture = None;
             self.line_start = None;
+            self.line_group = None;
             self.snap = None;
         }
         match action {

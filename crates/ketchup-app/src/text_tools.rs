@@ -1,5 +1,4 @@
 //! Attached leader text: pick geometry, place the label, then enter its contents.
-use crate::natural_text::TextUi as _;
 use super::*;
 use ketchup_core::{DimensionAnchor, TextAnnotation};
 
@@ -23,7 +22,15 @@ impl KetchupApp {
                 .camera
                 .ray(dv(pos - self.viewport.min), dv(self.viewport.size()));
             let denominator = ray.direction.dot(normal);
-            if denominator.abs() > 1e-8 {
+            if let Some(axis) = self.lock {
+                // Keep label placement on the chosen world axis through its
+                // attachment. The attachment itself remains on the geometry.
+                let direction = axis.vector();
+                m.offset = direction * m.offset.dot(direction);
+                if let Some(target) = ray.axis(point, direction) {
+                    m.offset = target - point;
+                }
+            } else if denominator.abs() > 1e-8 {
                 let t = (point - ray.origin).dot(normal) / denominator;
                 if t > 0. {
                     m.offset = ray.origin + ray.direction * t - point;
