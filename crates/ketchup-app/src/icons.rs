@@ -51,6 +51,25 @@ impl ToolPalette {
     }
 }
 
+/// Font-independent indicator shared by toolbar dropdown buttons.
+pub fn dropdown_chevron(p: &egui::Painter, center: Pos2, color: Color32) {
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            center + egui::vec2(-4., -2.),
+            center + egui::vec2(4., -2.),
+            center + egui::vec2(0., 2.),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+pub fn dropdown_atom(color: Color32) -> egui::Atom<'static> {
+    egui::Atom::paint(egui::vec2(8., 12.), move |ui, args| {
+        dropdown_chevron(ui.painter(), args.rect.center(), color);
+    })
+}
+
 pub fn tool(p: &egui::Painter, rect: Rect, tool: Tool) {
     if tool == Tool::Select && p.ctx().global_style().visuals.dark_mode {
         // A contrasting border keeps the cursor visible over light model faces too.

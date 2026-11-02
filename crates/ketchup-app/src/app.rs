@@ -2794,68 +2794,6 @@ impl KetchupApp {
         self.solid_inspector(ui);
         self.measurement_inspector(ui);
         self.text_entity_info(ui);
-        if self.tool == Tool::Paint {
-            sidebar::inspector_section(ui, "Appearance", "entity_appearance", true, |ui| {
-                ui.text_label("Paint by");
-                let button_width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.;
-                ui.horizontal(|ui| {
-                    for (target, label) in [(PaintTarget::Face, "Face"), (PaintTarget::Group, "Group")]
-                    {
-                        if ui
-                            .add_sized(
-                                [button_width, ui.spacing().interact_size.y],
-                                egui::Button::new(label).selected(self.paint_target == target),
-                            )
-                            .clicked()
-                        {
-                            self.paint_target = target;
-                        }
-                    }
-                });
-                crate::inspector_table::inspector_field(ui, "paint_color", "Choose paint", |ui| {
-                    ui.spacing_mut().interact_size.x = ui.available_width();
-                    ui.color_edit_button_srgb(&mut self.paint_color)
-                });
-                let swatch_width = (ui.available_width() - ui.spacing().item_spacing.x * 6.) / 7.;
-                ui.horizontal(|ui| {
-                    for color in [
-                        [195, 96, 67],
-                        [225, 179, 87],
-                        [108, 148, 102],
-                        [95, 143, 177],
-                        [163, 121, 167],
-                        [236, 231, 215],
-                        [78, 84, 81],
-                    ] {
-                        let rgb = Color32::from_rgb(color[0], color[1], color[2]);
-                        if ui
-                            .add_sized([swatch_width, 24.], egui::Button::new(" ").fill(rgb))
-                            .on_hover_text(format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2]))
-                            .clicked()
-                        {
-                            self.paint_color = color;
-                        }
-                    }
-                });
-                if ui
-                    .add_enabled(
-                        !self.selected.is_empty()
-                            && !self.doc.model.selection_locked(&self.selected),
-                        egui::Button::new("Clear Color"),
-                    )
-                    .on_hover_text("Remove color from the selected items and all their children")
-                    .clicked()
-                {
-                    let before = self.doc.model.clone();
-                    match self.doc.model.clear_colors(&self.selected) {
-                        Ok(()) => self.finish_edit("Clear color", before, ui.ctx()),
-                        Err(message) => self.say(ui.ctx(), message),
-                    }
-                }
-                ui.text_label(self.paint_instructions());
-            });
-            ui.add_space(8.);
-        }
         if self.selected.is_empty() {
             crate::empty_state::EmptyState::new("Nothing selected",
                 "Select an entity to see its details.").show(ui);
@@ -2951,6 +2889,28 @@ impl KetchupApp {
                 Self::property_row(ui, "Volume", &self.doc.display.units.format_volume(volume));
             }
         }
+        ui.add_space(8.);
+        sidebar::inspector_section(ui, "Appearance", "entity_appearance", true, |ui| {
+            self.paint_color_controls(ui, false);
+            ui.add_space(8.);
+            if ui
+                .add_enabled(
+                    !self.selected.is_empty()
+                        && !self.doc.model.selection_locked(&self.selected),
+                    egui::Button::new("Clear Color")
+                        .min_size(egui::vec2(ui.available_width(), ui.spacing().interact_size.y)),
+                )
+                .on_hover_text("Remove color from the selected items and all their children")
+                .clicked()
+            {
+                let before = self.doc.model.clone();
+                match self.doc.model.clear_colors(&self.selected) {
+                    Ok(()) => self.finish_edit("Clear color", before, ui.ctx()),
+                    Err(message) => self.say(ui.ctx(), message),
+                }
+            }
+            ui.text_label(self.paint_instructions());
+        });
     }
     fn property(ui: &mut egui::Ui, label: &str, value: &str) {
         Self::property_row(ui, label, value);
@@ -4822,11 +4782,8 @@ impl KetchupApp {
     }
     fn snapping_menu(&mut self, ui: &mut egui::Ui) {
         let colors = Palette::for_ui(ui);
-        let chevron =
-            ui.painter()
-                .layout_no_wrap("▾".into(), FontId::proportional(12.), colors.muted);
         let response = ui
-            .add(egui::Button::new("").min_size(egui::vec2(chevron.size().x + 40., 32.)))
+            .add(egui::Button::new("").min_size(egui::vec2(48., 32.)))
             .on_hover_text("Configure object, edge, face, axis, and grid snapping");
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Snapping"));
         icons::line_icon(
@@ -4835,12 +4792,9 @@ impl KetchupApp {
             "magnet",
             Color32::from_rgb(67, 125, 208),
         );
-        ui.painter().galley(
-            egui::pos2(
-                response.rect.left() + 32.,
-                response.rect.center().y - chevron.size().y * 0.5,
-            ),
-            chevron,
+        icons::dropdown_chevron(
+            ui.painter(),
+            egui::pos2(response.rect.left() + 36., response.rect.center().y),
             colors.muted,
         );
         egui::Popup::menu(&response)
@@ -5093,6 +5047,7 @@ impl KetchupApp {
                                     // This row flows right to left: Sections sits left of this separator.
                                     ui.separator();
                                     self.sections_menu(ui);
+                                    self.paint_menu(ui);
                                     ui.allocate_ui_with_layout(
                                         ui.available_size(),
                                         egui::Layout::left_to_right(egui::Align::Center),

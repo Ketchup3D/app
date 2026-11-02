@@ -1438,7 +1438,7 @@ fn snapping_menu_preserves_independent_options_and_controls_geometry_magnet() {
     assert!(h.app.doc.snap_to_geometry);
     assert!(h.app.doc.snap_to_axes);
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    let snapping = text_position(&output, "▾");
+    let snapping = dropdown_position(&output);
     h.click(snapping);
     let menu = h.frame(vec![], egui::Modifiers::NONE);
     let checkbox = text_position(&menu, "Snap to objects");
@@ -2352,6 +2352,24 @@ fn render_snapshots(state: eframe::egui_wgpu::RenderState, audit: bool) {
         drop(mapped);
         buffer.unmap();
     }
+}
+
+fn dropdown_position(output: &egui::FullOutput) -> Pos2 {
+    fn locate(shape: &egui::Shape) -> Option<Pos2> {
+        match shape {
+            egui::Shape::Path(path)
+                if path.closed && path.points.len() == 3
+                    && path.points[1] - path.points[0] == egui::vec2(8., 0.)
+                    && path.points[2] - path.points[0] == egui::vec2(4., 4.) =>
+            {
+                Some(path.points[0] + egui::vec2(4., 2.))
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().find_map(locate),
+            _ => None,
+        }
+    }
+    output.shapes.iter().find_map(|shape| locate(&shape.shape))
+        .expect("Missing vector dropdown indicator")
 }
 
 fn text_position(output: &egui::FullOutput, label: &str) -> Pos2 {

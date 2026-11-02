@@ -283,7 +283,7 @@ fn grid_snapping_menu_defaults_off_and_toggles_independently() {
     let mut h = Harness::new();
     assert!(!h.app.snap_to_grid);
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(text_position(&output, "▾"));
+    h.click(dropdown_position(&output));
     let output = h.frame(vec![], egui::Modifiers::NONE);
     let checkbox = text_position(&output, "Snap to grid");
     h.click(checkbox);
@@ -392,7 +392,7 @@ fn edge_and_face_snapping_menu_toggles_are_independent_preferences() {
     assert!(h.app.snap_to_edge);
     assert!(h.app.snap_to_face);
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(text_position(&output, "▾"));
+    h.click(dropdown_position(&output));
     for label in ["Snap to edge", "Snap to face"] {
         let output = h.frame(vec![], egui::Modifiers::NONE);
         let checkbox = text_position(&output, label);

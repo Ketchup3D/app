@@ -366,10 +366,12 @@ fn section_axes_control_plane_visibility() {
         ("Y · vertical", [false, false, false]),
     ] {
         let output = h.frame(vec![], egui::Modifiers::NONE);
-        assert!(!output
-            .shapes
-            .iter()
-            .any(|shape| has_plane_control(&shape.shape)));
+        assert!(
+            !output
+                .shapes
+                .iter()
+                .any(|shape| has_plane_control(&shape.shape))
+        );
         h.click(text_position(&output, label));
         assert_eq!(h.app.doc.display.section_axes, axes);
         assert_eq!(
@@ -801,7 +803,12 @@ fn every_tool_pointer_workload_benchmark() {
     }
 }
 
-fn color_button_position(h: &Harness, output: &egui::FullOutput, rgb: [u8; 3], below: f32) -> Pos2 {
+fn color_button_position(
+    _h: &Harness,
+    output: &egui::FullOutput,
+    rgb: [u8; 3],
+    below: f32,
+) -> Pos2 {
     fn find(shape: &egui::Shape, color: Color32, left: f32, below: f32) -> Option<Pos2> {
         match shape {
             egui::Shape::Rect(r)
@@ -821,7 +828,8 @@ fn color_button_position(h: &Harness, output: &egui::FullOutput, rgb: [u8; 3], b
     output
         .shapes
         .iter()
-        .find_map(|s| find(&s.shape, color, h.size.x - 310., below))
+        .rev()
+        .find_map(|s| find(&s.shape, color, 0., below))
         .unwrap_or_else(|| panic!("Missing color button {rgb:?}"))
 }
 
@@ -885,6 +893,34 @@ color!(color_ground_picker, "ground_color");
 color!(color_horizon_picker, "horizon_color");
 
 #[test]
+fn appearance_is_visible_without_paint_and_paint_menu_precedes_sections() {
+    let mut h = Harness::new();
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    assert_ne!(h.app.tool, Tool::Paint);
+    sidebar_position(&h, &output, "Appearance");
+    assert!(text_position(&output, "Color").x < text_position(&output, "Sections").x);
+    h.click(text_position(&output, "Color"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    text_position(&output, "Face");
+    text_position(&output, "Group");
+    text_position(&output, "Choose color");
+}
+
+#[test]
+fn appearance_color_changes_without_activating_paint() {
+    let mut h = Harness::new();
+    let tool = h.app.tool;
+    assert_ne!(tool, Tool::Paint);
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    let below = sidebar_position(&h, &output, "Choose color").y + 10.;
+    let color = [95, 143, 177];
+    h.click(color_button_position(&h, &output, color, below));
+    assert_eq!(h.app.paint_color, color);
+    assert_eq!(h.app.tool, tool);
+    assert!(!h.app.project.modified);
+}
+
+#[test]
 fn paint_target_buttons_apply_to_a_face_or_whole_group_with_one_undo_step() {
     let mut h = Harness::new();
     let face = modeling_rectangle(&mut h);
@@ -906,19 +942,23 @@ fn paint_target_buttons_apply_to_a_face_or_whole_group_with_one_undo_step() {
     assert_eq!(h.app.doc.model.face_colors.len(), 1);
     h.app.undo(&h.ctx, false);
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(sidebar_position(&h, &output, "Group"));
+    h.click(text_position(&output, "Color"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "Group"));
+    h.key(Key::Escape);
     assert_eq!(h.app.paint_target, PaintTarget::Group);
     h.app.update_pointer(at);
     assert_eq!(h.app.hover, Some(group));
     h.click(at);
     assert_eq!(h.app.doc.model.face_colors.len(), 6);
-    assert!(h
-        .app
-        .doc
-        .model
-        .face_colors
-        .values()
-        .all(|color| *color == h.app.paint_color));
+    assert!(
+        h.app
+            .doc
+            .model
+            .face_colors
+            .values()
+            .all(|color| *color == h.app.paint_color)
+    );
     assert_eq!(h.app.doc.history.undo_label(), Some("Paint group"));
     let painted = h.app.doc.model.clone();
     h.app.undo(&h.ctx, false);
@@ -926,7 +966,10 @@ fn paint_target_buttons_apply_to_a_face_or_whole_group_with_one_undo_step() {
     h.app.undo(&h.ctx, true);
     assert_eq!(h.app.doc.model, painted);
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(sidebar_position(&h, &output, "Face"));
+    h.click(text_position(&output, "Color"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(text_position(&output, "Face"));
+    h.key(Key::Escape);
     assert_eq!(h.app.paint_target, PaintTarget::Face);
 }
 
@@ -936,18 +979,38 @@ fn all_paint_swatches_apply_the_selected_color_to_a_face() {
     let face = modeling_rectangle(&mut h);
     h.key(Key::B);
     for rgb in [
+        [245, 182, 186],
+        [250, 205, 160],
+        [249, 235, 162],
+        [186, 216, 172],
+        [175, 204, 238],
+        [217, 188, 231],
+        [210, 48, 48],
+        [239, 128, 45],
+        [245, 210, 65],
+        [60, 153, 88],
+        [55, 105, 195],
+        [133, 72, 181],
         [195, 96, 67],
+        [194, 132, 75],
         [225, 179, 87],
         [108, 148, 102],
         [95, 143, 177],
         [163, 121, 167],
+        [255, 255, 255],
         [236, 231, 215],
+        [201, 204, 207],
+        [139, 145, 151],
+        [148, 101, 65],
         [78, 84, 81],
     ] {
         let output = h.frame(vec![], egui::Modifiers::NONE);
-        let below = sidebar_position(&h, &output, "Choose paint").y + 20.;
+        h.click(text_position(&output, "Color"));
+        let output = h.frame(vec![], egui::Modifiers::NONE);
+        let below = menu_text_position(&output, "Choose color").y + 10.;
         h.click(color_button_position(&h, &output, rgb, below));
         assert_eq!(h.app.paint_color, rgb);
+        h.key(Key::Escape);
         h.click(h.at(DVec3::new(2., 2., 0.)));
         assert_eq!(h.app.doc.model.face_colors[&face], rgb);
         assert_eq!(h.app.doc.history.undo_label(), Some("Paint face"));

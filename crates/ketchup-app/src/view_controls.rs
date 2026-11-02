@@ -237,6 +237,131 @@ fn standard_view_preview(
 }
 
 impl KetchupApp {
+    pub(in crate::app) fn paint_menu(&mut self, ui: &mut egui::Ui) {
+        let colors = Palette::for_ui(ui);
+        let color = Color32::from_rgb(
+            self.paint_color[0],
+            self.paint_color[1],
+            self.paint_color[2],
+        );
+        let icon = egui::Atom::paint(egui::vec2(18., 18.), |ui, args| {
+            icons::ui_tool(ui.painter(), args.rect, Tool::Paint);
+            ui.painter()
+                .circle_filled(args.rect.right_bottom() - egui::vec2(3., 3.), 4., color);
+        });
+        let response = ui
+            .add(
+                egui::Button::new((
+                    icon,
+                    "Color",
+                    icons::dropdown_atom(colors.muted),
+                ))
+                .min_size(egui::vec2(0., 32.))
+                .selected(self.tool == Tool::Paint),
+            )
+            .on_hover_text("Choose how to paint and a paint color");
+        egui::Popup::menu(&response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                Self::menu_style(ui.style_mut());
+                ui.set_width(256.);
+                let padding = ui.spacing().button_padding.x as i8;
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(padding, 6))
+                    .show(ui, |ui| {
+                        ui.text_label("Paint by");
+                        let button_width =
+                            (ui.available_width() - ui.spacing().item_spacing.x) / 2.;
+                        ui.horizontal(|ui| {
+                            for (target, label) in
+                                [(PaintTarget::Face, "Face"), (PaintTarget::Group, "Group")]
+                            {
+                                if ui
+                                    .add_sized(
+                                        [button_width, 30.],
+                                        egui::Button::new(label)
+                                            .selected(self.paint_target == target),
+                                    )
+                                    .clicked()
+                                {
+                                    self.paint_target = target;
+                                    self.set_tool(Tool::Paint);
+                                }
+                            }
+                        });
+                        ui.add_space(4.);
+                        ui.separator();
+                        ui.add_space(4.);
+                        self.paint_color_controls(ui, true);
+                    });
+            });
+    }
+
+    pub(in crate::app) fn paint_color_controls(&mut self, ui: &mut egui::Ui, activate_paint: bool) {
+        crate::inspector_table::inspector_field(ui, "paint_color", "Choose color", |ui| {
+            ui.spacing_mut().interact_size.x = ui.available_width();
+            let response = ui.color_edit_button_srgb(&mut self.paint_color);
+            if response.changed() && activate_paint {
+                self.set_tool(Tool::Paint);
+            }
+            response
+        });
+        ui.add_space(6.);
+        ui.text_label(
+            RichText::new("Preset colors")
+                .small()
+                .color(Palette::for_ui(ui).muted),
+        );
+        let swatch_width = (ui.available_width() - ui.spacing().item_spacing.x * 5.) / 6.;
+        let presets = [
+            // Light hues, from warm to cool.
+            [245, 182, 186],
+            [250, 205, 160],
+            [249, 235, 162],
+            [186, 216, 172],
+            [175, 204, 238],
+            [217, 188, 231],
+            // Saturated hues in the same order.
+            [210, 48, 48],
+            [239, 128, 45],
+            [245, 210, 65],
+            [60, 153, 88],
+            [55, 105, 195],
+            [133, 72, 181],
+            // Muted hues in the same order.
+            [195, 96, 67],
+            [194, 132, 75],
+            [225, 179, 87],
+            [108, 148, 102],
+            [95, 143, 177],
+            [163, 121, 167],
+            // Neutrals and wood tones, from light to dark.
+            [255, 255, 255],
+            [236, 231, 215],
+            [201, 204, 207],
+            [139, 145, 151],
+            [148, 101, 65],
+            [78, 84, 81],
+        ];
+        for row in presets.chunks(6) {
+            ui.horizontal(|ui| {
+                for &color in row {
+                    let rgb = Color32::from_rgb(color[0], color[1], color[2]);
+                    if ui
+                        .add_sized([swatch_width, 24.], egui::Button::new(" ").fill(rgb))
+                        .on_hover_text(format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2]))
+                        .clicked()
+                    {
+                        self.paint_color = color;
+                        if activate_paint {
+                            self.set_tool(Tool::Paint);
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     pub(in crate::app) fn sections_menu(&mut self, ui: &mut egui::Ui) {
         let before = self.doc.display.clone();
         let colors = Palette::for_ui(ui);
@@ -248,7 +373,7 @@ impl KetchupApp {
                 egui::Button::new((
                     icon,
                     "Sections",
-                    RichText::new("▾").small().color(colors.muted),
+                    icons::dropdown_atom(colors.muted),
                 ))
                 .min_size(egui::vec2(0., 32.))
                 .selected(self.doc.display.section_planes || self.doc.display.section_cuts),
