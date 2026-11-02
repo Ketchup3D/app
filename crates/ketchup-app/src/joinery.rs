@@ -25,9 +25,34 @@ impl Preferences {
 #[derive(Default)]
 pub(super) struct Dialog {
     orientations: OrientationCache,
+    diagnostics: EditorDiagnostics,
     pub members: Option<[u64; 2]>,
     preview: Option<Preview>,
 }
+/// Keep committed-document diagnostics independent from a transient/history
+/// viewport model. Sharing one source snapshot would invalidate both each frame.
+#[derive(Default)]
+struct EditorDiagnostics {
+    source: crate::renderer::ModelSnapshot,
+    revision: u64,
+    errors: Vec<(u64, String)>,
+    #[cfg(test)]
+    evaluations: usize,
+}
+impl EditorDiagnostics {
+    fn update(&mut self, source: &Model, geometry: Option<&mut GeometryCache>) {
+        let revision = self.source.update(source);
+        if revision == self.revision { return; }
+        self.revision = revision;
+        self.errors = if let Some(geometry) = geometry {
+            geometry.source_errors(source).to_vec()
+        } else {
+            #[cfg(test)] { self.evaluations += 1; }
+            source.evaluate_joinery().errors
+        };
+    }
+}
+
 /// Board validation includes solid-volume checks. Reuse orientation choices
 /// across redraws, invalidating on source edits and every relevant setting.
 #[derive(Default)]
@@ -63,6 +88,7 @@ struct Preview {
 /// do not repeat boolean operations; every actual board move invalidates it.
 #[derive(Default)]
 pub(super) struct GeometryCache {
+    #[cfg(test)]
     revision: u64,
     source_errors: Option<Vec<(u64, String)>>,
     #[cfg(test)]
@@ -130,7 +156,7 @@ impl GeometryCache {
             let evaluation=viewport_source.evaluate_joinery();
             self.source_errors = (viewport_source.connections == source.connections)
                 .then(|| evaluation.errors.clone());
-            self.revision = self.revision.wrapping_add(1);
+            #[cfg(test)] { self.revision = self.revision.wrapping_add(1); }
             let mut boards = highlight::BoardGeometryCache::default();
             self.regions=viewport_source.connections.iter().filter(|(id,c)|
                 matches!(c.operation,ConnectionOperation::Joinery(_))
@@ -434,8 +460,12 @@ impl KetchupApp {
         }
     }
     fn joint_connections(&mut self, ui: &mut egui::Ui, members: [u64; 2]) {
-        let errors = self.joinery_geometry.source_errors(&self.doc.model).to_vec();
-        let revision = self.joinery_geometry.revision;
+        let shared_view = self.history_preview.is_none()
+            && self.modeling.as_ref().and_then(|edit| edit.preview.as_ref()).is_none();
+        self.joinery_dialog.diagnostics.update(&self.doc.model,
+            shared_view.then_some(&mut self.joinery_geometry));
+        let errors = self.joinery_dialog.diagnostics.errors.clone();
+        let revision = self.joinery_dialog.diagnostics.revision;
         let connections: Vec<_> = self
             .doc
             .model
@@ -645,6 +675,33 @@ mod tests {
             app.doc.model.evaluate_joinery().model, "the preview must reflect edited settings");
         render(&mut app);
         assert_eq!(app.joinery_geometry.revision, revision + 1);
+    }
+
+    #[test]
+    fn editor_diagnostics_do_not_replace_the_history_preview_geometry_cache() {
+        let (mut app, ctx, _) = fixture();
+        app.open_joinery(&ctx);
+        app.refresh_joint_preview();
+        assert!(app.apply_joint_preview(&ctx));
+        app.joinery_dialog.diagnostics.update(&app.doc.model, Some(&mut app.joinery_geometry));
+        let mut history = app.doc.model.clone();
+        let point = history.vertices.values_mut().next().unwrap();
+        point.position.x += 0.001;
+        app.joinery_geometry.update(&history);
+        let revision = app.joinery_geometry.revision;
+        for _ in 0..4 {
+            app.joinery_dialog.diagnostics.update(&app.doc.model, None);
+            assert_eq!(app.joinery_geometry.revision, revision);
+        }
+        assert_eq!(app.joinery_dialog.diagnostics.evaluations, 0);
+        let ConnectionOperation::Joinery(settings) = &mut app.doc.model.connections.values_mut().next().unwrap().operation else { panic!() };
+        settings.clearance += 0.0001;
+        app.joinery_dialog.diagnostics.update(&app.doc.model, None);
+        assert_eq!(app.joinery_dialog.diagnostics.errors, app.doc.model.evaluate_joinery().errors);
+        assert_eq!(app.joinery_dialog.diagnostics.evaluations, 1);
+        assert_eq!(app.joinery_geometry.revision, revision, "validation must not replace a separate viewport source");
+        app.joinery_dialog.diagnostics.update(&app.doc.model, None);
+        assert_eq!(app.joinery_dialog.diagnostics.evaluations, 1);
     }
 
     #[test]
