@@ -28,6 +28,7 @@ pub(super) struct Benchmark {
     environment: serde_json::Value,
     camera: Camera,
     editing_connection: Option<u64>,
+    edited_settings: bool,
     stage: usize,
     stage_start: Instant,
     last_frame: Instant,
@@ -83,6 +84,7 @@ impl Benchmark {
             environment: serde_json::Value::Null,
             camera: app.doc.camera.clone(),
             editing_connection,
+            edited_settings: false,
             stage: 0,
             stage_start: now,
             last_frame: now,
@@ -164,8 +166,37 @@ impl Benchmark {
                     eprintln!("KETCHUP_BENCH screenshot failed: {error}");
                 }
             });
+            if self.editing_connection.is_some() {
+                assert!(app.joinery.open, "The editor closed during its benchmark");
+                assert!(
+                    app.joinery_geometry
+                        .result
+                        .as_ref()
+                        .is_some_and(|evaluation| evaluation.errors.is_empty()),
+                    "The edited joint preview must remain valid"
+                );
+            }
             self.report();
             self.stage += 1;
+            if self.stage == 3 {
+                if let Some(id) = self.editing_connection {
+                    let before = app.doc.model.clone();
+                    let original = app.doc.model.connections[&id].clone();
+                    let connection = app.doc.model.connections.get_mut(&id).unwrap();
+                    let ketchup_core::connections::ConnectionOperation::Joinery(settings) =
+                        &mut connection.operation
+                    else {
+                        unreachable!()
+                    };
+                    settings.clearance += 0.00001;
+                    app.finish_edit("Edit dynamic wood joint", before, ctx);
+                    assert_ne!(
+                        app.doc.model.connections[&id], original,
+                        "The benchmark edit was rejected"
+                    );
+                    self.edited_settings = true;
+                }
+            }
             self.stage_start = now;
             self.samples.clear();
             self.cpu.clear();
@@ -207,7 +238,7 @@ impl Benchmark {
                 "edit_static_on",
                 "edit_orbit_off",
                 "edit_orbit_on",
-                "edit_static_on_final",
+                "edit_after_change_on",
             ][self.stage]
         } else {
             ["static_on", "orbit_off", "orbit_on", "static_on_final"][self.stage]
@@ -218,7 +249,7 @@ impl Benchmark {
             .map(|(name, values)| (name, stats(values)))
             .collect();
         let report = serde_json::json!({"stage": name, "environment": self.environment, "frame": stats(&self.samples),
-            "eframe_cpu": stats(&self.cpu), "scopes": scopes});
+            "eframe_cpu": stats(&self.cpu), "scopes": scopes, "edited_settings": self.edited_settings});
         eprintln!("KETCHUP_BENCH {}", report);
         self.reports.push(report);
         if let Some(parent) = self.output.parent() {

@@ -9,7 +9,9 @@ The native benchmark renders the saved camera, an orbit without Wood Joinery,
 the identical orbit with Wood Joinery, and the saved camera again. Each stage
 has two seconds of warmup followed by the requested sampling duration. Reports
 contain actual frame intervals, CPU timings, and screenshots, not a CPU-only
-estimate of FPS. The supplied binary must already be built.
+estimate of FPS. With --edit-joinery, the final stage changes the clearance
+on the isolated project copy before warmup to exercise cache invalidation.
+The supplied binary must already be built.
 """
 
 import argparse
