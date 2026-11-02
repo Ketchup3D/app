@@ -50,32 +50,17 @@ jobs:
       - name: Build browser app
         run: trunk build --release --locked --dist dist/site/play --public-url ./
 
-      - name: Stage landing page and shared assets
-        run: |
-          cp site/index.html site/styles.css dist/site/
-          mkdir -p dist/site/assets
-          cp -R assets/branding assets/screenshots dist/site/assets/
-          test -f dist/site/index.html
-          test -f dist/site/play/index.html
-          test -n "$(find dist/site/play -name '*.wasm' -print -quit)"
-
-      - name: Set canonical and social sharing URLs
+      - name: Stage landing page and discovery files
         env:
           PAGES_BASE_URL: ${{ steps.pages.outputs.base_url }}
         run: |
-          python3 - <<'PY'
-          import html
-          import os
-          from pathlib import Path
-
-          base_url = os.environ["PAGES_BASE_URL"].rstrip("/") + "/"
-          if not base_url.startswith("https://"):
-              raise SystemExit("GitHub Pages must supply an HTTPS public URL")
-          page = Path("dist/site/index.html")
-          page.write_text(page.read_text().replace(
-              "https://ketchup3d.github.io/app/", html.escape(base_url, quote=True)
-          ))
-          PY
+          python3 -m unittest discover -s scripts -p 'test_stage_site.py'
+          python3 scripts/stage_site.py --base-url "$PAGES_BASE_URL"
+          test -f dist/site/index.html
+          test -f dist/site/sitemap.xml
+          test -f dist/site/llms.txt
+          test -f dist/site/play/index.html
+          test -n "$(find dist/site/play -name '*.wasm' -print -quit)"
 
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v5

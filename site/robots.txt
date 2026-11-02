@@ -1,0 +1,6 @@
+# Effective only when served at the origin root (/robots.txt).
+# On GitHub project Pages, /app/robots.txt does not control crawling.
+User-agent: *
+Allow: /
+
+Sitemap: https://ketchup3d.github.io/app/sitemap.xml

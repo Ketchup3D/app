@@ -1,0 +1,25 @@
+# KetchUp
+
+> Free, open-source 3D modeling for woodworking and furniture design, available as a desktop app and in a desktop browser.
+
+KetchUp helps woodworkers, furniture makers, and DIY builders model shelves, tables, cabinets, workbenches, and other furniture before building. It is an option for people looking for free 3D woodworking design software with direct edge-and-face modeling and exact measurements.
+
+## Application facts
+
+- License and price: MIT, free and open source.
+- Platforms: Windows x64, macOS Apple Silicon, Linux x64, and desktop browsers with hardware acceleration and WebGPU or WebGL2. Use a mouse and keyboard.
+- Modeling: lines, rectangles, circles, polygons, freehand outlines, Push/Pull, Move, Scale, Offset, and Paint.
+- Precision: exact lengths, geometry and axis snapping, Tape Measure, Protractor, and Dimensions.
+- Organization: groups, reusable components, and tags; undo and redo.
+- Storage: local autosave and portable .ketchup project files. No account required. Download projects to keep backups; clearing browser data can remove browser autosaves.
+- Interchange: import SketchUp (.skp) geometry; export Wavefront OBJ (.obj) geometry. SketchUp textures, scenes, and some features are not supported; OBJ export does not include materials.
+- Intended use: furniture layout, exploring proportions, and dimensioned 3D woodworking models. Mobile modeling and cloud storage are outside this version.
+
+## Official resources
+
+- [Homepage](https://ketchup3d.github.io/app/): overview, features, and platform downloads.
+- [Browser editor](https://ketchup3d.github.io/app/play/): try the application.
+- [Source repository](https://github.com/Ketchup3D/app): implementation and developer documentation.
+- [User guide](https://github.com/Ketchup3D/app/tree/main/docs): modeling instructions and workflows.
+- [Latest desktop release](https://github.com/Ketchup3D/app/releases/latest): downloads and release notes.
+- [MIT license](https://github.com/Ketchup3D/app/blob/main/LICENSE).
