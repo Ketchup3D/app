@@ -326,7 +326,9 @@ impl KetchupApp {
         // Shared assembly actions appear together in Edit, viewport and Outliner menus.
         let pair_editable = self.selected_fastener_pair(ui.ctx()).is_some();
         item(ui, "Wood Joinery", pair_editable, ContextAction::WoodJoinery);
-        item(ui, "Automatic Fasteners", pair_editable, ContextAction::AutomaticFasteners);
+        if fasteners::AVAILABLE {
+            item(ui, "Automatic Fasteners", pair_editable, ContextAction::AutomaticFasteners);
+        }
         ui.separator();
         item(ui, "Cut", editable, ContextAction::Cut);
         item(ui, "Copy", selected, ContextAction::Copy);

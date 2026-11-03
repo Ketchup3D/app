@@ -4,6 +4,9 @@ use ketchup_core::connections::{
     Connection, ConnectionOperation, FastenerKind, FastenerSettings, Pattern,
 };
 
+// Temporarily hide the feature without changing saved projects or preferences.
+pub(super) const AVAILABLE: bool = false;
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(super) struct Preferences {
@@ -417,7 +420,8 @@ impl KetchupApp {
         let view = self.doc.camera.view(dv(rect.size()));
         let screen = |p| view.project(p).map(|p| rect.min + pv(p));
         let mut draft = None;
-        if self.doc.display.fastener_preview
+        if AVAILABLE
+            && self.doc.display.fastener_preview
             && self.fasteners.open
             && self.history_preview.is_none()
         {
@@ -519,10 +523,10 @@ impl KetchupApp {
     }
     pub(super) fn fastener_handle_under_pointer(&self, _ctx: &egui::Context, _rect: Rect) -> bool {
         // While choosing a face, clicks must never select/move the underlying parts.
-        self.fastener_dialog.picking.is_some()
+        AVAILABLE && self.fastener_dialog.picking.is_some()
     }
     pub(super) fn fastener_face_handles(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        if !self.fasteners.open || self.history_preview.is_some() {
+        if !AVAILABLE || !self.fasteners.open || self.history_preview.is_some() {
             return;
         }
         let Some(target) = self.fastener_dialog.picking else {

@@ -3284,11 +3284,12 @@ impl KetchupApp {
 
     fn inspector_panel(&mut self, ui: &mut egui::Ui) {
         self.connection_sidebar_selection(ui.ctx());
+        let fasteners_open = fasteners::AVAILABLE && self.fasteners.open;
         let colors = Palette::for_ui(ui);
         if !self.inspector {
             return;
         }
-        if ui.available_width() >= 900. || self.fasteners.open || self.joinery.open {
+        if ui.available_width() >= 900. || fasteners_open || self.joinery.open {
             let panel = egui::Panel::right("inspector")
                 .default_size(self.inspector_width)
                 .size_range(260. ..=ui.available_width() * 0.5)
@@ -3296,7 +3297,7 @@ impl KetchupApp {
                 .frame(egui::Frame::new().fill(colors.paper))
                 .show(ui, |ui| {
                     ui.spacing_mut().scroll.bar_outer_margin = 0.;
-                    if self.fasteners.open {
+                    if fasteners_open {
                         self.automatic_fasteners_sidebar(ui);
                     } else if self.joinery.open {
                         self.wood_joinery_sidebar(ui);
@@ -3313,7 +3314,7 @@ impl KetchupApp {
                 .default_height(560.)
                 .default_pos(egui::pos2(90., 120.))
                 .show(ui.ctx(), |ui| {
-                    if self.fasteners.open {
+                    if fasteners_open {
                         self.automatic_fasteners_sidebar(ui);
                     } else if self.joinery.open {
                         self.wood_joinery_sidebar(ui);
