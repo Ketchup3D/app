@@ -893,8 +893,10 @@ color!(color_ground_picker, "ground_color");
 color!(color_horizon_picker, "horizon_color");
 
 #[test]
-fn appearance_is_visible_without_paint_and_paint_menu_precedes_sections() {
+fn appearance_is_visible_for_selection_without_paint_and_paint_menu_precedes_sections() {
     let mut h = Harness::new();
+    let face = modeling_rectangle(&mut h);
+    h.app.selected.insert(face);
     let output = h.frame(vec![], egui::Modifiers::NONE);
     assert_ne!(h.app.tool, Tool::Paint);
     sidebar_position(&h, &output, "Appearance");
@@ -909,6 +911,8 @@ fn appearance_is_visible_without_paint_and_paint_menu_precedes_sections() {
 #[test]
 fn appearance_color_changes_without_activating_paint() {
     let mut h = Harness::new();
+    let face = modeling_rectangle(&mut h);
+    h.app.selected.insert(face);
     let tool = h.app.tool;
     assert_ne!(tool, Tool::Paint);
     let output = h.frame(vec![], egui::Modifiers::NONE);

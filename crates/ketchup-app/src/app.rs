@@ -3236,6 +3236,9 @@ impl KetchupApp {
                 Self::property_row(ui, "Volume", &self.doc.display.units.format_volume(volume));
             }
         }
+        if self.selected.is_empty() {
+            return;
+        }
         ui.add_space(8.);
         sidebar::inspector_section(ui, "Appearance", "entity_appearance", true, |ui| {
             self.paint_color_controls(ui, false);

@@ -312,7 +312,6 @@ impl KetchupApp {
                 .small()
                 .color(Palette::for_ui(ui).muted),
         );
-        let swatch_width = (ui.available_width() - ui.spacing().item_spacing.x * 5.) / 6.;
         let presets = [
             // Light hues, from warm to cool.
             [245, 182, 186],
@@ -343,19 +342,26 @@ impl KetchupApp {
             [148, 101, 65],
             [78, 84, 81],
         ];
-        for row in presets.chunks(6) {
-            ui.horizontal(|ui| {
-                for &color in row {
-                    let rgb = Color32::from_rgb(color[0], color[1], color[2]);
-                    if ui
-                        .add_sized([swatch_width, 24.], egui::Button::new(" ").fill(rgb))
-                        .on_hover_text(format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2]))
-                        .clicked()
-                    {
-                        self.paint_color = color;
-                        if activate_paint {
-                            self.set_tool(Tool::Paint);
-                        }
+        use crate::inspector_table::{Column, InspectorTable};
+        let mut table = InspectorTable::new(ui.available_width(), [Column::flex(1.); 6]);
+        for (row_index, row) in presets.chunks(6).enumerate() {
+            if row_index > 0 {
+                ui.add_space(4.);
+            }
+            table.row(ui, ("paint_preset_row", row_index), |column, cell| {
+                let color = row[column];
+                let rgb = Color32::from_rgb(color[0], color[1], color[2]);
+                // Let narrow cells size the swatch instead of the default button minimum.
+                cell.spacing_mut().interact_size.x = cell.available_width();
+                cell.spacing_mut().button_padding.x = 0.;
+                if cell
+                    .add(egui::Button::new("").fill(rgb))
+                    .on_hover_text(format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2]))
+                    .clicked()
+                {
+                    self.paint_color = color;
+                    if activate_paint {
+                        self.set_tool(Tool::Paint);
                     }
                 }
             });
