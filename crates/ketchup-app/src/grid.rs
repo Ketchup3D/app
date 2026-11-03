@@ -268,6 +268,138 @@ pub(super) fn snap(mut snap: Snap, spacing: f64, plane: Option<DVec3>) -> Snap {
     snap
 }
 
+/// Recover a moving coordinate even when the inference label describes the
+/// geometry under it. An axis and a surface can be active at the same time.
+pub(super) fn movement_axis(
+    point: DVec3,
+    start: Option<DVec3>,
+    constraint: Option<AxisConstraint>,
+    axes: bool,
+) -> Option<Axis> {
+    if let Some(AxisConstraint::Axis(axis)) = constraint {
+        return Some(axis);
+    }
+    if !axes {
+        return None;
+    }
+    start.into_iter().chain([DVec3::ZERO]).find_map(|origin| {
+        let delta = point - origin;
+        (delta.length() > 1e-7)
+            .then(|| {
+                [Axis::X, Axis::Y, Axis::Z]
+                    .into_iter()
+                    .find(|axis| delta.cross(axis.vector()).length() < 1e-7)
+            })
+            .flatten()
+    })
+}
+
+fn snap_line(point: DVec3, direction: DVec3, spacing: f64) -> DVec3 {
+    // Use grid crossings on the dominant world coordinate. Rounding all three
+    // coordinates separately would move the point off a sloping edge.
+    let coordinate = (0..3)
+        .max_by(|&a, &b| direction[a].abs().total_cmp(&direction[b].abs()))
+        .unwrap();
+    let value = point[coordinate];
+    point + direction * (((value / spacing).round() * spacing - value) / direction[coordinate])
+}
+
+/// Quantize only the freedom left by the active axis, plane and geometry.
+/// Exact targets and fully constrained intersections keep their coordinates.
+pub(super) fn snap_with_geometry(
+    target: Snap,
+    spacing: f64,
+    plane: Option<DVec3>,
+    axis: Option<Axis>,
+    model: &ketchup_core::Model,
+    excluded: Option<&BTreeSet<u64>>,
+) -> Snap {
+    let allowed = |id| !excluded.is_some_and(|ids| ids.contains(&id)) && !model.is_hidden(id);
+    let line_allowed = |direction: DVec3| {
+        plane.is_none_or(|normal| normal.dot(direction).abs() < 1e-7)
+            && axis.is_none_or(|axis| direction.cross(axis.vector()).length() < 1e-7)
+    };
+    let point = match target.kind {
+        Inference::OnEdge => model.edges.values().find_map(|edge| {
+            let (a, b) = model.points(edge);
+            let delta = b - a;
+            let t = (target.point - a).dot(delta) / delta.length_squared();
+            if !(0.0..=1.0).contains(&t)
+                || (a + delta * t).distance(target.point) > 1e-6
+                || !allowed(edge.id)
+            {
+                return None;
+            }
+            let direction = delta.normalize();
+            if !line_allowed(direction) {
+                return Some(target.point);
+            }
+            let point = snap_line(target.point, direction, spacing);
+            let t = (point - a).dot(delta) / delta.length_squared();
+            Some(if (0.0..=1.0).contains(&t) {
+                point
+            } else {
+                target.point
+            })
+        }),
+        Inference::OnFace => model.faces.values().find_map(|face| {
+            if !model.face_contains(face, target.point, true) || !allowed(face.id) {
+                return None;
+            }
+            let normal = ketchup_core::faces::plane(model, &face.vertices)?.normal;
+            let point = if let Some(axis) = axis {
+                let direction = axis.vector();
+                if normal.dot(direction).abs() >= 1e-7 || !line_allowed(direction) {
+                    return Some(target.point);
+                }
+                snap_line(target.point, direction, spacing)
+            } else if let Some(direction) = plane
+                .map(|plane| normal.cross(plane))
+                .filter(|direction| direction.length() > 1e-7)
+                .and_then(DVec3::try_normalize)
+            {
+                snap_line(target.point, direction, spacing)
+            } else {
+                snap(
+                    Snap {
+                        kind: Inference::Plane,
+                        ..target
+                    },
+                    spacing,
+                    Some(normal),
+                )
+                .point
+            };
+            Some(if model.face_contains(face, point, true) {
+                point
+            } else {
+                target.point
+            })
+        }),
+        Inference::Plane if axis.is_some() => Some(
+            snap(
+                Snap {
+                    kind: Inference::Axis(axis.unwrap()),
+                    ..target
+                },
+                spacing,
+                plane,
+            )
+            .point,
+        ),
+        Inference::Axis(inferred) | Inference::OnAxis(inferred)
+            if axis.is_some_and(|axis| axis != inferred) =>
+        {
+            Some(target.point)
+        }
+        _ => Some(snap(target, spacing, plane).point),
+    };
+    Snap {
+        point: point.unwrap_or(target.point),
+        ..target
+    }
+}
+
 impl KetchupApp {
     pub(super) fn apply_grid_snap(&mut self) {
         if self.snap_to_grid {
@@ -275,12 +407,28 @@ impl KetchupApp {
                 .drawing
                 .as_ref()
                 .map(|drawing| drawing.normal)
+                .or_else(|| {
+                    (self.tool != Tool::Dimensions)
+                        .then(|| self.plane_lock().map(Axis::vector))
+                        .flatten()
+                })
                 .or_else(|| self.measurement_plane().map(|(_, normal)| normal));
-            self.snap = self.snap.map(|point| {
-                snap(
-                    point,
+            self.snap = self.snap.map(|target| {
+                let start = self
+                    .line_start
+                    .or_else(|| self.drawing.as_ref().map(|drawing| drawing.origin))
+                    .or_else(|| self.measurement.as_ref()?.points.first().copied());
+                let constraint =
+                    (start.is_some() && self.drawing.is_none() && self.tool != Tool::Dimensions)
+                        .then(|| self.axis_constraint())
+                        .flatten();
+                snap_with_geometry(
+                    target,
                     configured_spacing(&self.doc.camera, &self.doc.display),
                     plane,
+                    movement_axis(target.point, start, constraint, self.doc.snap_to_axes),
+                    &self.doc.model,
+                    None,
                 )
             });
         }

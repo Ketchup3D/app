@@ -114,6 +114,7 @@ struct ToolPreferences {
     polygon_sides: usize,
     move_copy: bool,
     axis_lock: Option<Axis>,
+    second_axis_lock: Option<Axis>,
 }
 
 impl Default for ToolPreferences {
@@ -126,6 +127,7 @@ impl Default for ToolPreferences {
             polygon_sides: 6,
             move_copy: false,
             axis_lock: None,
+            second_axis_lock: None,
         }
     }
 }
@@ -140,6 +142,7 @@ impl ToolPreferences {
             polygon_sides: app.polygon_sides,
             move_copy: app.move_copy,
             axis_lock: app.lock,
+            second_axis_lock: app.second_lock,
         }
     }
 
@@ -166,12 +169,16 @@ impl ToolPreferences {
         app.set_tool(self.active);
         app.move_copy = self.move_copy;
         app.lock = self.axis_lock;
+        app.second_lock = self.second_axis_lock
+            .filter(|axis| self.axis_lock.is_some_and(|first| first != *axis));
     }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct SnappingPreferences {
+    // Read the former master switch when migrating older saved preferences.
+    // New captures store true and express the effective choices in the targets.
     geometry: bool,
     edges: bool,
     faces: bool,
@@ -466,12 +473,12 @@ impl KetchupApp {
         };
         self.project.cutting_plan_selection_preference = preferences.cutting_plan.selection;
         if let Some(snapping) = &preferences.snapping {
-            self.doc.snap_to_geometry = snapping.geometry;
+            self.snap_to_edge = snapping.geometry && snapping.edges;
+            self.snap_to_face = snapping.geometry && snapping.faces;
+            self.snap_to_face_center = snapping.geometry && snapping.face_centers;
             self.doc.snap_to_axes = snapping.axes;
         }
-        self.snap_to_edge = preferences.snapping.as_ref().is_none_or(|s| s.edges);
-        self.snap_to_face = preferences.snapping.as_ref().is_none_or(|s| s.faces);
-        self.snap_to_face_center = preferences.snapping.as_ref().is_none_or(|s| s.face_centers);
+        self.sync_geometry_snapping();
         self.snap_to_grid = preferences
             .snapping
             .as_ref()
@@ -538,10 +545,10 @@ impl KetchupApp {
             paint_target: self.paint_target,
             tools: ToolPreferences::capture(self),
             snapping: Some(SnappingPreferences {
-                geometry: self.doc.snap_to_geometry,
-                edges: self.snap_to_edge,
-                faces: self.snap_to_face,
-                face_centers: self.snap_to_face_center,
+                geometry: true,
+                edges: self.doc.snap_to_geometry && self.snap_to_edge,
+                faces: self.doc.snap_to_geometry && self.snap_to_face,
+                face_centers: self.doc.snap_to_geometry && self.snap_to_face_center,
                 axes: self.doc.snap_to_axes,
                 grid: self.snap_to_grid,
             }),
@@ -1740,14 +1747,52 @@ mod preference_tests {
     }
 
     #[test]
+    fn two_axis_locks_save_without_model_edits_and_restore_older_preferences() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.set_tool(Tool::Line);
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        for axis in [Axis::X, Axis::Y, Axis::X, Axis::Y] {
+            app.toggle_axis_lock(axis, &ctx);
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!((restored.lock, restored.second_lock), (app.lock, app.second_lock));
+        }
+        let old: ToolPreferences = serde_json::from_str(r#"{"axis_lock":"Y"}"#).unwrap();
+        old.restore(&mut app);
+        assert_eq!((app.lock, app.second_lock), (Some(Axis::Y), None));
+        let defaults: ToolPreferences = serde_json::from_str("{}").unwrap();
+        defaults.restore(&mut app);
+        assert_eq!((app.lock, app.second_lock), (None, None));
+        for invalid in [
+            r#"{"axis_lock":"X","second_axis_lock":"X"}"#,
+            r#"{"second_axis_lock":"Y"}"#,
+        ] {
+            let prefs: ToolPreferences = serde_json::from_str(invalid).unwrap();
+            prefs.restore(&mut app);
+            assert!(app.second_lock.is_none());
+        }
+    }
+
+    #[test]
     fn each_additional_option_saves_independently_without_a_model_edit() {
-        let options: [(&str, fn(&mut KetchupApp)); 14] = [
-            ("object snapping", |app| app.doc.snap_to_geometry = false),
+        let options: [(&str, fn(&mut KetchupApp)); 15] = [
+            ("face center snapping", |app| app.snap_to_face_center = false),
             ("axis snapping", |app| app.doc.snap_to_axes = false),
             ("edge snapping", |app| app.snap_to_edge = false),
             ("face snapping", |app| app.snap_to_face = false),
             ("grid snapping", |app| app.snap_to_grid = true),
             ("axis lock", |app| app.lock = Some(Axis::Y)),
+            ("push/pull axis lock", |app| {
+                app.set_tool(Tool::PushPull);
+                app.lock = Some(Axis::X);
+            }),
             ("shortcut filter", |app| app.shortcut_filter = "Move".into()),
             ("stock rotation", |app| {
                 app.project.cutting_plan_layout.allow_rotation = false
@@ -1817,9 +1862,66 @@ mod preference_tests {
             assert!(app.snap_to_face);
             app.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
             assert!(!app.snap_to_grid);
-            assert!(app.snap_to_edge);
-            assert!(app.snap_to_face);
+            let geometry = preferences.snapping.as_ref().is_none_or(|s| s.geometry);
+            assert_eq!(app.snap_to_edge, geometry);
+            assert_eq!(app.snap_to_face, geometry);
+            assert_eq!(app.snap_to_face_center, geometry);
+            assert_eq!(app.doc.snap_to_geometry, geometry);
         }
+    }
+
+    #[test]
+    fn geometry_targets_restore_every_combination_without_a_model_edit() {
+        for edges in [false, true] {
+            for faces in [false, true] {
+                for centers in [false, true] {
+                    let ctx = egui::Context::default();
+                    let mut storage = SavedPreferences::default();
+                    let mut app = KetchupApp::with_document(Document::default(), None, true);
+                    app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+                    storage.flushed = false;
+                    app.snap_to_edge = edges;
+                    app.snap_to_face = faces;
+                    app.snap_to_face_center = centers;
+                    app.sync_geometry_snapping();
+                    app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+                    assert_eq!(storage.flushed, !(edges && faces && centers));
+                    assert!(!app.project.modified);
+                    assert!(app.dirty_since.is_none());
+                    let mut restored = KetchupApp::with_document(Document::default(), None, true);
+                    restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+                    assert_eq!(restored.snap_to_edge, edges);
+                    assert_eq!(restored.snap_to_face, faces);
+                    assert_eq!(restored.snap_to_face_center, centers);
+                    assert_eq!(restored.doc.snap_to_geometry, edges || faces || centers);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_master_off_migrates_to_targets_that_can_be_enabled_independently() {
+        let ctx = egui::Context::default();
+        let preferences: InspectorPreferences = serde_json::from_str(
+            r#"{"snapping":{"geometry":false,"edges":true,"faces":true,"face_centers":true}}"#,
+        )
+        .unwrap();
+        let mut storage = SavedPreferences::default();
+        eframe::set_value(&mut storage, PREFERENCE_KEY, &preferences);
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.restore_inspector_preferences(&ctx, Some(&storage));
+        assert!(!app.snap_to_edge);
+        assert!(!app.snap_to_face);
+        assert!(!app.snap_to_face_center);
+        app.snap_to_face_center = true;
+        app.sync_geometry_snapping();
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert!(!restored.snap_to_edge);
+        assert!(!restored.snap_to_face);
+        assert!(restored.snap_to_face_center);
+        assert!(restored.doc.snap_to_geometry);
     }
 
     #[test]

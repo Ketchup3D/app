@@ -62,7 +62,7 @@ impl KetchupApp {
         let lock = if self.tool == Tool::Dimensions {
             None
         } else {
-            self.lock
+            self.single_axis_lock()
         };
         if !(self.tool.is_drawing() || self.tool.is_measuring())
             || self.paste_preview.is_some()
@@ -77,14 +77,14 @@ impl KetchupApp {
         if self.tool == Tool::Line
             && let Some(start) = self.line_start
         {
-            let inference = ketchup_core::inference::infer_axis_alignment_with_face_query(
+            let inference = ketchup_core::inference::infer_axis_alignment_with_constraint(
                 &self.doc.model,
                 &self.doc.camera,
                 dv(self.viewport.size()),
                 dv(pos - self.viewport.min),
                 start,
-                lock,
-                self.doc.snap_to_geometry,
+                self.axis_constraint(),
+                self.doc.snap_to_geometry && self.snap_to_edge,
                 base,
                 Some(
                     &self
@@ -97,14 +97,18 @@ impl KetchupApp {
                 self.drawing_axis_guides = inference.guides;
             }
         }
-        if !self.doc.snap_to_geometry {
+        if !self.doc.snap_to_geometry || !self.snap_to_edge {
             self.drawing_reference = None;
             return;
         }
         let geometry = |snap: Snap| {
             matches!(
                 snap.kind,
-                Inference::Endpoint | Inference::Midpoint | Inference::FaceCenter | Inference::Origin | Inference::OnEdge
+                Inference::Endpoint
+                    | Inference::Midpoint
+                    | Inference::FaceCenter
+                    | Inference::Origin
+                    | Inference::OnEdge
             )
         };
         // A lock or drawing plane may reject the hovered point as a target;
@@ -119,6 +123,22 @@ impl KetchupApp {
         } else {
             None
         };
+        // A hovered edge still has a free coordinate. Quantize that coordinate
+        // before using it as a reference for a locked-axis projection.
+        let source = source.map(|source| {
+            if self.snap_to_grid {
+                grid::snap_with_geometry(
+                    source,
+                    grid::configured_spacing(&self.doc.camera, &self.doc.display),
+                    None,
+                    None,
+                    &self.doc.model,
+                    None,
+                )
+            } else {
+                source
+            }
+        });
         if let Some(source) = source {
             let existing = self.drawing_reference.filter(|r| {
                 r.point.distance(source.point) < 1e-7
@@ -183,6 +203,11 @@ impl KetchupApp {
             .drawing
             .as_ref()
             .map(|d| (d.origin, d.normal))
+            .or_else(|| {
+                (self.tool != Tool::Dimensions)
+                    .then(|| start.zip(self.plane_lock().map(Axis::vector)))
+                    .flatten()
+            })
             .or_else(|| self.measurement_plane())
             .or_else(|| surface.map(|(id, _, _)| (base.point, self.face_cache.get(id).normal)));
         if let Some((start, axis)) = start.zip(lock) {
@@ -246,7 +271,7 @@ impl KetchupApp {
             .or_else(|| {
                 // An unlocked shape can turn its working plane to follow a
                 // reference axis outside its current plane as well.
-                (lock.is_none() && self.drawing.is_some())
+                (self.lock.is_none() && self.drawing.is_some())
                     .then(|| infer(None, None))
                     .flatten()
             });

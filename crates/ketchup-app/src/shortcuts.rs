@@ -152,8 +152,9 @@ impl KetchupApp {
                 "Precision & inference",
                 &[
                     ("Lock X / Y / Z axis", "→ / ← / ↑"),
+                    ("Lock a plane", "Toggle two axis locks"),
                     ("Lock shape plane normal X / Y / Z", "→ / ← / ↑"),
-                    ("Clear axis lock", "↓"),
+                    ("Clear all axis locks", "↓"),
                     ("Set length or radius", "Value + Enter"),
                     ("Set rectangle size", "Width,height + Enter"),
                     ("Acquire reference axes", "Hover geometry"),

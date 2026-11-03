@@ -108,7 +108,10 @@ fn text_uses_the_object_name_even_when_geometry_snapping_is_disabled() {
         .model
         .make_object(&BTreeSet::from([edge]), false, "Oak post")
         .unwrap();
-    h.app.doc.snap_to_geometry = false;
+    h.app.snap_to_edge = false;
+    h.app.snap_to_face = false;
+    h.app.snap_to_face_center = false;
+    h.app.sync_geometry_snapping();
     start_label(&mut h);
     assert_eq!(h.app.text_editor.as_ref().unwrap().text, "Oak post");
     h.key(Key::Enter);

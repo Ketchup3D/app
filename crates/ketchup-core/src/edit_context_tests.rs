@@ -98,6 +98,54 @@ fn component_geometry_edits_propagate_with_each_instances_position_and_scale() {
 }
 
 #[test]
+fn constrained_instance_scale_survives_nested_edits_serialization_and_copying() {
+    let mut model = Model::default();
+    rectangle(&mut model);
+    object(&mut model, false, "Nested group");
+    let original = object(&mut model, true, "Panel");
+    let copy = model.copy_entities(&BTreeSet::from([original]));
+    let peer = *model.paste_entities(&copy, DVec3::X * 10.).first().unwrap();
+    let selected = BTreeSet::from([peer]);
+    let center = model.selection_center(&selected).unwrap();
+    model
+        .scale_selection_constrained(
+            &selected,
+            center,
+            2.,
+            Some(inference::AxisConstraint::Axis(Axis::X)),
+        )
+        .unwrap();
+    model.validate().unwrap();
+    model = serde_json::from_str(&serde_json::to_string(&model).unwrap()).unwrap();
+    assert!(model.enter_object(original));
+    let group = child_object(&model, original);
+    assert!(model.enter_object(group));
+    model.push_pull(first_face(&model, group), 1.).unwrap();
+    let (lo, hi) = model.object_contents(peer).unwrap().bounds().unwrap();
+    assert!(lo.distance(DVec3::new(9., 0., 0.)) < 1e-7);
+    assert!(hi.distance(DVec3::new(13., 2., 1.)) < 1e-7);
+
+    // Editing the stretched peer uses the inverse per-axis transform.
+    model.edit_context = Some(peer);
+    let group = child_object(&model, peer);
+    assert!(model.enter_object(group));
+    model
+        .move_selection(&model.selectable_entities(), DVec3::X * 2.)
+        .unwrap();
+    let (lo, hi) = model.object_contents(original).unwrap().bounds().unwrap();
+    assert!(lo.distance(DVec3::X) < 1e-7);
+    assert!(hi.distance(DVec3::new(3., 2., 1.)) < 1e-7);
+
+    model.edit_context = None;
+    let copy = model.copy_entities(&BTreeSet::from([peer]));
+    let pasted = *model.paste_entities(&copy, DVec3::Y * 5.).first().unwrap();
+    let (lo, hi) = model.object_contents(pasted).unwrap().bounds().unwrap();
+    assert!(lo.distance(DVec3::new(11., 5., 0.)) < 1e-7);
+    assert!(hi.distance(DVec3::new(15., 7., 1.)) < 1e-7);
+    model.validate().unwrap();
+}
+
+#[test]
 fn editing_group_inside_component_updates_other_instances_of_its_container() {
     let mut model = Model::default();
     rectangle(&mut model);

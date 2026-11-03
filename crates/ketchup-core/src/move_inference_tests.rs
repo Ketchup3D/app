@@ -86,6 +86,46 @@ fn move_keeps_axis_locks_and_both_snap_settings() {
 }
 
 #[test]
+fn cached_move_axis_references_follow_the_edge_toggle() {
+    use crate::inference::{MoveSnapCache, SnapTargets};
+    let target = DVec3::new(3., 4., 2.);
+    let start = DVec3::new(-4., -3., 2.);
+    let camera = Camera::default();
+    let size = DVec2::new(1100., 800.);
+    let mut model = Model::default();
+    for axis in [Axis::X, Axis::Y] {
+        reference(&mut model, target - axis.vector() * 3.);
+    }
+    let cursor = camera.project(target, size).unwrap() + DVec2::new(2., -2.);
+    let mut cache = MoveSnapCache::new(&model);
+    for edges in [true, false, true] {
+        let inference = cache
+            .infer_with_targets(
+                &camera,
+                size,
+                cursor,
+                start,
+                None,
+                true,
+                true,
+                SnapTargets {
+                    edges,
+                    faces: true,
+                    face_centers: true,
+                },
+            )
+            .unwrap();
+        if edges {
+            assert_eq!(inference.snap.kind, Inference::Aligned);
+            assert!(inference.snap.point.distance(target) < 1e-7);
+        } else {
+            assert!(inference.guides.is_empty());
+            assert!(inference.snap.point.distance(target) > 1e-4);
+        }
+    }
+}
+
+#[test]
 fn hidden_references_and_skew_projected_guides_do_not_combine() {
     let camera = Camera::default();
     let size = DVec2::new(1100., 800.);

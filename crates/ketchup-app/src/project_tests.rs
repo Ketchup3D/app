@@ -231,13 +231,46 @@ fn opening_project_replaces_state_and_resets_history() {
     );
     assert_eq!(app.doc.model, model);
     assert_eq!(app.doc.name, "opened");
-    assert!(!app.doc.snap_to_geometry);
+    assert!(app.doc.snap_to_geometry);
+    assert!(app.snap_to_edge);
+    assert!(app.snap_to_face);
+    assert!(app.snap_to_face_center);
     assert_eq!(app.project.path, Some(path));
     assert!(!app.project.modified);
     assert!(app.doc.history.undo_label().is_none());
     assert!(app.selected.is_empty());
     assert!(app.line_start.is_none());
     assert_eq!(app.tool, Tool::Select);
+}
+
+#[test]
+fn opening_legacy_projects_and_creating_projects_preserve_geometry_target_preferences() {
+    let ctx = egui::Context::default();
+    for (edges, faces, centers) in [
+        (false, true, false),
+        (false, false, true),
+        (false, false, false),
+    ] {
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.snap_to_edge = edges;
+        app.snap_to_face = faces;
+        app.snap_to_face_center = centers;
+        app.sync_geometry_snapping();
+        for legacy_geometry in [false, true] {
+            let doc = Document {
+                snap_to_geometry: legacy_geometry,
+                ..Default::default()
+            };
+            app.replace_project(doc, None, &ctx);
+            assert_eq!(app.doc.snap_to_geometry, edges || faces || centers);
+            app.new_model(&ctx);
+            assert_eq!(app.doc.snap_to_geometry, edges || faces || centers);
+            assert_eq!(app.snap_to_edge, edges);
+            assert_eq!(app.snap_to_face, faces);
+            assert_eq!(app.snap_to_face_center, centers);
+            assert!(!app.project.modified);
+        }
+    }
 }
 
 #[test]

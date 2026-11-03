@@ -2,6 +2,15 @@ use super::*;
 use crate::test_ui::ContextExt as _;
 use eframe::App;
 
+#[path = "axis_lock_tests.rs"]
+mod axis_locks;
+#[path = "scale_tool_tests.rs"]
+mod scale_tool;
+#[path = "offset_tool_tests.rs"]
+mod offset_tool;
+#[path = "modeling_anchor_tests.rs"]
+mod modeling_anchors;
+
 #[path = "compass_tests.rs"]
 mod compass;
 #[path = "context_menu_tests.rs"]
@@ -18,6 +27,8 @@ mod grid_snapping;
 mod outliner_drag;
 #[path = "precision_tests.rs"]
 mod precision_input;
+#[path = "self_snap_tests.rs"]
+mod self_snapping;
 #[path = "release_notes_tests.rs"]
 mod release_notes;
 #[path = "rendering_tests.rs"]
@@ -1433,7 +1444,7 @@ fn closing_a_shape_against_existing_geometry_stops_drawing_like_escape() {
 }
 
 #[test]
-fn snapping_menu_preserves_independent_options_and_controls_geometry_magnet() {
+fn snapping_menu_has_independent_targets_without_a_master_switch() {
     let mut h = Harness::new();
     assert!(h.app.doc.snap_to_geometry);
     assert!(h.app.doc.snap_to_axes);
@@ -1441,13 +1452,29 @@ fn snapping_menu_preserves_independent_options_and_controls_geometry_magnet() {
     let snapping = dropdown_position(&output);
     h.click(snapping);
     let menu = h.frame(vec![], egui::Modifiers::NONE);
-    let checkbox = text_position(&menu, "Snap to objects");
-    h.click(checkbox);
+    fn has_master_switch(shape: &egui::Shape) -> bool {
+        match shape {
+            egui::Shape::Text(text) => text.galley.job.text == "Snap to objects",
+            egui::Shape::Vec(shapes) => shapes.iter().any(has_master_switch),
+            _ => false,
+        }
+    }
     assert!(
-        !h.app.doc.snap_to_geometry,
-        "Snap to objects checkbox should toggle off at {checkbox:?}"
+        !menu
+            .shapes
+            .iter()
+            .any(|shape| has_master_switch(&shape.shape))
     );
+    for label in ["Snap to edge", "Snap to face", "Snap to face center"] {
+        let menu = h.frame(vec![], egui::Modifiers::NONE);
+        h.click(text_position(&menu, label));
+    }
+    assert!(!h.app.doc.snap_to_geometry);
+    assert!(!h.app.snap_to_edge);
+    assert!(!h.app.snap_to_face);
+    assert!(!h.app.snap_to_face_center);
     assert!(h.app.doc.snap_to_axes);
+    assert!(!h.app.project.modified);
     let menu = h.frame(vec![], egui::Modifiers::NONE);
     let axes = text_position(&menu, "Snap to axes");
     h.click(axes);
@@ -1470,8 +1497,11 @@ fn snapping_menu_preserves_independent_options_and_controls_geometry_magnet() {
     assert_eq!(h.app.snap.unwrap().kind, Inference::Plane);
     h.click(snapping);
     let menu = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(text_position(&menu, "Snap to objects"));
+    h.click(text_position(&menu, "Snap to edge"));
     assert!(h.app.doc.snap_to_geometry);
+    assert!(h.app.snap_to_edge);
+    assert!(!h.app.snap_to_face);
+    assert!(!h.app.snap_to_face_center);
     h.key(Key::Escape);
     h.frame(
         vec![egui::Event::PointerMoved(pointer)],
@@ -2700,7 +2730,7 @@ fn push_pull_selected_single_face_group_without_opening_it() {
     ).unwrap();
     h.app.selected = BTreeSet::from([group]);
     h.key(Key::P);
-    assert_eq!(h.app.selected_push_pull_face(), Some(face));
+    assert_eq!(h.app.selected_modeling_face(), Some(face));
     let before = h.app.doc.model.clone();
     let at = h.at(DVec3::new(2., 2., 0.));
     h.click(at);
@@ -2718,7 +2748,7 @@ fn push_pull_selected_single_face_group_without_opening_it() {
     assert_eq!(h.app.doc.model.object_contents(group).unwrap().faces.len(), 6);
     assert_eq!(h.app.doc.model.edit_context, None);
     assert_eq!(h.app.selected, BTreeSet::from([group]));
-    assert_eq!(h.app.selected_push_pull_face(), None, "Solid groups need explicit face editing");
+    assert_eq!(h.app.selected_modeling_face(), None, "Solid groups need explicit face editing");
     h.app.doc.model.validate().unwrap();
     h.app.undo(&h.ctx, false);
     assert_eq!(h.app.doc.model, before);
@@ -2754,6 +2784,138 @@ fn push_pull_pointer_preview_numeric_commit_cancel_and_undo() {
     assert!(h.app.modeling.is_none());
     assert_eq!(h.app.doc.model, original);
     assert!(h.app.doc.history.undo_label().is_none());
+}
+
+#[test]
+fn push_pull_locked_axes_constrain_pointer_previews_and_typed_commits() {
+    for (axis, key, input, distance) in [
+        (Axis::X, Key::ArrowRight, "-2m", -2.),
+        (Axis::Y, Key::ArrowLeft, "2m", 2.),
+        (Axis::Z, Key::ArrowUp, "2m", 2.),
+    ] {
+        let mut h = Harness::new();
+        let points = [
+            DVec3::new(1., 1., 3.),
+            DVec3::new(4., 1., 0.),
+            DVec3::new(4., 4., -3.),
+            DVec3::new(1., 4., 0.),
+        ];
+        for i in 0..4 {
+            h.app
+                .doc
+                .model
+                .add_edge(points[i], points[(i + 1) % 4])
+                .unwrap();
+        }
+        h.app.doc.snap_to_geometry = false;
+        h.app.doc.snap_to_axes = false;
+        let before = h.app.doc.model.clone();
+        h.key(Key::P);
+        h.key(key);
+        assert_eq!(h.app.lock, Some(axis));
+        h.click(h.at(DVec3::new(2.5, 2.5, 0.)));
+        let anchor = h.app.modeling.as_ref().unwrap().anchor;
+        h.frame(
+            vec![egui::Event::PointerMoved(
+                h.at(anchor + axis.vector() * 1.5),
+            )],
+            egui::Modifiers::NONE,
+        );
+        let edit = h.app.modeling.as_ref().unwrap();
+        assert_eq!(edit.direction, axis.vector());
+        assert!((edit.value - 1.5).abs() < 1e-5);
+        let check = |model: &Model, delta: DVec3| {
+            let cap = model
+                .faces
+                .values()
+                .find(|face| {
+                    !before.faces.contains_key(&face.id)
+                        && face.vertices.iter().all(|id| {
+                            points.iter().any(|point| {
+                                model.vertices[id].position.distance(*point + delta) < 1e-5
+                            })
+                        })
+                })
+                .unwrap();
+            assert_eq!(cap.vertices.len(), 4);
+            model.validate().unwrap();
+        };
+        check(edit.preview.as_ref().unwrap(), axis.vector() * 1.5);
+        assert_eq!(h.app.doc.model, before);
+        // Clicking commits the same directional extrusion as the preview.
+        h.click(h.at(anchor + axis.vector() * 1.5));
+        check(&h.app.doc.model, axis.vector() * 1.5);
+        h.app.undo(&h.ctx, false);
+        assert_eq!(h.app.doc.model, before);
+        h.click(h.at(DVec3::new(2.5, 2.5, 0.)));
+        h.app.length_input = input.into();
+        h.app.update_modeling(h.at(anchor + axis.vector()));
+        check(
+            h.app.modeling.as_ref().unwrap().preview.as_ref().unwrap(),
+            axis.vector() * distance,
+        );
+        h.key(Key::Enter);
+        assert!(h.app.modeling.is_none());
+        check(&h.app.doc.model, axis.vector() * distance);
+        assert_eq!(h.app.doc.history.undo_label(), Some("Push/Pull"));
+        h.app.undo(&h.ctx, false);
+        assert_eq!(h.app.doc.model, before);
+    }
+}
+
+#[test]
+fn push_pull_switches_and_clears_axis_locks_during_a_pull() {
+    let mut h = Harness::new();
+    modeling_rectangle(&mut h);
+    h.app.doc.snap_to_geometry = false;
+    h.app.doc.snap_to_axes = false;
+    h.key(Key::P);
+    h.click(h.at(DVec3::new(2., 2., 0.)));
+    let normal_direction = h.app.modeling.as_ref().unwrap().direction;
+    let before = h.app.doc.model.clone();
+    h.app.length_input = "2m".into();
+    for (key, axis) in [(Key::ArrowRight, Axis::X), (Key::ArrowLeft, Axis::Y)] {
+        h.key(Key::ArrowDown);
+        h.key(key);
+        let edit = h.app.modeling.as_ref().unwrap();
+        assert_eq!(h.app.lock, Some(axis));
+        assert_eq!(edit.direction, axis.vector());
+        assert!(
+            edit.preview.is_none(),
+            "A parallel lock must not extrude along the normal"
+        );
+        assert!(edit.error.unwrap().contains("parallel"));
+        h.key(Key::Enter);
+        assert!(h.app.modeling.is_some());
+        assert_eq!(h.app.doc.model, before);
+        assert!(h.app.doc.history.undo_label().is_none());
+    }
+    h.key(Key::ArrowDown);
+    h.key(Key::ArrowUp);
+    assert_eq!(h.app.modeling.as_ref().unwrap().direction, DVec3::Z);
+    assert!(h.app.modeling.as_ref().unwrap().preview.is_some());
+    h.key(Key::ArrowUp);
+    assert_eq!(h.app.lock, None);
+    assert_eq!(h.app.modeling.as_ref().unwrap().direction, normal_direction);
+    h.key(Key::ArrowRight);
+    h.key(Key::ArrowDown);
+    assert_eq!(h.app.lock, None);
+    assert_eq!(h.app.modeling.as_ref().unwrap().direction, normal_direction);
+    // Toolbar locks must refresh even while the pointer is outside the viewport.
+    h.frame(
+        vec![egui::Event::PointerMoved(egui::pos2(2., 2.))],
+        egui::Modifiers::NONE,
+    );
+    h.app.set_axis_lock(Some(Axis::X), &h.ctx);
+    assert_eq!(h.app.modeling.as_ref().unwrap().direction, DVec3::X);
+    assert!(h.app.modeling.as_ref().unwrap().preview.is_none());
+    h.key(Key::Enter);
+    assert_eq!(h.app.doc.model, before);
+    assert!(h.app.modeling.is_some());
+    h.app.set_axis_lock(Some(Axis::Z), &h.ctx);
+    h.key(Key::Enter);
+    assert!(h.app.modeling.is_none());
+    h.app.doc.model.validate().unwrap();
 }
 
 #[test]
@@ -4450,6 +4612,7 @@ fn dimensions_locked_during_selection_or_placement_keep_three_lines_and_a_label(
                 },
                 offset: h.app.measurement.as_ref().unwrap().offset,
                 axis: Some(axis),
+                plane: None,
             };
             let layout = dimension.layout(&h.app.doc.model).map(|point| h.at(point));
             let lines = [
@@ -4578,8 +4741,10 @@ fn dimensions_axis_lock_switches_and_clears_during_placement() {
     let aligned = h.app.measurement_value();
     h.key(Key::ArrowRight);
     assert_eq!(h.app.measurement_value().as_deref(), Some("3.000 m"));
+    h.key(Key::ArrowDown);
     h.key(Key::ArrowLeft);
     assert_eq!(h.app.measurement_value().as_deref(), Some("4.000 m"));
+    h.key(Key::ArrowDown);
     h.key(Key::ArrowUp);
     assert_eq!(h.app.measurement_value().as_deref(), Some("2.000 m"));
     h.key(Key::ArrowUp);

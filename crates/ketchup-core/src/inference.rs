@@ -23,6 +23,42 @@ impl Axis {
         }
     }
 }
+
+/// An explicit movement direction or a world plane through the starting point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AxisConstraint {
+    Axis(Axis),
+    Plane(Axis),
+}
+
+impl AxisConstraint {
+    pub fn project(self, delta: DVec3) -> DVec3 {
+        match self {
+            Self::Axis(axis) => axis.vector() * delta.dot(axis.vector()),
+            Self::Plane(normal) => delta - normal.vector() * delta.dot(normal.vector()),
+        }
+    }
+
+    pub fn contains(self, delta: DVec3) -> bool {
+        (delta - self.project(delta)).length() < 1e-6
+    }
+
+    fn point(self, ray: crate::Ray, start: DVec3) -> Option<DVec3> {
+        match self {
+            Self::Axis(axis) => ray.axis(start, axis.vector()),
+            Self::Plane(normal) => {
+                let denominator = ray.direction.dot(normal.vector());
+                if denominator.abs() < 1e-9 {
+                    return None;
+                }
+                let t = (start - ray.origin).dot(normal.vector()) / denominator;
+                (0.0..1e7)
+                    .contains(&t)
+                    .then(|| ray.origin + ray.direction * t)
+            }
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Inference {
     Plane,
@@ -60,7 +96,7 @@ pub struct Snap {
     pub kind: Inference,
 }
 
-/// Optional surface targets; endpoints and midpoints remain object targets.
+/// Independent geometry targets; edges include endpoints and midpoints.
 #[derive(Clone, Copy, Debug)]
 pub struct SnapTargets {
     pub edges: bool,
@@ -119,7 +155,7 @@ pub fn infer_move_with_snapping(
         size,
         cursor,
         start,
-        lock,
+        lock.map(AxisConstraint::Axis),
         snap_to_geometry,
         snap_to_axes,
         None,
@@ -150,6 +186,11 @@ struct MoveReference {
 }
 impl MoveSnapCache {
     pub fn new(model: &Model) -> Self {
+        Self::excluding(model, &std::collections::BTreeSet::new())
+    }
+
+    /// Omit geometry being edited from both targets and occlusion queries.
+    pub fn excluding(model: &Model, excluded: &std::collections::BTreeSet<u64>) -> Self {
         // Snapping needs world geometry and scoped occluders, not the full
         // hierarchy. Resolve inherited visibility/membership once per gesture.
         let mut geometry = Model {
@@ -157,13 +198,13 @@ impl MoveSnapCache {
             edges: model
                 .edges
                 .iter()
-                .filter(|(id, _)| !model.is_hidden(**id))
+                .filter(|(id, _)| !excluded.contains(*id) && !model.is_hidden(**id))
                 .map(|(id, edge)| (*id, edge.clone()))
                 .collect(),
             faces: model
                 .faces
                 .iter()
-                .filter(|(id, _)| !model.is_hidden(**id))
+                .filter(|(id, _)| !excluded.contains(*id) && !model.is_hidden(**id))
                 .map(|(id, face)| (*id, face.clone()))
                 .collect(),
             edit_context: model.edit_context,
@@ -217,6 +258,29 @@ impl MoveSnapCache {
         cursor: DVec2,
         start: DVec3,
         lock: Option<Axis>,
+        snap_to_geometry: bool,
+        snap_to_axes: bool,
+        targets: SnapTargets,
+    ) -> Option<MoveInference> {
+        self.infer_with_constraint(
+            camera,
+            size,
+            cursor,
+            start,
+            lock.map(AxisConstraint::Axis),
+            snap_to_geometry,
+            snap_to_axes,
+            targets,
+        )
+    }
+
+    pub fn infer_with_constraint(
+        &mut self,
+        camera: &Camera,
+        size: DVec2,
+        cursor: DVec2,
+        start: DVec3,
+        lock: Option<AxisConstraint>,
         snap_to_geometry: bool,
         snap_to_axes: bool,
         targets: SnapTargets,
@@ -309,14 +373,14 @@ fn infer_move(
     size: DVec2,
     cursor: DVec2,
     start: DVec3,
-    lock: Option<Axis>,
+    lock: Option<AxisConstraint>,
     snap_to_geometry: bool,
     snap_to_axes: bool,
     prepared: Option<&[MoveReference]>,
     faces: Option<&dyn FaceQuery>,
     targets: SnapTargets,
 ) -> Option<MoveInference> {
-    let base = infer_with_targets(
+    let base = infer_with_constraint(
         model,
         camera,
         size,
@@ -341,7 +405,7 @@ fn infer_move(
         cursor,
         start,
         lock,
-        snap_to_geometry,
+        snap_to_geometry && targets.edges,
         base,
         prepared,
         faces,
@@ -358,6 +422,30 @@ pub fn infer_axis_alignment_with_face_query(
     cursor: DVec2,
     start: DVec3,
     lock: Option<Axis>,
+    snap_to_geometry: bool,
+    base: Snap,
+    faces: Option<&dyn FaceQuery>,
+) -> MoveInference {
+    infer_axis_alignment_with_constraint(
+        model,
+        camera,
+        size,
+        cursor,
+        start,
+        lock.map(AxisConstraint::Axis),
+        snap_to_geometry,
+        base,
+        faces,
+    )
+}
+
+pub fn infer_axis_alignment_with_constraint(
+    model: &Model,
+    camera: &Camera,
+    size: DVec2,
+    cursor: DVec2,
+    start: DVec3,
+    lock: Option<AxisConstraint>,
     snap_to_geometry: bool,
     base: Snap,
     faces: Option<&dyn FaceQuery>,
@@ -382,7 +470,7 @@ fn combine_axis_guides(
     size: DVec2,
     cursor: DVec2,
     start: DVec3,
-    lock: Option<Axis>,
+    lock: Option<AxisConstraint>,
     snap_to_geometry: bool,
     base: Snap,
     prepared: Option<&[MoveReference]>,
@@ -464,8 +552,7 @@ fn combine_axis_guides(
                     {
                         continue;
                     }
-                    if lock.is_some_and(|axis| (point - start).cross(axis.vector()).length() > 1e-7)
-                    {
+                    if lock.is_some_and(|constraint| !constraint.contains(point - start)) {
                         continue;
                     }
                     let Some(pixel) = view.project(point) else {
@@ -595,7 +682,7 @@ pub fn infer_with_face_query(
     )
 }
 
-/// Infer a target while independently enabling edge and face surfaces.
+/// Infer a target while independently enabling edges, faces, and face centers.
 pub fn infer_with_targets(
     model: &Model,
     camera: &Camera,
@@ -608,6 +695,34 @@ pub fn infer_with_targets(
     faces: Option<&dyn FaceQuery>,
     targets: SnapTargets,
 ) -> Option<Snap> {
+    infer_with_constraint(
+        model,
+        camera,
+        size,
+        cursor,
+        start,
+        lock.map(AxisConstraint::Axis),
+        snap_to_geometry,
+        snap_to_axes,
+        faces,
+        targets,
+    )
+}
+
+pub fn infer_with_constraint(
+    model: &Model,
+    camera: &Camera,
+    size: DVec2,
+    cursor: DVec2,
+    start: Option<DVec3>,
+    lock: Option<AxisConstraint>,
+    snap_to_geometry: bool,
+    snap_to_axes: bool,
+    faces: Option<&dyn FaceQuery>,
+    targets: SnapTargets,
+) -> Option<Snap> {
+    let snap_to_geometry =
+        snap_to_geometry && (targets.edges || targets.faces || targets.face_centers);
     let is_hidden = |id| match faces {
         Some(query) => query.is_hidden(model, id),
         None => model.is_hidden(id),
@@ -617,16 +732,23 @@ pub fn infer_with_targets(
     let away_from_start = start
         .and_then(|p| view.project(p))
         .is_some_and(|p| p.distance(cursor) > 4.0);
-    let local_axis = if snap_to_axes && lock.is_none() && away_from_start {
-        start.and_then(|origin| axis_target(camera, &view, cursor, origin, false))
-    } else {
-        None
-    };
+    let local_axis =
+        if snap_to_axes && !matches!(lock, Some(AxisConstraint::Axis(_))) && away_from_start {
+            start
+                .and_then(|origin| axis_target(camera, &view, cursor, origin, false))
+                .filter(|target| {
+                    lock.is_none_or(|constraint| {
+                        constraint.contains(target.snap.point - start.unwrap())
+                    })
+                })
+        } else {
+            None
+        };
     let mut candidates = vec![(DVec3::ZERO, Inference::Origin)];
     let visible_vertices: std::collections::BTreeSet<_> = model
         .edges
         .values()
-        .filter(|e| snap_to_geometry && !is_hidden(e.id))
+        .filter(|e| snap_to_geometry && targets.edges && !is_hidden(e.id))
         .flat_map(|e| [e.a, e.b])
         .collect();
     candidates.extend(
@@ -638,16 +760,24 @@ pub fn infer_with_targets(
         model
             .edges
             .values()
-            .filter(|e| snap_to_geometry && !is_hidden(e.id))
+            .filter(|e| snap_to_geometry && targets.edges && !is_hidden(e.id))
             .map(|e| {
                 let (a, b) = model.points(e);
                 ((a + b) * 0.5, Inference::Midpoint)
             }),
     );
     if snap_to_geometry && targets.face_centers {
-        candidates.extend(model.faces.values()
-            .filter(|face| !is_hidden(face.id))
-            .filter_map(|face| model.face_center(face).map(|center| (center, Inference::FaceCenter))));
+        candidates.extend(
+            model
+                .faces
+                .values()
+                .filter(|face| !is_hidden(face.id))
+                .filter_map(|face| {
+                    model
+                        .face_center(face)
+                        .map(|center| (center, Inference::FaceCenter))
+                }),
+        );
     }
     let nearby = candidates
         .into_iter()
@@ -657,9 +787,8 @@ pub fn infer_with_targets(
             if away_from_start && start.is_some_and(|start| p.distance(start) < 1e-7) {
                 return false;
             }
-            if let (Some(start), Some(axis)) = (start, lock) {
-                let diff = *p - start;
-                (diff - axis.vector() * diff.dot(axis.vector())).length() < 1e-6
+            if let (Some(start), Some(constraint)) = (start, lock) {
+                constraint.contains(*p - start)
             } else {
                 true
             }
@@ -689,7 +818,11 @@ pub fn infer_with_targets(
     }
     // Automatic alignment is a soft hint. Prefer a shared axis/geometry target,
     // then allow other nearby geometry unless the user explicitly locked an axis.
-    let constraint = start.zip(lock.or(local_axis.map(|target| target.axis)));
+    let axis_lock = match lock {
+        Some(AxisConstraint::Axis(axis)) => Some(axis),
+        _ => None,
+    };
+    let constraint = start.zip(axis_lock.or(local_axis.map(|target| target.axis)));
     let locked = start.zip(lock);
     if snap_to_geometry {
         let on_edge = model
@@ -698,6 +831,22 @@ pub fn infer_with_targets(
             .filter(|edge| targets.edges && !is_hidden(edge.id))
             .filter_map(|edge| {
                 let (a, b) = model.points(edge);
+                let plane_joint = locked.and_then(|(start, constraint)| {
+                    let AxisConstraint::Plane(normal) = constraint else {
+                        return None;
+                    };
+                    let denominator = (b - a).dot(normal.vector());
+                    let point = if denominator.abs() > 1e-9 {
+                        let t = (start - a).dot(normal.vector()) / denominator;
+                        if !(0.0..=1.0).contains(&t) {
+                            return None;
+                        }
+                        a + (b - a) * t
+                    } else {
+                        ray.segment_point(a, b)
+                    };
+                    constraint.contains(point - start).then_some(point)
+                });
                 let joint = constraint.and_then(|(start, axis)| {
                     let point = crate::Ray {
                         origin: start,
@@ -719,7 +868,12 @@ pub fn infer_with_targets(
                     }
                     (view.project(point)?.distance(cursor) < 8.).then_some(point)
                 });
-                let point = joint.or_else(|| locked.is_none().then(|| ray.segment_point(a, b)))?;
+                let point = joint
+                    .or(plane_joint)
+                    .or_else(|| locked.is_none().then(|| ray.segment_point(a, b)))?;
+                if locked.is_some_and(|(start, constraint)| !constraint.contains(point - start)) {
+                    return None;
+                }
                 if away_from_start && start.is_some_and(|start| point.distance(start) < 1e-7) {
                     return None;
                 }
@@ -790,7 +944,7 @@ pub fn infer_with_targets(
                 return Some(snap);
             }
         }
-        if targets.faces && locked.is_none() {
+        if targets.faces && !matches!(locked, Some((_, AxisConstraint::Axis(_)))) {
             let nearest = match faces {
                 Some(faces) => faces.nearest(ray, false),
                 None => model.nearest_face(ray),
@@ -803,7 +957,9 @@ pub fn infer_with_targets(
                     .is_some_and(|(start, plane)| {
                         (start - plane.origin).dot(plane.normal).abs() < 1e-6
                     });
-                if local_axis.is_none() || !starting_on_plane {
+                if (local_axis.is_none() || !starting_on_plane)
+                    && locked.is_none_or(|(start, constraint)| constraint.contains(point - start))
+                {
                     return Some(Snap {
                         point,
                         kind: Inference::OnFace,
@@ -812,7 +968,7 @@ pub fn infer_with_targets(
             }
         }
     }
-    if let (Some(start), Some(axis)) = (start, lock) {
+    if let (Some(start), Some(AxisConstraint::Axis(axis))) = (start, lock) {
         return Some(Snap {
             point: ray.axis(start, axis.vector())?,
             kind: Inference::Axis(axis),
@@ -825,10 +981,19 @@ pub fn infer_with_targets(
     // whenever a later point approaches them outside the local direction guides.
     if snap_to_axes {
         if let Some(target) = axis_target(camera, &view, cursor, DVec3::ZERO, true) {
-            if query_visible(model, &view, target.snap.point, faces) {
+            if locked
+                .is_none_or(|(start, constraint)| constraint.contains(target.snap.point - start))
+                && query_visible(model, &view, target.snap.point, faces)
+            {
                 return Some(target.snap);
             }
         }
+    }
+    if let Some((start, constraint)) = locked {
+        return Some(Snap {
+            point: constraint.point(ray, start)?,
+            kind: Inference::Plane,
+        });
     }
     Some(Snap {
         point: ray.plane_z(start.unwrap_or(DVec3::ZERO).z)?,
@@ -1049,4 +1214,120 @@ fn query_visible(
     faces
         .nearest(ray, true)
         .is_none_or(|(_, t, _)| t + 1e-5 >= point.distance(ray.origin))
+}
+
+#[cfg(test)]
+mod plane_lock_tests {
+    use super::*;
+
+    #[test]
+    fn plane_locks_keep_geometry_and_cached_moves_on_every_plane() {
+        let camera = Camera::default();
+        let size = DVec2::new(1100., 800.);
+        let start = DVec3::new(0.23, 0.37, 0.41);
+        for normal in [Axis::X, Axis::Y, Axis::Z] {
+            let lock = AxisConstraint::Plane(normal);
+            let target = start + lock.project(DVec3::new(2.1, 1.7, 1.3));
+            let off_plane = target + normal.vector();
+            let mut model = Model::default();
+            model
+                .add_edge(off_plane, off_plane + DVec3::splat(0.2))
+                .unwrap();
+            // The constraint intersects the edge away from its midpoint/endpoints.
+            model
+                .add_edge(target - normal.vector() * 2., target + normal.vector())
+                .unwrap();
+            let mut cache = MoveSnapCache::new(&model);
+            for geometry in [false, true] {
+                for axes in [false, true] {
+                    let cursor = camera.project(target, size).unwrap();
+                    let snap = infer_with_constraint(
+                        &model,
+                        &camera,
+                        size,
+                        cursor,
+                        Some(start),
+                        Some(lock),
+                        geometry,
+                        axes,
+                        None,
+                        SnapTargets::default(),
+                    )
+                    .unwrap();
+                    assert!(
+                        snap.point.distance(target) < 1e-6,
+                        "{normal:?} {geometry} {axes}: {snap:?}"
+                    );
+                    if geometry {
+                        assert_eq!(snap.kind, Inference::OnEdge);
+                    }
+                    let moved = cache
+                        .infer_with_constraint(
+                            &camera,
+                            size,
+                            cursor,
+                            start,
+                            Some(lock),
+                            geometry,
+                            axes,
+                            SnapTargets::default(),
+                        )
+                        .unwrap();
+                    assert!(lock.contains(moved.snap.point - start));
+                    assert!(moved.snap.point.distance(target) < 1e-6);
+                    let off_cursor = camera.project(off_plane, size).unwrap();
+                    let rejected = cache
+                        .infer_with_constraint(
+                            &camera,
+                            size,
+                            off_cursor,
+                            start,
+                            Some(lock),
+                            geometry,
+                            axes,
+                            SnapTargets::default(),
+                        )
+                        .unwrap();
+                    assert!(lock.contains(rejected.snap.point - start));
+                    assert!(rejected.snap.point.distance(off_plane) > 0.9);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn plane_lock_accepts_exact_endpoints_and_rejects_parallel_rays() {
+        let camera = Camera::default();
+        let size = DVec2::new(1100., 800.);
+        let start = DVec3::new(0.2, 0.3, 0.4);
+        let target = start + DVec3::new(2., 3., 0.);
+        let mut model = Model::default();
+        model.add_edge(target, target + DVec3::splat(0.3)).unwrap();
+        let snap = infer_with_constraint(
+            &model,
+            &camera,
+            size,
+            camera.project(target, size).unwrap(),
+            Some(start),
+            Some(AxisConstraint::Plane(Axis::Z)),
+            true,
+            true,
+            None,
+            SnapTargets::default(),
+        )
+        .unwrap();
+        assert_eq!(snap.kind, Inference::Endpoint);
+        assert!(snap.point.distance(target) < 1e-7);
+        assert!(
+            AxisConstraint::Plane(Axis::Z)
+                .point(
+                    crate::Ray {
+                        origin: start + DVec3::Z,
+                        direction: DVec3::X
+                    },
+                    start
+                )
+                .is_none()
+        );
+    }
 }

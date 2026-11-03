@@ -238,7 +238,7 @@ impl Tool {
                 "Click two closed solids to keep the overlap and remaining pieces separately"
             }
             Self::PushPull => {
-                "Click a face · Move along its normal · Click or type distance + Enter"
+                "Click a face · Move along its normal · Arrow keys lock axes · Click or type distance + Enter"
             }
             Self::Scale => {
                 "Select geometry · Click a reference point · Move or type a scale factor + Enter"

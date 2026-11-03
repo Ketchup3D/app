@@ -46,6 +46,67 @@ fn push_pull_creates_closed_caps_and_walls_with_color_and_history() {
 }
 
 #[test]
+fn directional_push_pull_preserves_displacement_and_stretches_existing_caps() {
+    for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
+        for distance in [-2., 2.] {
+            let mut model = Model::default();
+            let points = [
+                DVec3::ZERO,
+                DVec3::new(4., 0., -4.),
+                DVec3::new(4., 3., -7.),
+                DVec3::new(0., 3., -3.),
+            ];
+            for i in 0..4 {
+                model.add_edge(points[i], points[(i + 1) % 4]).unwrap();
+            }
+            let face = *model.faces.keys().next().unwrap();
+            model.paint_face(face, [182, 53, 81]).unwrap();
+            // Directional pulls must also work inside an editing context.
+            let group = model
+                .make_object(&model.selectable_entities(), false, "Panel")
+                .unwrap();
+            assert!(model.enter_object(group));
+            let delta = axis * distance;
+            let cap = model.push_pull_along(face, delta).unwrap();
+            let check = |model: &Model, displacement: DVec3| {
+                assert_eq!(
+                    (model.vertices.len(), model.edges.len(), model.faces.len()),
+                    (8, 12, 6)
+                );
+                for point in points {
+                    assert!(model.faces[&cap].vertices.iter().any(|id| {
+                        model.vertices[id].position.distance(point + displacement) < 1e-7
+                    }));
+                }
+                assert_eq!(model.face_colors.len(), 6);
+                model.validate().unwrap();
+            };
+            check(&model, delta);
+            assert_eq!(model.push_pull_along(cap, delta * 0.5).unwrap(), cap);
+            check(&model, delta * 1.5);
+        }
+    }
+}
+
+#[test]
+fn directional_push_pull_rejects_parallel_and_invalid_displacements_atomically() {
+    let mut model = Model::default();
+    let face = rectangle(&mut model, DVec3::ZERO, DVec3::new(4., 3., 0.));
+    let before = model.clone();
+    for delta in [
+        DVec3::X,
+        DVec3::Y,
+        DVec3::ZERO,
+        DVec3::splat(f64::NAN),
+        DVec3::Z * f64::INFINITY,
+        DVec3::Z * 1e8,
+    ] {
+        assert!(model.push_pull_along(face, delta).is_err());
+        assert_eq!(model, before);
+    }
+}
+
+#[test]
 fn extrusion_preserves_real_holes_and_their_walls() {
     let mut model = Model::default();
     let face = rectangle(&mut model, DVec3::ZERO, DVec3::new(6., 6., 0.));
@@ -91,6 +152,45 @@ fn move_scale_share_vertices_and_reject_invalid_geometry_atomically() {
             .is_err()
     );
     assert_eq!(model, before);
+}
+
+#[test]
+fn constrained_scale_preserves_unselected_coordinates_and_rejects_invalid_factors() {
+    use crate::inference::AxisConstraint;
+    for axis in [crate::Axis::X, crate::Axis::Y, crate::Axis::Z] {
+        for constraint in [AxisConstraint::Axis(axis), AxisConstraint::Plane(axis)] {
+            let mut model = Model::default();
+            let center = DVec3::new(2., 3., 4.);
+            let edge = model
+                .add_edge(center - DVec3::ONE, center + DVec3::ONE)
+                .unwrap();
+            let selected = BTreeSet::from([edge]);
+            model
+                .scale_selection_constrained(&selected, center, 2., Some(constraint))
+                .unwrap();
+            let (a, b) = model.points(&model.edges[&edge]);
+            let extent = DVec3::ONE + constraint.project(DVec3::ONE);
+            assert!(a.distance(center - extent) < 1e-7);
+            assert!(b.distance(center + extent) < 1e-7);
+            let before = model.clone();
+            for factor in [0., -1., f64::NAN, f64::INFINITY, 1e8] {
+                assert!(
+                    model
+                        .scale_selection_constrained(&selected, center, factor, Some(constraint))
+                        .is_err()
+                );
+                assert_eq!(model, before);
+            }
+            model.locked.insert(edge);
+            let before = model.clone();
+            assert!(
+                model
+                    .scale_selection_constrained(&selected, center, 2., Some(constraint))
+                    .is_err()
+            );
+            assert_eq!(model, before);
+        }
+    }
 }
 
 #[test]

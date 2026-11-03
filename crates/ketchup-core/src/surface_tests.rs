@@ -517,7 +517,7 @@ fn adjacent_coplanar_faces_and_box_faces_remain_distinct() {
 }
 
 #[test]
-fn edge_and_face_targets_toggle_independently_and_preserve_point_targets() {
+fn edge_and_face_targets_toggle_independently_with_points_controlled_by_edges() {
     use crate::inference::{SnapTargets, infer_with_targets};
     let camera = Camera::default();
     let size = DVec2::new(1000., 700.);
@@ -537,7 +537,11 @@ fn edge_and_face_targets_toggle_independently_and_preserve_point_targets() {
     );
     for edges in [false, true] {
         for faces in [false, true] {
-            let targets = SnapTargets { edges, faces, face_centers: false };
+            let targets = SnapTargets {
+                edges,
+                faces,
+                face_centers: false,
+            };
             let infer = |model: &Model, point, start, lock, geometry| {
                 infer_with_targets(
                     model,
@@ -566,7 +570,23 @@ fn edge_and_face_targets_toggle_independently_and_preserve_point_targets() {
                 (DVec3::new(0., 0., 2.), Inference::Endpoint),
                 (DVec3::new(3., 0., 2.), Inference::Midpoint),
             ] {
-                assert_eq!(infer(&edge_model, point, None, None, true).kind, kind);
+                assert_eq!(
+                    infer(&edge_model, point, None, None, true).kind,
+                    if edges { kind } else { Inference::Plane }
+                );
+                let moved = crate::inference::MoveSnapCache::new(&edge_model)
+                    .infer_with_targets(
+                        &camera,
+                        size,
+                        camera.project(point, size).unwrap(),
+                        DVec3::new(-2., -2., 0.),
+                        None,
+                        true,
+                        false,
+                        targets,
+                    )
+                    .unwrap();
+                assert_eq!(moved.snap.kind, if edges { kind } else { Inference::Plane });
             }
             let target = DVec3::new(0.5, 0.5, 3.);
             for lock in [None, Some(Axis::Z)] {

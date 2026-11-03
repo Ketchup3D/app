@@ -13,7 +13,10 @@ pub(super) struct Measurement {
 impl KetchupApp {
     pub(super) fn measurement_plane(&self) -> Option<(DVec3, DVec3)> {
         let m = self.measurement.as_ref()?;
-        if self.tool == Tool::Text && !m.points.is_empty() {
+        if self.tool != Tool::Dimensions && let Some(normal) = self.plane_lock() {
+            return m.points.first().map(|point| (*point, normal.vector()));
+        }
+        if self.tool == Tool::Text && !m.points.is_empty() && self.single_axis_lock().is_none() {
             return Some((
                 m.points[0],
                 (self.doc.camera.target - self.doc.camera.eye()).normalize(),
@@ -49,9 +52,12 @@ impl KetchupApp {
             self.doc.snap_to_axes,
         );
         if self.tool == Tool::Protractor && points.len() == 2 {
+            let normal = self
+                .plane_lock()
+                .map(Axis::vector)
+                .unwrap_or(self.measurement.as_ref().unwrap().normal);
             if let Some(snap) = self.snap.as_mut().filter(|s| s.kind == Inference::Plane) {
                 let ray = self.doc.camera.ray(cursor, size);
-                let normal = self.measurement.as_ref().unwrap().normal;
                 let denominator = ray.direction.dot(normal);
                 if denominator.abs() > 1e-8 {
                     let t = (points[0] - ray.origin).dot(normal) / denominator;
@@ -69,11 +75,14 @@ impl KetchupApp {
                 .unwrap()
                 .line_direction(&self.doc.model);
             let center = (a + b) * 0.5;
-            let normal = (self.doc.camera.target - self.doc.camera.eye()).normalize();
+            let normal = self
+                .plane_lock()
+                .map(Axis::vector)
+                .unwrap_or_else(|| (self.doc.camera.target - self.doc.camera.eye()).normalize());
             let ray = self.doc.camera.ray(cursor, size);
             let denominator = ray.direction.dot(normal);
             if let Some(axis) = self
-                .lock
+                .single_axis_lock()
                 .filter(|axis| (b - a).dot(axis.vector()).abs() < 1e-7)
             {
                 // A perpendicular lock places the annotation along the axis;
@@ -110,11 +119,12 @@ impl KetchupApp {
         {
             let m = self.measurement.as_ref().unwrap();
             let before = self.doc.model.clone();
-            match self.doc.model.add_dimension_with_axis(
+            match self.doc.model.add_dimension_with_constraint(
                 m.points[0],
                 m.points[1],
                 m.offset,
-                self.lock,
+                self.single_axis_lock(),
+                self.plane_lock(),
             ) {
                 Ok(id) => {
                     self.measurement = None;
@@ -196,7 +206,8 @@ impl KetchupApp {
             start: anchor(points[0]),
             end: anchor(points[1]),
             offset: self.measurement.as_ref()?.offset,
-            axis: self.lock,
+            axis: self.single_axis_lock(),
+            plane: self.plane_lock(),
         })
     }
     pub(super) fn measurement_value(&self) -> Option<String> {

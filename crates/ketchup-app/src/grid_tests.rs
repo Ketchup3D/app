@@ -349,6 +349,232 @@ fn grid_snapping_preserves_object_targets_and_off_grid_axis_anchors() {
 }
 
 #[test]
+fn grid_combines_with_every_axis_without_moving_off_grid_anchors() {
+    let model = ketchup_core::Model::default();
+    for axis in [Axis::X, Axis::Y, Axis::Z] {
+        let direction = axis.vector();
+        let anchor = DVec3::new(0.23, 0.37, 0.41);
+        for kind in [Inference::Axis(axis), Inference::OnAxis(axis)] {
+            for spacing in [0.25, 0.5, 1.] {
+                let target = Snap {
+                    point: anchor + direction * 2.13,
+                    kind,
+                };
+                let snapped = grid::snap_with_geometry(target, spacing, None, None, &model, None);
+                assert_eq!(snapped.kind, kind);
+                assert!((snapped.point - anchor).cross(direction).length() < 1e-7);
+                let value = snapped.point.dot(direction) / spacing;
+                assert!((value - value.round()).abs() < 1e-7);
+            }
+        }
+    }
+}
+
+#[test]
+fn grid_combines_edge_face_axis_and_plane_constraints() {
+    let mut h = Harness::new();
+    let face = modeling_rectangle(&mut h);
+    let model = &h.app.doc.model;
+    let target = Snap {
+        point: DVec3::new(2.3, 1.7, 0.),
+        kind: Inference::OnFace,
+    };
+    let quantize = |plane, axis| grid::snap_with_geometry(target, 1., plane, axis, model, None);
+    assert_eq!(quantize(None, None).point, DVec3::new(2., 2., 0.));
+    assert_eq!(quantize(None, Some(Axis::X)).point, DVec3::new(2., 1.7, 0.));
+    assert_eq!(
+        quantize(Some(DVec3::Y), None).point,
+        DVec3::new(2., 1.7, 0.)
+    );
+    // An axis crossing a face is a fixed intersection, with no grid freedom.
+    assert_eq!(quantize(None, Some(Axis::Z)).point, target.point);
+    assert!(model.face_contains(&model.faces[&face], quantize(None, None).point, true));
+
+    let mut model = ketchup_core::Model::default();
+    let a = DVec3::new(0.23, 0.37, 0.41);
+    let direction = DVec3::new(4., 2., 0.);
+    let edge = model.add_edge(a, a + direction).unwrap();
+    let target = Snap {
+        point: a + direction * 0.3,
+        kind: Inference::OnEdge,
+    };
+    let snapped = grid::snap_with_geometry(target, 1., Some(DVec3::Z), None, &model, None);
+    assert!((snapped.point.x - 1.).abs() < 1e-7);
+    assert!((snapped.point - a).cross(direction).length() < 1e-7);
+    // A crossing lock must not slide along the edge or detach from it.
+    for (plane, axis) in [(None, Some(Axis::X)), (Some(DVec3::Y), None)] {
+        assert_eq!(
+            grid::snap_with_geometry(target, 1., plane, axis, &model, None).point,
+            target.point
+        );
+    }
+    assert_eq!(
+        grid::snap_with_geometry(
+            target,
+            1.,
+            None,
+            None,
+            &model,
+            Some(&BTreeSet::from([edge]))
+        )
+        .point,
+        target.point
+    );
+}
+
+#[test]
+fn combined_grid_snaps_preserve_exact_targets_and_geometry_boundaries() {
+    let mut model = ketchup_core::Model::default();
+    let a = DVec3::new(0.1, 0.2, 0.3);
+    let b = DVec3::new(0.4, 0.2, 0.3);
+    model.add_edge(a, b).unwrap();
+    let point = a.lerp(b, 0.4);
+    for kind in [
+        Inference::Endpoint,
+        Inference::Midpoint,
+        Inference::FaceCenter,
+        Inference::Origin,
+        Inference::Aligned,
+        Inference::OnEdge,
+    ] {
+        let target = Snap { point, kind };
+        assert_eq!(
+            grid::snap_with_geometry(target, 1., None, None, &model, None).point,
+            point
+        );
+    }
+    let mut h = Harness::new();
+    modeling_rectangle(&mut h);
+    let target = Snap {
+        point: DVec3::new(3.8, 1.7, 0.),
+        kind: Inference::OnFace,
+    };
+    // Rounding to x=5 would leave the face. Preserve the geometry instead.
+    assert_eq!(
+        grid::snap_with_geometry(target, 5., None, None, &h.app.doc.model, None).point,
+        target.point
+    );
+}
+
+#[test]
+fn drawing_and_measurement_tools_combine_axis_surface_and_grid_snapping() {
+    for tool in [Tool::Line, Tool::TapeMeasure, Tool::Protractor, Tool::Text] {
+        let mut h = Harness::new();
+        modeling_rectangle(&mut h);
+        h.app.set_tool(tool);
+        let start = DVec3::new(0.23, 1.37, 0.);
+        let target = DVec3::new(2.3, 1.37, 0.);
+        if tool == Tool::Line {
+            h.app.line_start = Some(start);
+        } else {
+            h.app.measurement = Some(measurement_tools::Measurement {
+                points: vec![start],
+                ..Default::default()
+            });
+        }
+        h.app.set_axis_lock(Some(Axis::X), &h.ctx);
+        hover(&mut h, target);
+        assert_eq!(h.app.snap.unwrap().kind, Inference::OnFace, "{tool:?}");
+        assert!(h.app.snap.unwrap().point.distance(target) < 1e-5);
+        h.app.snap_to_grid = true;
+        h.app.doc.display.grid_auto_size = false;
+        h.app.doc.display.grid_spacing = 0.5;
+        hover(&mut h, target);
+        let snap = h.app.snap.unwrap();
+        assert_eq!(snap.kind, Inference::OnFace, "{tool:?}");
+        assert!(
+            snap.point.distance(DVec3::new(2.5, 1.37, 0.)) < 1e-7,
+            "{tool:?}: {snap:?}"
+        );
+        if tool == Tool::Text {
+            assert!(
+                (h.app.measurement.as_ref().unwrap().offset - (snap.point - start)).length() < 1e-7
+            );
+        }
+        h.click(h.at(target));
+        if tool == Tool::Line {
+            assert!(h.app.line_start.unwrap().distance(snap.point) < 1e-7);
+        } else if tool == Tool::Text {
+            assert!(h.app.text_editor.is_some());
+        } else {
+            assert!(h.app.measurement.as_ref().unwrap().points[1].distance(snap.point) < 1e-7);
+        }
+    }
+}
+
+#[test]
+fn locked_axis_projection_quantizes_a_hovered_edge_reference() {
+    let mut h = Harness::new();
+    h.app
+        .doc
+        .model
+        .add_edge(DVec3::new(0., 4., 0.), DVec3::new(6., 4., 0.))
+        .unwrap();
+    h.app.set_tool(Tool::Line);
+    h.app.line_start = Some(DVec3::new(0.23, 1.37, 0.));
+    h.app.set_axis_lock(Some(Axis::X), &h.ctx);
+    h.app.snap_to_grid = true;
+    h.app.doc.display.grid_auto_size = false;
+    h.app.doc.display.grid_spacing = 0.5;
+    hover(&mut h, DVec3::new(2.3, 4., 0.));
+    let snapped = h.app.snap.unwrap();
+    assert_eq!(snapped.kind, Inference::Aligned);
+    assert!(snapped.point.distance(DVec3::new(2.5, 1.37, 0.)) < 1e-7);
+    h.click(h.at(DVec3::new(2.3, 4., 0.)));
+    assert!(h.app.line_start.unwrap().distance(snapped.point) < 1e-7);
+}
+
+#[test]
+fn move_and_scale_combine_axis_surface_and_grid_snapping() {
+    for tool in [Tool::Move, Tool::Scale] {
+        let mut h = Harness::new();
+        modeling_rectangle(&mut h);
+        let start = DVec3::new(0.23, 1.37, 0.);
+        let edge = h
+            .app
+            .doc
+            .model
+            .add_edge(start, start + DVec3::Y * 0.5)
+            .unwrap();
+        h.app.set_tool(tool);
+        h.app.selected.insert(edge);
+        h.app.begin_modeling(h.at(start), &h.ctx);
+        h.app.set_axis_lock(Some(Axis::X), &h.ctx);
+        h.app.snap_to_grid = true;
+        h.app.doc.display.grid_auto_size = false;
+        h.app.doc.display.grid_spacing = 0.5;
+        h.app.update_modeling(h.at(DVec3::new(2.3, 1.37, 0.)));
+        let edit = h.app.modeling.as_ref().unwrap();
+        assert_eq!(edit.snap.unwrap().kind, Inference::OnFace, "{tool:?}");
+        assert!(edit.snap.unwrap().point.distance(DVec3::new(2.5, 1.37, 0.)) < 1e-7);
+        assert!(edit.direction.cross(DVec3::X).length() < 1e-7);
+    }
+}
+
+#[test]
+fn push_pull_combines_axis_references_with_grid_and_commits_the_preview() {
+    let mut h = Harness::new();
+    modeling_rectangle(&mut h);
+    h.app.set_tool(Tool::PushPull);
+    h.app.begin_modeling(h.at(DVec3::new(2., 2., 0.)), &h.ctx);
+    h.app.doc.snap_to_geometry = false;
+    h.app.snap_to_grid = true;
+    h.app.doc.display.grid_auto_size = false;
+    h.app.doc.display.grid_spacing = 0.5;
+    let cursor = h.at(DVec3::new(0., 0., 2.3));
+    h.app.update_modeling(cursor);
+    let edit = h.app.modeling.as_ref().unwrap();
+    assert!(matches!(
+        edit.snap.unwrap().kind,
+        Inference::OnAxis(Axis::Z)
+    ));
+    assert!((edit.value.abs() - 2.5).abs() < 1e-7);
+    let preview = edit.preview.clone().unwrap();
+    h.app.commit_modeling(&h.ctx);
+    assert_eq!(h.app.doc.model, preview);
+}
+
+#[test]
 fn grid_snapping_shapes_stay_on_each_locked_plane() {
     for axis in [Axis::X, Axis::Y, Axis::Z] {
         let mut h = Harness::new();
@@ -387,24 +613,27 @@ fn grid_snapping_move_and_measurement_use_grid_points() {
 }
 
 #[test]
-fn edge_and_face_snapping_menu_toggles_are_independent_preferences() {
+fn geometry_snapping_menu_toggles_are_independent_preferences() {
     let mut h = Harness::new();
     assert!(h.app.snap_to_edge);
     assert!(h.app.snap_to_face);
+    assert!(h.app.snap_to_face_center);
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(dropdown_position(&output));
-    for label in ["Snap to edge", "Snap to face"] {
+    for label in ["Snap to edge", "Snap to face", "Snap to face center"] {
         let output = h.frame(vec![], egui::Modifiers::NONE);
         let checkbox = text_position(&output, label);
         h.click(checkbox);
         assert_eq!(h.app.snap_to_edge, label != "Snap to edge");
         assert_eq!(h.app.snap_to_face, label != "Snap to face");
+        assert_eq!(h.app.snap_to_face_center, label != "Snap to face center");
         assert!(h.app.doc.snap_to_geometry);
         assert!(h.app.doc.snap_to_axes);
         assert!(!h.app.project.modified);
         h.click(checkbox);
         assert!(h.app.snap_to_edge);
         assert!(h.app.snap_to_face);
+        assert!(h.app.snap_to_face_center);
     }
 }
 
@@ -422,8 +651,10 @@ fn drawing_uses_edge_and_face_preferences_with_cached_picking() {
     hover(&mut h, edge_target);
     assert_eq!(h.app.snap.unwrap().kind, Inference::OnEdge);
     h.app.snap_to_edge = false;
-    hover(&mut h, edge_target);
-    assert_eq!(h.app.snap.unwrap().kind, Inference::Plane);
+    for point in [edge_target, DVec3::new(0., 0., 2.), DVec3::new(3., 0., 2.)] {
+        hover(&mut h, point);
+        assert_eq!(h.app.snap.unwrap().kind, Inference::Plane);
+    }
     for (a, b) in [
         (DVec3::new(-3., -3., 4.), DVec3::new(3., -3., 4.)),
         (DVec3::new(3., -3., 4.), DVec3::new(3., 3., 4.)),
@@ -437,5 +668,10 @@ fn drawing_uses_edge_and_face_preferences_with_cached_picking() {
     assert_eq!(h.app.snap.unwrap().kind, Inference::OnFace);
     h.app.snap_to_face = false;
     hover(&mut h, face_target);
+    assert_eq!(h.app.snap.unwrap().kind, Inference::Plane);
+    hover(&mut h, DVec3::new(0., 0., 4.));
+    assert_eq!(h.app.snap.unwrap().kind, Inference::FaceCenter);
+    h.app.snap_to_face_center = false;
+    hover(&mut h, DVec3::new(0., 0., 4.));
     assert_eq!(h.app.snap.unwrap().kind, Inference::Plane);
 }

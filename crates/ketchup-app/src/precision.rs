@@ -234,7 +234,7 @@ pub(super) fn modeling_value(
     if tool != Tool::Scale {
         return length(input, unit);
     }
-    Formula::parse(input, false, 1.).map(|value| value.number)
+    Formula::parse(input, false, 1.).map(|value| value.number.abs())
 }
 
 impl KetchupApp {
@@ -397,6 +397,9 @@ mod tests {
             assert!(positive_length(input).is_err(), "{input}");
         }
         assert_eq!(modeling_value(Tool::Scale, "0.5"), Ok(0.5));
+        assert_eq!(modeling_value(Tool::Scale, "-0.5"), Ok(0.5));
+        assert_eq!(modeling_value(Tool::Scale, "-(1 + 1) / 4"), Ok(0.5));
+        assert_eq!(modeling_value(Tool::Move, "-0.5"), Ok(-0.5));
         assert!(modeling_value(Tool::Scale, "5cm").is_err());
     }
 

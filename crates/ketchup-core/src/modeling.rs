@@ -182,6 +182,38 @@ impl Model {
         Ok(())
     }
 
+    /// Scale only the world axes selected by an explicit axis or plane lock.
+    pub fn scale_selection_constrained(
+        &mut self,
+        selected: &BTreeSet<u64>,
+        center: DVec3,
+        factor: f64,
+        constraint: Option<crate::inference::AxisConstraint>,
+    ) -> Result<(), &'static str> {
+        let Some(constraint) = constraint else {
+            return self.scale_selection(selected, center, factor);
+        };
+        if !factor.is_finite() || factor <= EPS || factor > 1e7 {
+            return Err("Enter a positive scale factor, such as 2 or 0.5");
+        }
+        if self.edit_context.is_some() {
+            return self.edit_in_context(|model| {
+                model.scale_selection_constrained(selected, center, factor, Some(constraint))
+            });
+        }
+        let factors = DVec3::ONE + constraint.project(DVec3::ONE) * (factor - 1.);
+        self.transform_selection(selected, |p| center + (p - center) * factors)?;
+        for id in self.expand_entities(selected) {
+            if let Some(object) = self.objects.get_mut(&id) {
+                let mut frame = object.transform.unwrap_or_default();
+                frame.translation = center + (frame.translation - center) * factors;
+                frame.axes *= factors;
+                object.transform = Some(frame);
+            }
+        }
+        Ok(())
+    }
+
     pub fn paint_face(&mut self, face: u64, color: [u8; 3]) -> Result<(), &'static str> {
         if self.edit_context.is_some() {
             return self.edit_in_context(|model| model.paint_face(face, color));
@@ -335,6 +367,31 @@ impl Model {
         let normal = faces::plane(self, &face.vertices)
             .ok_or("The face must be planar")?
             .normal;
+        self.push_pull_along(face_id, normal * distance)
+    }
+
+    /// Extrude a face by a world-space displacement, including oblique pulls
+    /// along a locked axis. A displacement within the face cannot form a solid.
+    pub fn push_pull_along(&mut self, face_id: u64, delta: DVec3) -> Result<u64, &'static str> {
+        if self.edit_context.is_some() {
+            return self.edit_in_context(|model| model.push_pull_along(face_id, delta));
+        }
+        self.editable_surface(face_id)?;
+        let distance = delta.length();
+        if !delta.is_finite() || distance < EPS || distance > 1e7 {
+            return Err("Enter a nonzero distance in meters");
+        }
+        let face = self
+            .faces
+            .get(&face_id)
+            .ok_or("Click a filled face first")?
+            .clone();
+        let normal = faces::plane(self, &face.vertices)
+            .ok_or("The face must be planar")?
+            .normal;
+        if delta.dot(normal).abs() < EPS {
+            return Err("Choose an axis that is not parallel to the face, or clear the axis lock");
+        }
         let color = self.face_colors.get(&face_id).copied();
         // On an existing solid, moving the cap stretches the adjoining walls.
         let boundary: Vec<_> = std::iter::once(&face.vertices)
@@ -360,7 +417,7 @@ impl Model {
                     && shares_edge(other, a, b)
             })
         }) {
-            self.move_selection(&BTreeSet::from([face_id]), normal * distance)?;
+            self.move_selection(&BTreeSet::from([face_id]), delta)?;
             return Ok(face_id);
         }
         let mut next = self.clone();
@@ -382,7 +439,7 @@ impl Model {
             .flatten()
         {
             top.entry(*id)
-                .or_insert_with(|| next.raw_vertex(self.vertices[id].position + normal * distance));
+                .or_insert_with(|| next.raw_vertex(self.vertices[id].position + delta));
         }
         for ring in std::iter::once(&face.vertices).chain(face.holes.iter()) {
             for i in 0..ring.len() {

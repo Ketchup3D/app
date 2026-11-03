@@ -5,11 +5,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 /// Instance geometry is stored in world coordinates. This frame preserves the
-/// translation and uniform scale when its shared definition changes.
+/// translation and per-axis scale when its shared definition changes.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstanceTransform {
     pub translation: DVec3,
     pub scale: f64,
+    /// Signed per-axis multipliers, including reflections and axis-locked scaling.
     #[serde(default = "identity_axes")]
     pub axes: DVec3,
 }
@@ -31,7 +32,7 @@ impl InstanceTransform {
             && self.scale.is_finite()
             && self.scale > 0.
             && self.axes.is_finite()
-            && (self.axes.abs() - DVec3::ONE).abs().max_element() < 1e-12
+            && self.axes.abs().min_element() > 0.
     }
     pub fn translated(self, delta: DVec3) -> Self {
         Self {
@@ -204,7 +205,7 @@ impl Model {
             object.transform = Some(InstanceTransform {
                 translation: transform.translation * scale + translation,
                 scale: transform.scale * scale.abs().x,
-                axes: transform.axes * scale.signum(),
+                axes: transform.axes * (scale / scale.abs().x),
             });
         }
     }
@@ -310,8 +311,8 @@ impl Model {
             let transform = instance.transform.unwrap_or_default();
             let mut canonical = self.object_contents(source).ok_or("Missing component")?;
             canonical.transform_contents(
-                transform.axes / transform.scale,
-                -transform.translation * transform.axes / transform.scale,
+                DVec3::ONE / (transform.axes * transform.scale),
+                -transform.translation / (transform.axes * transform.scale),
             );
             let peers: Vec<_> = self
                 .objects
@@ -426,8 +427,8 @@ impl Model {
                 .object_contents(reference.id)
                 .ok_or("Missing component definition")?;
             contents.transform_contents(
-                to.axes * from.axes * (to.scale / from.scale),
-                to.translation - from.translation * to.axes * from.axes * (to.scale / from.scale),
+                to.axes / from.axes * (to.scale / from.scale),
+                to.translation - from.translation * to.axes / from.axes * (to.scale / from.scale),
             );
             copy.remove_contents(id)?;
             let (entities, remap) = copy.paste_mapped(&contents, DVec3::ZERO, false);
@@ -477,8 +478,7 @@ impl Model {
                         let reference_frame = reference.transform.unwrap_or_default();
                         let scale = a.distance(b) / c.distance(d) * reference_frame.scale;
                         let canonical_start = (c - reference_frame.translation)
-                            * reference_frame.axes
-                            / reference_frame.scale;
+                            / (reference_frame.axes * reference_frame.scale);
                         frame = InstanceTransform {
                             scale,
                             translation: a - canonical_start * scale,

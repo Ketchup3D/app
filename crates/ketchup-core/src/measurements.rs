@@ -62,6 +62,9 @@ pub struct Dimension {
     /// axis keeps the full span instead of collapsing it to a zero-length line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis: Option<Axis>,
+    /// Measure the separation projected onto this world plane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane: Option<Axis>,
 }
 impl Dimension {
     pub fn points(&self, model: &Model) -> (DVec3, DVec3) {
@@ -75,12 +78,18 @@ impl Dimension {
     /// axis is perpendicular to it. Placement can then use that axis as an offset.
     pub fn line_direction(&self, model: &Model) -> DVec3 {
         let (a, b) = self.points(model);
+        if let Some(delta) = self.projected_plane(a, b) {
+            return delta.normalize();
+        }
         self.projected_axis(a, b)
             .map(Axis::vector)
             .unwrap_or_else(|| (b - a).try_normalize().unwrap_or(DVec3::X))
     }
     pub fn length(&self, model: &Model) -> f64 {
         let (a, b) = self.points(model);
+        if let Some(delta) = self.projected_plane(a, b) {
+            return delta.length();
+        }
         self.projected_axis(a, b)
             .map_or_else(|| a.distance(b), |axis| (b - a).dot(axis.vector()).abs())
     }
@@ -88,7 +97,7 @@ impl Dimension {
         let (a, b) = self.points(model);
         let direction = self.line_direction(model);
         let offset = self.offset - direction * self.offset.dot(direction);
-        if self.projected_axis(a, b).is_some() {
+        if self.projected_axis(a, b).is_some() || self.projected_plane(a, b).is_some() {
             let center = (a + b) * 0.5;
             let line = center + offset;
             [
@@ -100,6 +109,13 @@ impl Dimension {
         } else {
             [a, b, a + offset, b + offset]
         }
+    }
+
+    fn projected_plane(&self, a: DVec3, b: DVec3) -> Option<DVec3> {
+        let normal = self.plane?.vector();
+        let delta = b - a;
+        let projected = delta - normal * delta.dot(normal);
+        (projected.length() >= EPS).then_some(projected)
     }
 }
 
@@ -213,9 +229,21 @@ impl Model {
         offset: DVec3,
         axis: Option<Axis>,
     ) -> Result<u64, &'static str> {
+        self.add_dimension_with_constraint(start, end, offset, axis, None)
+    }
+
+    pub fn add_dimension_with_constraint(
+        &mut self,
+        start: DVec3,
+        end: DVec3,
+        offset: DVec3,
+        axis: Option<Axis>,
+        plane: Option<Axis>,
+    ) -> Result<u64, &'static str> {
         if self.edit_context.is_some() {
-            return self
-                .edit_in_context(|model| model.add_dimension_with_axis(start, end, offset, axis));
+            return self.edit_in_context(|model| {
+                model.add_dimension_with_constraint(start, end, offset, axis, plane)
+            });
         }
         if !valid_point(start) || !valid_point(end) || !valid_point(offset) {
             return Err("Dimension coordinates must be finite and within the model limits");
@@ -230,6 +258,7 @@ impl Model {
             end,
             offset,
             axis,
+            plane,
         };
         if dimension.layout(self).iter().any(|p| !valid_point(*p)) {
             return Err("Dimension is outside the model limits");

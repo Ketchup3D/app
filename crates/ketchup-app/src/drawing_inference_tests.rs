@@ -150,7 +150,7 @@ fn shape_plane_locks_switch_and_restore_the_original_surface_plane() {
         }
         h.key(Key::ArrowRight);
         h.key(Key::ArrowLeft);
-        assert_eq!(h.app.drawing.as_ref().unwrap().normal, DVec3::Y);
+        assert_eq!(h.app.drawing.as_ref().unwrap().normal, DVec3::Z);
         h.key(Key::ArrowDown);
         assert_eq!(h.app.lock, None);
         assert_eq!(h.app.drawing.as_ref().unwrap().normal, normal);
@@ -354,6 +354,106 @@ fn unlocked_shapes_acquire_all_local_axes_and_preserve_explicit_plane_locks() {
             );
             assert_eq!(h.app.lock, Some(Axis::Z));
         }
+    }
+}
+
+#[test]
+fn unlocked_shapes_restore_the_starting_plane_after_leaving_a_snap() {
+    for tool in [Tool::Rectangle, Tool::Circle, Tool::Polygon, Tool::Freehand] {
+        // Exercise local axes, exact geometry, and acquired reference axes.
+        for source in 0..3 {
+            let mut h = Harness::new();
+            let reference_point = DVec3::new(0., 3., 2.);
+            if source != 0 {
+                reference(&mut h, reference_point);
+            }
+            h.app.doc.snap_to_geometry = source != 0;
+            h.app.doc.snap_to_axes = source != 1;
+            h.app.set_tool(tool);
+            h.app.begin_drawing(h.at(DVec3::ZERO));
+            let drawing = h.app.drawing.as_ref().unwrap();
+            let (origin, normal, u, v) = (drawing.origin, drawing.normal, drawing.u, drawing.v);
+            let target = match source {
+                0 => origin + DVec3::Z * 3.,
+                1 => reference_point,
+                _ => reference_point + DVec3::X * 3.,
+            };
+            let free_point = origin + DVec3::new(2.3, 1.7, 0.);
+            // Reacquiring the same target must work after returning to the plane.
+            for _ in 0..2 {
+                if source == 2 {
+                    h.app.update_pointer(h.at(reference_point));
+                }
+                h.app.update_pointer(h.at(target));
+                let snap = h.app.snap.unwrap();
+                assert!(snap.point.distance(target) < 1e-5, "{tool:?} {source}");
+                assert_ne!(h.app.drawing.as_ref().unwrap().normal, normal);
+                assert_eq!(
+                    snap.kind,
+                    match source {
+                        0 => Inference::Axis(Axis::Z),
+                        1 => Inference::Endpoint,
+                        _ => Inference::Axis(Axis::X),
+                    }
+                );
+                if tool == Tool::Freehand {
+                    h.app.sample_freehand(h.at(target));
+                }
+                let samples = h.app.drawing.as_ref().unwrap().points.clone();
+                h.app.update_pointer(h.at(free_point));
+                let drawing = h.app.drawing.as_ref().unwrap();
+                assert_eq!(drawing.normal, normal, "{tool:?} {source}");
+                assert_eq!((drawing.u, drawing.v), (u, v));
+                assert_eq!(drawing.points, samples);
+                let snap = h.app.snap.unwrap();
+                assert_eq!(snap.kind, Inference::Plane, "{tool:?} {source}");
+                assert!(snap.point.distance(free_point) < 1e-5);
+                assert!(h.app.active_drawing_guide().is_none());
+            }
+            // Explicit locks still hold when the pointer leaves all targets.
+            h.key(Key::ArrowRight);
+            h.app.update_pointer(h.at(free_point));
+            let drawing = h.app.drawing.as_ref().unwrap();
+            assert_eq!(drawing.normal, DVec3::X);
+            assert!((h.app.snap.unwrap().point - origin).x.abs() < 1e-7);
+        }
+    }
+}
+
+#[test]
+fn leaving_a_geometry_snap_restores_the_original_tilted_surface_plane() {
+    for tool in [Tool::Rectangle, Tool::Circle, Tool::Polygon, Tool::Freehand] {
+        let mut h = Harness::new();
+        let corners = [
+            DVec3::new(-4., -4., -1.),
+            DVec3::new(4., -4., -1.),
+            DVec3::new(4., 4., 3.),
+            DVec3::new(-4., 4., 3.),
+        ];
+        for i in 0..4 {
+            h.app
+                .doc
+                .model
+                .add_edge(corners[i], corners[(i + 1) % 4])
+                .unwrap();
+        }
+        let target = DVec3::new(0., 0., 4.);
+        reference(&mut h, target);
+        h.app.doc.snap_to_axes = false;
+        h.app.set_tool(tool);
+        h.app.begin_drawing(h.at(DVec3::Z));
+        let drawing = h.app.drawing.as_ref().unwrap();
+        let (origin, normal, u, v) = (drawing.origin, drawing.normal, drawing.u, drawing.v);
+        assert!(normal.cross(DVec3::Z).length() > 0.1);
+        h.app.update_pointer(h.at(target));
+        assert_eq!(h.app.snap.unwrap().kind, Inference::Endpoint);
+        assert_ne!(h.app.drawing.as_ref().unwrap().normal, normal);
+        let free_point = origin + u * 2.3 + v * 1.7;
+        h.app.update_pointer(h.at(free_point));
+        let drawing = h.app.drawing.as_ref().unwrap();
+        assert_eq!(drawing.normal, normal);
+        assert_eq!((drawing.u, drawing.v), (u, v));
+        assert!(h.app.snap.unwrap().point.distance(free_point) < 1e-5);
     }
 }
 

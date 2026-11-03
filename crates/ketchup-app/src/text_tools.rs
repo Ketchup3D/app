@@ -59,16 +59,17 @@ impl KetchupApp {
                             .picking_cache
                             .snap_query(&self.face_cache, &self.entity_cache),
                     ),
-                    self.snap_targets(),
+                    ketchup_core::inference::SnapTargets::default(),
                 );
             }
             // Leader text starts on geometry, not on the drawing plane.
-            if self
-                .snap
-                .is_some_and(|s| self.doc.model.dimension_anchor(s.point).weights.is_empty())
-            {
-                self.snap = None;
+            if let Some(snap) = self.snap {
+                if !self.picking_cache.contains_geometry_point(&self.doc.model,
+                    &self.face_cache, &self.entity_cache, &self.doc.camera,
+                    dv(self.viewport.size()), snap.point)
+                { self.snap = None; }
             }
+            self.apply_grid_snap();
         }
     }
 
