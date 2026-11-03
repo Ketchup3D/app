@@ -70,6 +70,16 @@ pub fn dropdown_atom(color: Color32) -> egui::Atom<'static> {
     })
 }
 
+/// Font-independent three-dot icon for section action menus.
+pub fn ellipsis_atom(color: Color32) -> egui::Atom<'static> {
+    egui::Atom::paint(egui::vec2(16., 12.), move |ui, args| {
+        for x in [-5., 0., 5.] {
+            ui.painter()
+                .circle_filled(args.rect.center() + egui::vec2(x, 0.), 1.5, color);
+        }
+    })
+}
+
 pub fn tool(p: &egui::Painter, rect: Rect, tool: Tool) {
     if tool == Tool::Select && p.ctx().global_style().visuals.dark_mode {
         // A contrasting border keeps the cursor visible over light model faces too.

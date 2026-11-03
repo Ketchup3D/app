@@ -674,10 +674,17 @@ impl KetchupApp {
                 widgets.open.expansion = -4.;
                 let menu_button = action_ui
                     .add(
-                        egui::Button::new(egui::RichText::new("⋯").color(colors.muted))
+                        egui::Button::new(icons::ellipsis_atom(colors.muted))
                             .min_size(rect.size()),
                     )
                     .on_hover_text("Section actions");
+                menu_button.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::Role::Button,
+                        action_ui.is_enabled(),
+                        "Section actions",
+                    )
+                });
                 egui::Popup::menu(&menu_button)
                     .align(egui::emath::RectAlign::BOTTOM_END)
                     .style(Self::menu_style)

@@ -914,7 +914,8 @@ mod preference_tests {
                             .max_rect(rect),
                     );
                     let clicked = egui::menu::MenuButton::from_button(
-                        egui::Button::new("⋯").min_size(rect.size()),
+                        egui::Button::new(icons::ellipsis_atom(Palette::for_ui(&action).muted))
+                            .min_size(rect.size()),
                     )
                     .ui(&mut action, |ui| {
                         let _ = ui.button("PDF");
