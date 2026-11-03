@@ -1696,8 +1696,12 @@ mod preference_tests {
             assert_eq!(restored.general_settings.section, settings::Section::Rendering);
             restored.new_model(&ctx);
             assert_eq!(restored.doc.display.shadow_antialiasing, enabled);
-            restored.replace_project(Document::default(), None, &ctx);
-            assert_eq!(restored.doc.display.shadow_antialiasing, enabled);
+            // Opening a project restores that project's display settings;
+            // only new projects inherit the remembered display preference.
+            let mut project = Document::default();
+            project.display.shadow_antialiasing = !enabled;
+            restored.replace_project(project, None, &ctx);
+            assert_eq!(restored.doc.display.shadow_antialiasing, !enabled);
         }
         let old: DisplaySettings = serde_json::from_str("{}").unwrap();
         assert!(old.shadow_antialiasing);
@@ -3563,7 +3567,7 @@ impl InspectorSection {
     fn title(self) -> &'static str {
         match self {
             Self::Outliner => "Outliner",
-            Self::EntityInfo => "Propriétés",
+            Self::EntityInfo => "Properties",
             Self::Components => "Components",
             Self::Tags => "Tags",
             Self::Display => "Display",

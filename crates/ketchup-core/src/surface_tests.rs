@@ -440,14 +440,16 @@ fn face_pick_and_surface_snap_target_visible_surface_not_hidden_edges() {
     ];
     outline(&mut model, &points);
     let face = *model.faces.keys().next().unwrap();
-    let cursor = camera.project(DVec3::Z * 2., size).unwrap();
+    // Exercise a surface hit away from the independently snappable face center.
+    let target = DVec3::new(0.75, 0.5, 2.);
+    let cursor = camera.project(target, size).unwrap();
     assert_eq!(
         selection::pick_entity(&model, &camera, size, cursor, 8.),
         Some(face)
     );
     let snap = infer(&model, &camera, size, cursor, None, None).unwrap();
     assert_eq!(snap.kind, Inference::OnFace);
-    assert!(snap.point.distance(DVec3::Z * 2.) < 1e-6);
+    assert!(snap.point.distance(target) < 1e-6);
     let ray = camera.ray(cursor, size);
     let hidden = ray.plane_z(0.).unwrap();
     model

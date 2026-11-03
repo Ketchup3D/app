@@ -88,7 +88,11 @@ impl KetchupApp {
         let Some(start) = camera.project(edit.anchor, size) else {
             return 1.;
         };
-        let free = !snap_to_grid && edit.snap.is_some_and(|snap| snap.kind == Inference::Plane);
+        let free = !snap_to_grid && edit.snap.is_some_and(|snap| {
+            snap.kind == Inference::Plane
+                || matches!(snap.kind, Inference::Axis(axis)
+                    if edit.scale_constraint == Some(AxisConstraint::Axis(axis)))
+        });
         let handle = [DVec3::X, DVec3::Y, DVec3::Z]
             .into_iter()
             .filter_map(|axis| {

@@ -649,7 +649,7 @@ mod tests {
         c.entry_face = Some(u64::MAX);
         assert!(!c.evaluate(&model).errors.is_empty());
         c.entry_face = None;
-        let ids = model.expand_entities(&BTreeSet::from([c.members[1]]));
+        let ids = model.selection_vertices(&BTreeSet::from([c.members[1]]));
         for id in ids {
             if let Some(v) = model.vertices.get_mut(&id) {
                 v.position.z += 0.1;
@@ -702,8 +702,8 @@ mod tests {
         assert!(evaluation.errors.is_empty());
         assert!(evaluation.placements[0].tip.z < evaluation.placements[0].head.z);
         c.members.swap(0, 1);
-        let entities = model.expand_entities(&BTreeSet::from([c.members[1]]));
-        for id in entities {
+        let vertices = model.selection_vertices(&BTreeSet::from([c.members[1]]));
+        for id in vertices {
             if let Some(v) = model.vertices.get_mut(&id) {
                 if v.position.z > 0.039 {
                     v.position.z = 0.06;
@@ -728,7 +728,7 @@ mod tests {
         assert!(after.head.distance(rotate(before.head)) < TOL);
         assert!((after.penetration - before.penetration).abs() < TOL);
         let (mut model, c) = pair();
-        let ids = model.expand_entities(&BTreeSet::from([c.members[1]]));
+        let ids = model.selection_vertices(&BTreeSet::from([c.members[1]]));
         for id in ids {
             if let Some(v) = model.vertices.get_mut(&id) {
                 v.position.z -= 0.005;

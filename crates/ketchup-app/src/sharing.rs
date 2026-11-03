@@ -1920,10 +1920,12 @@ mod access_status_tests {
     use super::*;
     fn app() -> KetchupApp {
         let mut app = KetchupApp::with_document(Document::default(), None, true);
-        // Tests never contact a configured/personal server.
-        app.account.server.clear();
+        // Simulate an available server without contacting a personal server.
+        // A refresh can only attempt the unused loopback port.
+        app.account.server = "http://127.0.0.1:0".into();
+        app.account.server_reachable = true;
         app.doc.shared_project = Some(ketchup_core::SharedProject {
-            server: String::new(),
+            server: app.account.server.clone(),
             id: "a".repeat(48),
             revision: 1,
             server_updated_at: 100,

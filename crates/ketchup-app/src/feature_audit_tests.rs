@@ -23,6 +23,13 @@ pub(super) fn render_cases() -> Vec<RenderCase> {
         if value.is_boolean() {
             // Keys come from a static schema below to retain useful report names.
             let key = match key.as_str() {
+                "joinery_preview" => "joinery_preview",
+                "wood_joinery" => "wood_joinery",
+                "fasteners" => "fasteners",
+                "fastener_preview" => "fastener_preview",
+                "fastener_face_handles" => "fastener_face_handles",
+                "shadow_antialiasing" => "shadow_antialiasing",
+                "group_names" => "group_names",
                 "axes" => "axes",
                 "grid" => "grid",
                 "grid_auto_size" => "grid_auto_size",
@@ -160,6 +167,24 @@ pub(super) fn render_workspace(name: &str) -> KetchupApp {
     app.doc.camera.target = DVec3::new(1., 0., 1.);
     app.doc.camera.distance = 22.;
     match case.key {
+        "joinery_preview" | "wood_joinery" => {
+            app.doc.model = Model::default();
+            let a = ui_solid_box(&mut app.doc.model, DVec3::ZERO, DVec3::new(0.3, 0.1, 0.04));
+            let b = ui_solid_box(&mut app.doc.model, DVec3::new(0.25, 0., 0.), DVec3::new(0.55, 0.1, 0.04));
+            if case.key == "wood_joinery" {
+                app.doc.model.add_connection(ketchup_core::connections::Connection {
+                    members: [a, b],
+                    entry_face: None,
+                    operation: ketchup_core::connections::ConnectionOperation::Joinery(Default::default()),
+                }).unwrap();
+            } else {
+                app.selected = BTreeSet::from([a, b]);
+                app.open_joinery(&egui::Context::default());
+                app.doc.display.wood_joinery = true;
+            }
+            app.doc.camera.target = DVec3::new(0.275, 0.05, 0.02);
+            app.doc.camera.distance = 1.2;
+        }
         "grid_auto_size" | "grid_spacing" | "grid_infinite" | "grid_max_length" => {
             app.doc.display.grid = true;
             app.doc.display.grid_spacing = 0.25;
@@ -186,7 +211,7 @@ pub(super) fn render_workspace(name: &str) -> KetchupApp {
             app.doc.display.section_cuts = true
         }
         "profile_width" => app.doc.display.profiles = true,
-        "shadow_darkness" | "sun_angle" | "sun_elevation" => {
+        "shadow_antialiasing" | "shadow_darkness" | "sun_angle" | "sun_elevation" => {
             app.doc.display.shadows = true;
             // Shadows only fall on model faces. A receiving floor makes sun
             // elevation visibly change the shadow instead of merely leaving
@@ -266,7 +291,7 @@ fn options_workspace() -> Harness {
     for _ in 0..2 {
         h.frame(vec![], egui::Modifiers::NONE);
     }
-    for title in ["Propriétés", "Edge style", "Shadows", "Fog", "Environment"] {
+    for title in ["Properties", "Edge style", "Shadows", "Fog", "Environment"] {
         let output = h.frame(vec![], egui::Modifiers::NONE);
         h.click(sidebar_position(&h, &output, title));
         h.time += 1.;

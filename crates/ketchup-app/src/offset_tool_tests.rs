@@ -13,7 +13,7 @@ fn offset_single_face_groups_preserve_selection_context_cancel_and_undo() {
     for component in [false, true] {
         for nested in [false, true] {
             let mut h = Harness::new();
-            let face = modeling_rectangle(&mut h);
+            modeling_rectangle(&mut h);
             let inner = h
                 .app
                 .doc
@@ -29,6 +29,8 @@ fn offset_single_face_groups_preserve_selection_context_cancel_and_undo() {
             } else {
                 inner
             };
+            let face = *h.app.doc.model.faces.keys().next().unwrap();
+            let inner = h.app.doc.model.parent(face).unwrap();
             h.app.selected = BTreeSet::from([group]);
             h.app.set_tool(Tool::Offset);
             assert_eq!(h.app.selected_modeling_face(), Some(face));
@@ -62,13 +64,14 @@ fn offset_single_face_groups_preserve_selection_context_cancel_and_undo() {
 #[test]
 fn offset_does_not_auto_select_hidden_locked_or_multiple_group_faces() {
     let mut h = Harness::new();
-    let face = modeling_rectangle(&mut h);
+    modeling_rectangle(&mut h);
     let group = h
         .app
         .doc
         .model
         .make_object(&h.app.doc.model.selectable_entities(), false, "Panel")
         .unwrap();
+    let face = *h.app.doc.model.faces.keys().next().unwrap();
     h.app.selected = BTreeSet::from([group]);
     h.app.set_tool(Tool::Offset);
     for id in [group, face] {
@@ -204,10 +207,19 @@ fn offset_free_movement_keeps_vertical_and_tilted_face_planes() {
         h.click(h.at(u * 2. + v * 0.25));
         let anchor = h.app.modeling.as_ref().unwrap().anchor;
         let target = anchor + v * 0.6;
-        h.app.update_modeling(h.at(target));
+        let cursor = h.at(target);
+        let ray = h.app.doc.camera.ray(
+            dv(cursor - h.app.viewport.min), dv(h.app.viewport.size()),
+        );
+        // Reconstruct the expected plane hit from the actual f32 cursor;
+        // a tilted plane amplifies screen-coordinate rounding in world space.
+        let expected = ray.origin + ray.direction
+            * ((anchor - ray.origin).dot(normal) / ray.direction.dot(normal));
+        h.app.update_modeling(cursor);
         let edit = h.app.modeling.as_ref().unwrap();
-        assert!(edit.snap.unwrap().point.distance(target) < 1e-6);
-        assert!((edit.value - 0.6).abs() < 1e-6);
+        assert!(edit.snap.unwrap().point.distance(expected) < 1e-9);
+        assert!((edit.value - (expected - anchor).dot(edit.direction)).abs() < 1e-9);
+        assert!((edit.value - 0.6).abs() < 1e-5);
         assert!(
             edit.preview
                 .as_ref()

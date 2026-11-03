@@ -66,6 +66,7 @@ fn directional_push_pull_preserves_displacement_and_stretches_existing_caps() {
                 .make_object(&model.selectable_entities(), false, "Panel")
                 .unwrap();
             assert!(model.enter_object(group));
+            let face = *model.faces.keys().next().unwrap();
             let delta = axis * distance;
             let cap = model.push_pull_along(face, delta).unwrap();
             let check = |model: &Model, displacement: DVec3| {

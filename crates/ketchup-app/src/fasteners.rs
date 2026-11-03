@@ -812,6 +812,8 @@ mod tests {
     #[test]
     fn shared_pair_can_open_both_dialogs_while_awaiting_its_lease() {
         let (mut app, ctx, members) = fixture();
+        app.account.server = "http://127.0.0.1:0".into();
+        app.account.server_reachable = true;
         app.selected = BTreeSet::from(members);
         app.doc.shared_project = Some(ketchup_core::SharedProject {
             server: "https://sharing.example".into(),

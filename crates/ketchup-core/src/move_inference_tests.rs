@@ -211,9 +211,9 @@ fn combined_alignment_refines_edges_and_faces_without_leaving_the_surface() {
         if surface {
             let points = [
                 DVec3::new(1., 2., 2.),
-                DVec3::new(5., 2., 2.),
-                DVec3::new(5., 6., 2.),
-                DVec3::new(1., 6., 2.),
+                DVec3::new(6., 2., 2.),
+                DVec3::new(6., 7., 2.),
+                DVec3::new(1., 7., 2.),
             ];
             for i in 0..4 {
                 model.add_edge(points[i], points[(i + 1) % 4]).unwrap();

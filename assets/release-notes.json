@@ -1,5 +1,48 @@
 [
   {
+    "version": "0.6.0",
+    "date": "2026-11-03",
+    "title": "Woodworking joinery and connected projects",
+    "sections": [
+      {
+        "title": "Joinery and woodworking",
+        "changes": [
+          "Create and edit wood joints and connections in dedicated inspector sections, with joint previews, machining diagnostics, and cut guides.",
+          "Apply stock materials to descendant parts, choose wood types with searchable selectors, and customize sanding grits.",
+          "Export time and cost estimates to PDF. All PDF reports now share a branded header with the project name and generation date."
+        ]
+      },
+      {
+        "title": "Projects, sharing, and file formats",
+        "changes": [
+          "Save undo and redo history with projects and autosave, navigate document history, and access Undo and Redo from the app bar.",
+          "Reopen recent projects and use account, project-sharing, and real-time collaboration controls when an account server is configured.",
+          "Import STL and OBJ meshes and DXF profiles, and export STL files alongside the existing SketchUp import and OBJ export.",
+          "Preserve screenshot display settings, transparency, and framing when exporting images."
+        ]
+      },
+      {
+        "title": "Modeling and navigation",
+        "changes": [
+          "Use consistent modeling anchors and combined snapping across drawing, transform, measurement, and text tools, with remembered axis and plane locks.",
+          "Improve drawing groups, extrusion, and offset behavior, keep scaling near the center stable at different zoom levels, and clean up duplicate geometry and aligned vertices.",
+          "Pan with two fingers and pinch to zoom on touch devices. Display group labels in the viewport and align section planes with the active axes.",
+          "Adjust section cuts with multi-axis handles and configure finite grid dimensions, fading grids, and sun-direction cues."
+        ]
+      },
+      {
+        "title": "Workspace and performance",
+        "changes": [
+          "Remember dialog sizes and positions, resize from every edge and corner, and use searchable selectors and consistently centered inspector tables.",
+          "Refine Appearance and Color controls, tool highlighting, loading feedback, and inspector icons. Automatic Fasteners controls and previews are temporarily hidden.",
+          "Improve shadow boundaries, occlusion, and edge depth, and fade distant axes for clearer models.",
+          "Speed up viewport geometry and rendering with parallel work and caches for machining, joinery diagnostics, picking, and Outliner data. Enable per-viewport FPS diagnostics in Settings.",
+          "Send feature suggestions and issue reports from the app, with system diagnostics included in issue reports."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.5.0",
     "date": "2026-10-31",
     "title": "A customizable workspace and project estimates",
@@ -135,7 +178,7 @@
       {
         "title": "Editor",
         "changes": [
-          "Browse release history offline from Help → Release notes, with new notes opening automatically once per release.",
+          "Browse release history offline from Help \u2192 Release notes, with new notes opening automatically once per release.",
           "Use the Edit menu for shared selection commands, and expand or collapse an object's descendants from the Outliner context menu.",
           "Identify Outliner entities with clearer icons and labels, and read keyboard shortcuts in a cleaner layout."
         ]

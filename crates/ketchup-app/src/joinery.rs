@@ -977,6 +977,9 @@ mod tests {
         let (mut app, ctx, members) = fixture();
         let group = app.doc.model.make_object(&BTreeSet::from(members), true, "Assembly").unwrap();
         assert!(app.doc.model.enter_object(group));
+        let members: [u64; 2] = app.doc.model.objects[&group].entities.iter()
+            .copied().collect::<Vec<_>>().try_into().unwrap();
+        app.selected = BTreeSet::from(members);
         app.open_joinery(&ctx);
         assert!(app.joinery.open);
         let model = app.doc.model.clone();
