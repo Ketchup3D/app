@@ -280,6 +280,12 @@ impl Model {
             return Err("Invalid wood joint settings or pair of boards");
         }
         let (a, b) = (board(stock, members[0])?, board(stock, members[1])?);
+        self.cut_joint_with_bounds(members, settings, [a, b])
+    }
+
+    fn cut_joint_with_bounds(&mut self, members: [u64; 2], settings: &JointSettings,
+        [a, b]: [(DVec3, DVec3); 2]) -> Result<(), &'static str>
+    {
         let (lo, hi) = (a.0.max(b.0), a.1.min(b.1));
         let size = hi - lo;
         if size.min_element() <= EPS * 10. {
@@ -461,6 +467,162 @@ pub struct GeometryEvaluation {
     pub model: Model,
     pub errors: Vec<(u64, String)>,
 }
+
+/// Reuse each cut while its stock, incoming machined boards and allocation
+/// preconditions remain unchanged. Checked deltas preserve unrelated edits and
+/// naturally invalidate downstream cuts that share a changed board.
+#[derive(Default)]
+pub struct EvaluationCache {
+    cuts: std::collections::BTreeMap<u64, CachedCut>,
+    boards: std::collections::BTreeMap<u64, (BoardSnapshot, Result<(DVec3, DVec3), &'static str>)>,
+    #[cfg(test)]
+    evaluations: usize,
+}
+
+struct CachedCut {
+    members: [u64; 2],
+    settings: JointSettings,
+    stock: BoardSnapshot,
+    input: BoardSnapshot,
+    change: crate::history::ModelChange,
+    error: Option<String>,
+}
+
+/// Small source keys for machining and guide caches. Unlike copy_entities,
+/// constructing a key never clones unrelated objects or their preferences.
+#[derive(PartialEq)]
+pub struct BoardSnapshot {
+    next_id: u64,
+    vertices: Vec<crate::Vertex>,
+    edges: Vec<crate::Edge>,
+    faces: Vec<crate::Face>,
+    objects: Vec<crate::Object>,
+    colors: Vec<(u64, [u8; 3])>,
+    connections: Vec<(u64, crate::connections::Connection)>,
+    hidden: Vec<u64>,
+    locked: Vec<u64>,
+    tags: Vec<(u64, u64)>,
+}
+
+impl BoardSnapshot {
+    pub fn new(model: &Model, members: [u64; 2]) -> Self {
+        let mut ids = model.expand_entities(&BTreeSet::from(members));
+        ids.extend(model.boundary_edges(&ids));
+        let edges: Vec<_> = ids.iter().filter_map(|id| model.edges.get(id).cloned()).collect();
+        let vertices: BTreeSet<_> = edges.iter().flat_map(|edge| [edge.a, edge.b]).collect();
+        Self {
+            next_id: model.next_id,
+            vertices: vertices.iter().filter_map(|id| model.vertices.get(id).cloned()).collect(),
+            edges,
+            faces: ids.iter().filter_map(|id| model.faces.get(id).cloned()).collect(),
+            objects: ids.iter().filter_map(|id| model.objects.get(id).cloned()).collect(),
+            colors: ids.iter().filter_map(|id| model.face_colors.get(id).map(|color| (*id, *color))).collect(),
+            connections: model.connections.iter().filter(|(_, c)| c.members.iter().any(|id| ids.contains(id)))
+                .map(|(id, c)| (*id, c.clone())).collect(),
+            hidden: model.hidden.intersection(&ids).copied().collect(),
+            locked: model.locked.intersection(&ids).copied().collect(),
+            tags: ids.iter().filter_map(|id| model.entity_tags.get(id).map(|tag| (*id, *tag))).collect(),
+        }
+    }
+
+    pub fn same_geometry(&self, other: &Self) -> bool {
+        self.vertices == other.vertices && self.edges == other.edges
+            && self.faces == other.faces && self.objects == other.objects
+    }
+
+    fn transformed_bounds(&self, old: &Self, bounds: (DVec3, DVec3)) -> Option<(DVec3, DVec3)> {
+        if self.edges != old.edges || self.faces != old.faces || self.vertices.len() != old.vertices.len()
+            || self.hidden != old.hidden || self.locked != old.locked || self.objects.len() != old.objects.len()
+            || !self.objects.iter().zip(&old.objects).all(|(a, b)| {
+                let (mut a, mut b) = (a.clone(), b.clone());
+                a.transform = None; b.transform = None; a == b
+            }) { return None; }
+        let lo = self.vertices.iter().map(|v| v.position).reduce(DVec3::min)?;
+        let hi = self.vertices.iter().map(|v| v.position).reduce(DVec3::max)?;
+        let size = hi - lo;
+        if !lo.is_finite() || !hi.is_finite() || size.min_element() <= EPS * 10. { return None; }
+        let scale = size / (bounds.1 - bounds.0);
+        self.vertices.iter().zip(&old.vertices).all(|(a, b)| a.id == b.id
+            && (a.position - (lo + (b.position - bounds.0) * scale)).abs().max_element() < EPS * 0.01)
+            .then_some((lo, hi))
+    }
+}
+
+impl EvaluationCache {
+    fn board_bounds(&mut self, source: &Model, id: u64) -> Result<(DVec3, DVec3), &'static str> {
+        let snapshot = BoardSnapshot::new(source, [id, id]);
+        if let Some((old, result)) = self.boards.get(&id) {
+            if *old == snapshot { return *result; }
+            if let Ok(bounds) = result {
+                if let Some(bounds) = snapshot.transformed_bounds(old, *bounds) {
+                    self.boards.insert(id, (snapshot, Ok(bounds)));
+                    return Ok(bounds);
+                }
+            }
+        }
+        let result = board(source, id);
+        self.boards.insert(id, (snapshot, result));
+        result
+    }
+
+    pub fn evaluate(&mut self, source: &Model) -> GeometryEvaluation {
+        use crate::connections::ConnectionOperation;
+        self.cuts.retain(|id, _| source.connections.get(id)
+            .is_some_and(|c| matches!(c.operation, ConnectionOperation::Joinery(_))));
+        self.boards.retain(|id, _| source.objects.contains_key(id));
+        // Derived IDs are not saved. Give independent cuts stable disjoint
+        // allocation ranges so a changed upstream cut cannot invalidate every
+        // later cached cut merely by allocating a different number of faces.
+        const STRIDE: u64 = 2_000_000;
+        let count = self.cuts.len().max(source.connections.len()) as u64;
+        if count.checked_add(2).and_then(|n| n.checked_mul(STRIDE))
+            .and_then(|n| source.next_id.checked_add(n)).is_none()
+        { return source.evaluate_joinery(); }
+        let mut model = source.clone();
+        let context = model.edit_context.take();
+        let mut errors = Vec::new();
+        let mut slot = 0;
+        for (&id, connection) in &source.connections {
+            let ConnectionOperation::Joinery(settings) = &connection.operation else { continue };
+            let start = source.next_id + slot * STRIDE;
+            slot += 1;
+            model.next_id = start;
+            let stock = BoardSnapshot::new(source, connection.members);
+            let input = BoardSnapshot::new(&model, connection.members);
+            if let Some(cut) = self.cuts.get(&id) {
+                if cut.members == connection.members && cut.settings == *settings
+                    && cut.stock == stock && cut.input == input
+                    && cut.change.apply_checked(&mut model, true)
+                {
+                    if let Some(error) = &cut.error { errors.push((id, error.clone())); }
+                    continue;
+                }
+            }
+            let before = model.clone();
+            let result = if !settings.valid() || connection.members[0] == connection.members[1] {
+                Err("Invalid wood joint settings or pair of boards")
+            } else {
+                self.board_bounds(source, connection.members[0]).and_then(|a|
+                    self.board_bounds(source, connection.members[1]).and_then(|b|
+                        model.cut_joint_with_bounds(connection.members, settings, [a, b])))
+            };
+            let error = result.err().map(str::to_owned);
+            if model.next_id >= start + STRIDE {
+                self.cuts.clear();
+                return source.evaluate_joinery();
+            }
+            if let Some(error) = &error { errors.push((id, error.clone())); }
+            #[cfg(test)] { self.evaluations += 1; }
+            self.cuts.insert(id, CachedCut {
+                members: connection.members, settings: settings.clone(), stock, input,
+                change: crate::history::ModelChange::between(&before, &model), error,
+            });
+        }
+        model.edit_context = context;
+        model.connections.retain(|_, c| matches!(c.operation, ConnectionOperation::Fasteners(_)));
+        GeometryEvaluation { model, errors }
+    }
+}
 impl Model {
     pub fn evaluate_joinery(&self) -> GeometryEvaluation {
         use crate::connections::ConnectionOperation;
@@ -538,6 +700,64 @@ mod tests {
             false,
         );
         (model, [a, b])
+    }
+    #[test]
+    fn incremental_joinery_reuses_unaffected_cuts_and_matches_fresh_evaluation() {
+        let (mut model, members) = pair();
+        model.add_connection(Connection { members, entry_face: None,
+            operation: ConnectionOperation::Joinery(JointSettings::default()) }).unwrap();
+        let unrelated = board_at(&mut model, DVec3::splat(2.), DVec3::splat(2.2), false);
+        let mut cache = EvaluationCache::default();
+        cache.evaluate(&model);
+        assert_eq!(cache.evaluations, 1);
+        for vertex in model.selection_vertices(&BTreeSet::from([unrelated])) {
+            model.vertices.get_mut(&vertex).unwrap().position.x += 0.1;
+        }
+        let cached = cache.evaluate(&model);
+        assert_eq!(cache.evaluations, 1, "unrelated movement must reuse machining");
+        assert_eq!(cached.model.vertices, model.evaluate_joinery().model.vertices);
+        for offset in [0.01, 1., -1., -0.01] {
+            for vertex in model.selection_vertices(&BTreeSet::from([members[1]])) {
+                model.vertices.get_mut(&vertex).unwrap().position.x += offset;
+            }
+            let cached = cache.evaluate(&model);
+            let fresh = model.evaluate_joinery();
+            assert_eq!(cached.errors, fresh.errors);
+            assert_eq!(cached.model.vertices, fresh.model.vertices);
+            assert_eq!(cached.model.edges, fresh.model.edges);
+            assert_eq!(cached.model.faces, fresh.model.faces);
+            cached.model.validate().unwrap();
+        }
+        model.connections.clear();
+        assert!(cache.evaluate(&model).errors.is_empty());
+        assert!(cache.cuts.is_empty());
+    }
+
+    #[test]
+    fn changed_cut_allocation_does_not_invalidate_independent_joints() {
+        let (mut source, first) = pair();
+        let second = [
+            board_at(&mut source, DVec3::Y, DVec3::new(0.3, 1.1, 0.04), false),
+            board_at(&mut source, DVec3::new(0.25, 1., 0.), DVec3::new(0.55, 1.1, 0.04), false),
+        ];
+        for members in [first, second] {
+            source.add_connection(Connection { members, entry_face: None,
+                operation: ConnectionOperation::Joinery(Default::default()) }).unwrap();
+        }
+        let mut cache = EvaluationCache::default();
+        cache.evaluate(&source);
+        assert_eq!(cache.evaluations, 2);
+        for id in source.selection_vertices(&BTreeSet::from([first[1]])) {
+            source.vertices.get_mut(&id).unwrap().position.x += 1.;
+        }
+        let result = cache.evaluate(&source);
+        assert_eq!(cache.evaluations, 3, "an independent joint must keep its geometry and IDs");
+        let fresh = source.evaluate_joinery();
+        assert_eq!(result.errors, fresh.errors);
+        for id in second {
+            assert!((result.model.solid_volume(id).unwrap() - fresh.model.solid_volume(id).unwrap()).abs() < 1e-9);
+        }
+        result.model.validate().unwrap();
     }
     #[test]
     fn all_six_profiles_remove_only_overlap_and_leave_two_valid_nonintersecting_boards() {

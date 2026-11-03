@@ -78,6 +78,35 @@ pub struct ModelSnapshot {
     revision: u64,
 }
 
+pub(crate) struct GroupMarker {
+    pub id: u64,
+    pub point: DVec3,
+    pub owners: std::collections::BTreeSet<u64>,
+}
+
+#[derive(Default)]
+pub(crate) struct GroupMarkerCache {
+    revision: Option<u64>,
+    markers: Arc<[GroupMarker]>,
+}
+
+impl GroupMarkerCache {
+    pub fn update(&mut self, model: &Model, revision: u64) -> Arc<[GroupMarker]> {
+        if self.revision != Some(revision) {
+            self.markers = model.objects.values().filter_map(|object| {
+                let mut points = model.selection_vertices(&object.entities).into_iter()
+                    .filter_map(|id| model.vertices.get(&id).map(|v| v.position));
+                let first = points.next()?;
+                let (lo, hi) = points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p)));
+                Some(GroupMarker { id: object.id, point: (lo + hi) * 0.5,
+                    owners: model.expand_entities(&std::collections::BTreeSet::from([object.id])) })
+            }).collect::<Vec<_>>().into();
+            self.revision = Some(revision);
+        }
+        Arc::clone(&self.markers)
+    }
+}
+
 impl ModelSnapshot {
     pub fn update(&mut self, model: &Model) -> u64 {
         if self.model.as_ref() != Some(model) {
@@ -180,6 +209,7 @@ pub(super) struct JointSurface {
 struct SurfaceCandidate {
     index: usize,
     bounds: Option<[DVec2; 2]>,
+    planes: Option<[(DVec2, DVec2, f64); 4]>,
 }
 
 struct JointSurfaceTriangle {
@@ -188,7 +218,7 @@ struct JointSurfaceTriangle {
     gradient: DVec2,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct JointSurfaceCache {
     camera: Camera,
     size: DVec2,
@@ -197,6 +227,7 @@ struct JointSurfaceCache {
     entries: BTreeMap<u64, CachedJointSurface>,
     used: std::collections::BTreeSet<u64>,
 }
+#[derive(Clone)]
 struct CachedJointSurface {
     stock: Vec<[DVec3; 3]>,
     surface: Arc<JointSurface>,
@@ -204,6 +235,7 @@ struct CachedJointSurface {
 }
 
 pub struct Mesh {
+    joint_guide_bounds: BTreeMap<u64, (DVec2, DVec2)>,
     visible_joint_surfaces: BTreeMap<u64, (Arc<JointSurface>, Arc<JointSurface>, (u64, u64))>,
     joint_surfaces: JointSurfaceCache,
     record_annotation_occluders: bool,
@@ -225,9 +257,37 @@ pub struct Mesh {
     buffer_pool: Option<BufferPool>,
     gpu_pool: GpuBufferPool,
 }
+
+pub(crate) struct EdgeDraw {
+    pub id: u64,
+    pub key: (u64, u64),
+    pub points: [DVec3; 2],
+    pub width: f64,
+    pub color: Color32,
+    pub back: bool,
+    pub visible: bool,
+    pub overlay: bool,
+}
+pub(crate) struct FaceDraw<'a> {
+    pub face: &'a Face,
+    pub cached: &'a CachedFace,
+    pub color: Color32,
+    pub shadow: Option<(&'a crate::shadows::FaceShadow, Color32)>,
+}
+pub(crate) struct JointSurfaceRequest {
+    pub owner: u64,
+    pub stock: Arc<[[DVec3; 3]]>,
+    pub own_entities: Arc<std::collections::BTreeSet<u64>>,
+}
 impl Mesh {
+    pub(crate) fn prepare_joint_surfaces(&mut self, requests: &[JointSurfaceRequest]) {
+        self.paint_overlays(requests, 2, |mesh, request| {
+            mesh.cached_joint_surface_for_entities(request.owner, &request.stock, &request.own_entities);
+        });
+    }
     pub fn new(camera: &Camera, size: DVec2) -> Self {
         Self {
+            joint_guide_bounds: BTreeMap::new(),
             visible_joint_surfaces: BTreeMap::new(),
             joint_surfaces: JointSurfaceCache {
                 camera: camera.clone(),
@@ -238,7 +298,7 @@ impl Mesh {
             gpu_edge_occlusion: false,
             shadow_vertices: Vec::new(),
             clip_stroke_footprints: false,
-            selection_occlusion: Occlusion::default(),
+            selection_occlusion: Occlusion { outline_order: true, ..Default::default() },
             annotation_occluders: Vec::new(),
             vertices: Vec::new(),
             indices: Vec::new(),
@@ -283,6 +343,7 @@ impl Mesh {
         mesh.occlusion = std::mem::take(&mut cache.occlusion);
         mesh.occlusion.begin_frame();
         mesh.selection_occlusion = std::mem::take(&mut cache.selection_occlusion);
+        mesh.selection_occlusion.outline_order = true;
         mesh.selection_occlusion.begin_frame();
         mesh.annotation_occluders = std::mem::take(&mut cache.annotation_occluders);
         mesh.annotation_occluders.clear();
@@ -339,16 +400,16 @@ impl Mesh {
         let color = self.fog_color(color, (a + b) * 0.5);
         if let Some((a, b)) = self.view.segment(a, b) {
             if dashed {
-                let length = a.distance(b).max(1.);
-                for i in 0..(length / 8.).ceil() as usize {
-                    self.line(
-                        a.lerp(b, (i as f64 * 8. / length).min(1.)).extend(0.),
-                        a.lerp(b, ((i as f64 * 8. + 4.) / length).min(1.))
-                            .extend(0.),
-                        width,
-                        color,
-                    );
-                }
+                let delta = b - a;
+                if delta.length_squared() < 0.01 { return; }
+                let length = delta.length();
+                let normal = DVec2::new(-delta.y, delta.x) / length;
+                let fringe = (normal.x.abs() + normal.y.abs()) / self.pixels_per_point;
+                let n = normal * (width + fringe) * 0.5;
+                // Screen overlays do not supply annotation/depth masks. Keep
+                // their existing four-pixel dash/four-pixel gap on one strip.
+                self.emit_stroke_geometry(&[a + n, b + n, b - n, a - n], a.extend(0.),
+                    DVec2::ZERO, a, n, color, Some(delta / (length * 8.)));
             } else {
                 self.line(a.extend(0.), b.extend(0.), width, color);
             }
@@ -372,6 +433,8 @@ impl Mesh {
         stock: &[[DVec3; 3]],
         own_entities: &std::collections::BTreeSet<u64>,
     ) -> Arc<JointSurface> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _profile = crate::app::viewport_benchmark::scope("guide_surface_cpu");
         let projected = self.projected_joint_surface(owner, stock);
         self.occlusion.finish_collection();
         self.selection_occlusion.finish_collection();
@@ -384,7 +447,13 @@ impl Mesh {
         let mut surface = JointSurface::default();
         let mut occluders = Vec::new();
         for triangle in &projected.triangles {
-            let polygon = triangle.points.map(DVec3::truncate);
+            let mut polygon = triangle.points.map(DVec3::truncate).to_vec();
+            if let Some(&(lo, hi)) = self.joint_guide_bounds.get(&owner) {
+                for axis in 0..2 {
+                    polygon = clip_polygon(&polygon, |p| p[axis] - lo[axis]);
+                    polygon = clip_polygon(&polygon, |p| hi[axis] - p[axis]);
+                }
+            }
             occluders.push((
                 self.occlusion.precision_candidates(
                     &polygon,
@@ -408,6 +477,19 @@ impl Mesh {
         self.visible_joint_surfaces
             .insert(owner, (projected, Arc::clone(&surface), revisions));
         surface
+    }
+
+    pub(super) fn register_joint_guide(&mut self, owner: u64, a: DVec3, b: DVec3) {
+        let Some((a, b)) = self.section_line(a, b) else { return };
+        let Some((a, b)) = self.view.segment_depth(a, b) else { return };
+        // Include the complete antialiased footprint at every endpoint. The
+        // union is registered before any board surface is queried or cached.
+        let padding = DVec2::splat(1.8 + 2. / self.pixels_per_point);
+        let lo = a.truncate().min(b.truncate()) - padding;
+        let hi = a.truncate().max(b.truncate()) + padding;
+        self.joint_guide_bounds.entry(owner).and_modify(|bounds| {
+            bounds.0 = bounds.0.min(lo); bounds.1 = bounds.1.max(hi);
+        }).or_insert((lo, hi));
     }
 
     fn projected_joint_surface(&mut self, owner: u64, stock: &[[DVec3; 3]]) -> Arc<JointSurface> {
@@ -527,6 +609,8 @@ impl Mesh {
         color: Color32,
         dashed: bool,
     ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _profile = crate::app::viewport_benchmark::scope("guide_emit_cpu");
         let Some((a, b)) = self.section_line(a, b) else {
             return;
         };
@@ -705,6 +789,7 @@ impl Mesh {
             }
         }
     }
+    #[cfg(test)]
     pub fn styled_edge(
         &mut self,
         edge: &ketchup_core::Edge,
@@ -726,6 +811,226 @@ impl Mesh {
             *entry = surfaces;
         }
     }
+
+    fn draw_face(&mut self, face: &FaceDraw<'_>) {
+        self.set_entity(Some(face.face.id));
+        self.face_edges(face.face, face.cached);
+        if let Some((shadow, shaded)) = face.shadow {
+            if self.display.shadow_antialiasing {
+                self.shadow_receiver(&face.cached.triangles, face.color, shaded);
+            } else {
+                self.shadow_face(&face.cached.triangles, shadow, face.color, shaded);
+            }
+        } else {
+            for &triangle in &face.cached.triangles {
+                self.face_triangle(triangle, face.color, true, true);
+            }
+        }
+    }
+
+    pub(crate) fn draw_faces(&mut self, faces: &[FaceDraw<'_>]) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if faces.len() >= 64 {
+            let workers = crate::viewport_workers::parallelism();
+            if workers > 1 {
+                let chunks: Vec<_> = faces
+                    .chunks(faces.len().div_ceil(workers))
+                    .map(|chunk| {
+                        let mut mesh = Self::new(&self.joint_surfaces.camera, self.size);
+                        mesh.display = self.display.clone();
+                        (chunk, mesh)
+                    })
+                    .collect();
+                let profiling = crate::app::viewport_benchmark::profiling();
+                let meshes = crate::viewport_workers::map(
+                    crate::viewport_workers::Kind::Render,
+                    chunks,
+                    |(chunk, mut mesh)| {
+                        crate::app::viewport_benchmark::profile_worker(profiling, || {
+                            for face in chunk {
+                                mesh.draw_face(face);
+                            }
+                            mesh
+                        })
+                    },
+                );
+                for (mut mesh, timings) in meshes {
+                    crate::app::viewport_benchmark::absorb_worker(timings);
+                    let base = self.vertices.len() as u32;
+                    let index_base = self.indices.len() as u32;
+                    self.vertices.append(&mut mesh.vertices);
+                    self.indices.extend(mesh.indices.iter().map(|i| base + i));
+                    for range in &mesh.triangle_ranges {
+                        let range = range.start + index_base..range.end + index_base;
+                        if let Some(previous) = self
+                            .triangle_ranges
+                            .last_mut()
+                            .filter(|previous| previous.end == range.start)
+                        {
+                            previous.end = range.end;
+                        } else {
+                            self.triangle_ranges.push(range);
+                        }
+                    }
+                    self.shadow_vertices.append(&mut mesh.shadow_vertices);
+                    for triangle in mesh.occlusion.triangles.iter() {
+                        self.occlusion.entity = triangle.entity;
+                        self.occlusion.insert(triangle.points);
+                    }
+                    for (key, mut surfaces) in mesh.edge_surfaces {
+                        self.edge_surfaces
+                            .entry(key)
+                            .or_default()
+                            .append(&mut surfaces);
+                    }
+                }
+                self.draw_shadow_masks(faces);
+                return;
+            }
+        }
+        for face in faces {
+            self.draw_face(face);
+        }
+        self.draw_shadow_masks(faces);
+    }
+
+    pub(crate) fn draw_edges(&mut self, edges: &[EdgeDraw], extensions: bool, endpoints: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _profile = crate::app::viewport_benchmark::scope("edge_batch");
+        let surfaces = std::mem::take(&mut self.edge_surfaces);
+        self.paint_overlays_with_outlines(edges, 128, self.clip_stroke_footprints, |mesh, edge| {
+            mesh.set_entity(Some(edge.id));
+            let [a, b] = edge.points;
+            if edge.back {
+                mesh.overlay_line(a, b, 1., edge.color.gamma_multiply(0.4), true);
+            }
+            if edge.visible {
+                if edge.overlay {
+                    mesh.overlay_line(a, b, edge.width, edge.color, false);
+                } else {
+                    mesh.surface_line(
+                        a,
+                        b,
+                        edge.width,
+                        edge.color,
+                        extensions,
+                        endpoints,
+                        surfaces
+                            .get(&edge.key)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+        });
+        self.edge_surfaces = surfaces;
+    }
+
+    /// Prepare independent overlay strokes concurrently, then merge in draw
+    /// order. Each worker reads the same completed face/outline masks; only
+    /// ordinary edges add outlines, which are merged before the selected pass.
+    pub(crate) fn paint_overlays<T: Sync>(
+        &mut self,
+        items: &[T],
+        threshold: usize,
+        paint: impl Fn(&mut Mesh, &T) + Sync,
+    ) {
+        self.paint_overlays_with_outlines(items, threshold, true, paint);
+    }
+
+    fn paint_overlays_with_outlines<T: Sync>(
+        &mut self,
+        items: &[T],
+        threshold: usize,
+        read_outlines: bool,
+        paint: impl Fn(&mut Mesh, &T) + Sync,
+    ) {
+        #[cfg(target_arch = "wasm32")]
+        let _ = (threshold, read_outlines);
+        #[cfg(not(target_arch = "wasm32"))]
+        if items.len() >= threshold {
+            let workers = crate::viewport_workers::parallelism();
+            if workers > 1 {
+                let sections = self.display.section_limits();
+                if self.joint_surfaces.sections != sections {
+                    self.joint_surfaces.sections = sections;
+                    self.joint_surfaces.view_revision =
+                        self.joint_surfaces.view_revision.wrapping_add(1);
+                }
+                self.occlusion.prepare_queries();
+                // Ordinary edges only append outlines. Do not finish their
+                // collection here: that would truncate last frame's hierarchy
+                // to the axes and force a full rebuild after every edge pass.
+                if read_outlines {
+                    self.selection_occlusion.prepare_queries();
+                }
+                let inherited_outlines = if read_outlines {
+                    self.selection_occlusion.triangles.len()
+                } else {
+                    0
+                };
+                let chunks: Vec<_> = items
+                    .chunks(items.len().div_ceil(workers))
+                    .map(|chunk| (chunk, self.overlay_worker(read_outlines)))
+                    .collect();
+                let profiling = crate::app::viewport_benchmark::profiling();
+                let meshes = crate::viewport_workers::map(
+                    crate::viewport_workers::Kind::Render,
+                    chunks,
+                    |(chunk, mut mesh)| {
+                        crate::app::viewport_benchmark::profile_worker(profiling, || {
+                            for item in chunk {
+                                paint(&mut mesh, item);
+                            }
+                            mesh
+                        })
+                    },
+                );
+                for (mut mesh, timings) in meshes {
+                    crate::app::viewport_benchmark::absorb_worker(timings);
+                    let base = self.vertices.len() as u32;
+                    self.vertices.append(&mut mesh.vertices);
+                    self.indices.extend(mesh.indices.iter().map(|i| base + i));
+                    self.annotation_occluders
+                        .append(&mut mesh.annotation_occluders);
+                    self.visible_joint_surfaces
+                        .append(&mut mesh.visible_joint_surfaces);
+                    for triangle in &mesh.selection_occlusion.triangles[inherited_outlines..] {
+                        self.selection_occlusion.entity = triangle.entity;
+                        self.selection_occlusion.insert(triangle.points);
+                    }
+                    for owner in &mesh.joint_surfaces.used {
+                        self.joint_surfaces.used.insert(*owner);
+                        if let Some(entry) = mesh.joint_surfaces.entries.remove(owner) {
+                            self.joint_surfaces.entries.insert(*owner, entry);
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        for item in items {
+            paint(self, item);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn overlay_worker(&self, read_outlines: bool) -> Self {
+        let mut mesh = Self::new(&self.joint_surfaces.camera, self.size);
+        mesh.display = self.display.clone();
+        mesh.pixels_per_point = self.pixels_per_point;
+        mesh.gpu_edge_occlusion = self.gpu_edge_occlusion;
+        mesh.record_annotation_occluders = self.record_annotation_occluders;
+        mesh.clip_stroke_footprints = self.clip_stroke_footprints;
+        mesh.occlusion = self.occlusion.query_copy();
+        if read_outlines {
+            mesh.selection_occlusion = self.selection_occlusion.query_copy();
+        }
+        mesh.joint_surfaces = self.joint_surfaces.clone();
+        mesh.joint_surfaces.used.clear();
+        mesh.joint_guide_bounds = self.joint_guide_bounds.clone();
+        mesh
+    }
     pub fn styled_line(
         &mut self,
         a: DVec3,
@@ -737,6 +1042,7 @@ impl Mesh {
     ) {
         self.surface_line(a, b, width, color, extensions, endpoints, &[]);
     }
+
     fn surface_line(
         &mut self,
         a: DVec3,
@@ -839,13 +1145,14 @@ impl Mesh {
                     ([a, b][endpoint] + offset).extend(depths[endpoint] + depth_offset)
                 })
                 .collect();
-            for triangle in indices.chunks_exact(3) {
-                let points = [
-                    projected[triangle[0] as usize],
-                    projected[triangle[1] as usize],
-                    projected[triangle[2] as usize],
-                ];
-                let Some(gradient) = depth_gradient(points) else {
+            // Each side is planar. Clip its quad once rather than querying
+            // the same visibility hierarchies for both triangle halves.
+            let quads: &[[usize; 4]] = if projected.len() == 6 {
+                &[[0, 1, 3, 2], [1, 4, 5, 3]]
+            } else { &[[0, 1, 3, 2]] };
+            for quad in quads {
+                let points = quad.map(|index| projected[index]);
+                let Some(gradient) = depth_gradient([points[0], points[1], points[2]]) else {
                     continue;
                 };
                 let origin = points[0];
@@ -915,7 +1222,7 @@ impl Mesh {
         n: DVec2,
         color: Color32,
     ) {
-        for polygon in self.visible_stroke_polygons(polygon, origin, gradient) {
+        for polygon in self.visible_stroke_polygons_with_depth(polygon, origin, gradient, self.gpu_edge_occlusion) {
             self.emit_stroke_polygon(&polygon, origin, gradient, a, n, color);
         }
     }
@@ -926,18 +1233,35 @@ impl Mesh {
         origin: DVec3,
         gradient: DVec2,
     ) -> Vec<Vec<DVec2>> {
+        // Annotation shapes paint in egui's screen layer and cannot defer any
+        // occlusion to the viewport depth buffer.
+        self.visible_stroke_polygons_with_depth(polygon, origin, gradient, false)
+    }
+
+    fn visible_stroke_polygons_with_depth(
+        &mut self, polygon: Vec<DVec2>, origin: DVec3, gradient: DVec2, gpu_depth: bool,
+    ) -> Vec<Vec<DVec2>> {
         #[cfg(not(target_arch = "wasm32"))]
         let _profile = crate::app::viewport_benchmark::scope("stroke_clip");
-        let polygons = self
-            .occlusion
-            .visible_surface_polygons(polygon, origin, gradient);
+        let polygons = if gpu_depth {
+            let candidates = self.occlusion.precision_candidates(
+                &polygon, origin, gradient, true, &Default::default());
+            self.occlusion.visible_surface_candidates(polygon, origin, gradient, &candidates)
+        } else {
+            self.occlusion.visible_surface_polygons(polygon, origin, gradient)
+        };
         // Ordinary outlines occlude strokes only where their real
         // projected surface is nearer, including across wide strokes.
         polygons
             .into_iter()
             .flat_map(|polygon| {
-                self.selection_occlusion
-                    .visible_surface_polygons(polygon, origin, gradient)
+                if gpu_depth {
+                    let candidates = self.selection_occlusion.precision_candidates(
+                        &polygon, origin, gradient, true, &Default::default());
+                    self.selection_occlusion.visible_surface_candidates(polygon, origin, gradient, &candidates)
+                } else {
+                    self.selection_occlusion.visible_surface_polygons(polygon, origin, gradient)
+                }
             })
             .collect()
     }
@@ -1129,19 +1453,23 @@ impl Mesh {
         stroke: egui::Stroke,
     ) -> Vec<egui::Shape> {
         let screen = |p: DVec3| viewport.min + egui::vec2(p.x as f32, p.y as f32);
-        let shape = egui::Shape::line_segment([screen(a), screen(b)], stroke);
+        let segment = [screen(a), screen(b)];
+        let shape = egui::Shape::line_segment(segment, stroke);
         let bounds = shape
             .visual_bounding_rect()
             .expand(1. / painter.ctx().pixels_per_point());
         let local = bounds.translate(-viewport.min.to_vec2());
-        let polygon: Vec<_> = [
-            local.left_top(),
-            local.right_top(),
-            local.right_bottom(),
-            local.left_bottom(),
-        ]
-        .map(|p| DVec2::new(f64::from(p.x), f64::from(p.y)))
-        .into();
+        let [start, end] = segment.map(|p| {
+            let p = p - viewport.min;
+            DVec2::new(f64::from(p.x), f64::from(p.y))
+        });
+        let polygon = if start.distance_squared(end) > 1e-12 {
+            annotation_stroke_footprint(start, end, f64::from(stroke.width) * 0.5
+                + 2. / f64::from(painter.ctx().pixels_per_point()))
+        } else {
+            [local.left_top(), local.right_top(), local.right_bottom(), local.left_bottom()]
+                .map(|p| DVec2::new(f64::from(p.x), f64::from(p.y))).into()
+        };
         let delta = (b - a).truncate();
         let gradient = if delta.length_squared() > 1e-12 {
             delta * ((b.z - a.z) / delta.length_squared())
@@ -1251,16 +1579,7 @@ impl Mesh {
         // Keep the receiving face's original hard silhouette. Only its shadow
         // coverage is multisampled; ordinary geometry never uses that resolve.
         if self.display.shadow_antialiasing {
-            for &triangle in triangles {
-                let start = self.vertices.len();
-                self.face_triangle(triangle, color, true, true);
-                let shadow_color = self
-                    .fog_color(shaded, triangle.iter().sum::<DVec3>() / 3.)
-                    .to_array();
-                for vertex in &mut self.vertices[start..] {
-                    vertex.shadow_color = shadow_color;
-                }
-            }
+            self.shadow_receiver(triangles, color, shaded);
             // Replace receivers in the mask with their nonoverlapping lit and
             // shaded partitions. Testing an overlay against the original face
             // fights its independently rounded depth, especially in isometric
@@ -1271,27 +1590,8 @@ impl Mesh {
                 .map(|&triangle| (triangle, [0, 0, 0, 255]))
                 .chain(shadow.shaded.iter().map(|&triangle| (triangle, [255; 4])))
             {
-                let (polygon, len) = self.display.section_triangle(triangle);
-                for i in 1..len.saturating_sub(1) {
-                    self.view.for_each_triangle_depth(
-                        [polygon[0], polygon[i], polygon[i + 1]],
-                        |triangle| {
-                            for p in triangle {
-                                self.shadow_vertices.push(Vertex {
-                                    dash_phase: -1.,
-                                    position: [
-                                        (p.x / self.size.x * 2. - 1.) as f32,
-                                        (1. - p.y / self.size.y * 2.) as f32,
-                                        p.z.clamp(0., 1.) as f32,
-                                    ],
-                                    color: coverage,
-                                    lateral: 0.,
-                                    shadow_color: [0; 4],
-                                });
-                            }
-                        },
-                    );
-                }
+                Self::project_shadow_triangle(&self.view, &self.display, self.size,
+                    triangle, coverage, &mut self.shadow_vertices);
             }
         } else {
             for &triangle in triangles {
@@ -1305,6 +1605,115 @@ impl Mesh {
             }
         }
     }
+    fn shadow_receiver(&mut self, triangles: &[[DVec3; 3]], color: Color32, shaded: Color32) {
+        for &triangle in triangles {
+            let start = self.vertices.len();
+            self.face_triangle(triangle, color, true, true);
+            let shadow_color = self
+                .fog_color(shaded, triangle.iter().sum::<DVec3>() / 3.)
+                .to_array();
+            for vertex in &mut self.vertices[start..] {
+                vertex.shadow_color = shadow_color;
+            }
+        }
+    }
+
+    fn project_shadow_triangle(
+        view: &CameraView,
+        display: &ketchup_core::DisplaySettings,
+        size: DVec2,
+        triangle: [DVec3; 3],
+        coverage: [u8; 4],
+        vertices: &mut Vec<Vertex>,
+    ) {
+        let (polygon, len) = display.section_triangle(triangle);
+        for i in 1..len.saturating_sub(1) {
+            view.for_each_triangle_depth([polygon[0], polygon[i], polygon[i + 1]], |triangle| {
+                for p in triangle {
+                    vertices.push(Vertex {
+                        dash_phase: -1.,
+                        position: [
+                            (p.x / size.x * 2. - 1.) as f32,
+                            (1. - p.y / size.y * 2.) as f32,
+                            p.z.clamp(0., 1.) as f32,
+                        ],
+                        color: coverage,
+                        lateral: 0.,
+                        shadow_color: [0; 4],
+                    });
+                }
+            });
+        }
+    }
+
+    fn draw_shadow_masks(&mut self, faces: &[FaceDraw<'_>]) {
+        if !self.display.shadow_antialiasing {
+            return;
+        }
+        let triangles: Vec<_> = faces
+            .iter()
+            .filter_map(|face| face.shadow)
+            .flat_map(|(shadow, _)| {
+                shadow
+                    .lit
+                    .iter()
+                    .map(|triangle| (triangle, [0, 0, 0, 255]))
+                    .chain(shadow.shaded.iter().map(|triangle| (triangle, [255; 4])))
+            })
+            .collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        if triangles.len() >= 64 && crate::viewport_workers::parallelism() > 1 {
+            let chunks = triangles
+                .chunks(
+                    triangles
+                        .len()
+                        .div_ceil(crate::viewport_workers::parallelism()),
+                )
+                .map(|chunk| (chunk, self.joint_surfaces.camera.view(self.size)))
+                .collect();
+            let display = &self.display;
+            let size = self.size;
+            let profiling = crate::app::viewport_benchmark::profiling();
+            let results = crate::viewport_workers::map(
+                crate::viewport_workers::Kind::Render,
+                chunks,
+                |(chunk, view)| {
+                    crate::app::viewport_benchmark::profile_worker(profiling, || {
+                        let _profile =
+                            crate::app::viewport_benchmark::scope("shadow_projection_cpu");
+                        let mut vertices = Vec::with_capacity(chunk.len() * 3);
+                        for &(triangle, coverage) in chunk {
+                            Self::project_shadow_triangle(
+                                &view,
+                                display,
+                                size,
+                                *triangle,
+                                coverage,
+                                &mut vertices,
+                            );
+                        }
+                        vertices
+                    })
+                },
+            );
+            for (mut vertices, timings) in results {
+                crate::app::viewport_benchmark::absorb_worker(timings);
+                self.shadow_vertices.append(&mut vertices);
+            }
+            return;
+        }
+        for (triangle, coverage) in triangles {
+            Self::project_shadow_triangle(
+                &self.view,
+                &self.display,
+                self.size,
+                *triangle,
+                coverage,
+                &mut self.shadow_vertices,
+            );
+        }
+    }
+
     fn face_triangle(&mut self, triangle: [DVec3; 3], color: Color32, draw: bool, occlude: bool) {
         let start = self.indices.len() as u32;
         let (polygon, len) = self.display.section_triangle(triangle);
@@ -1451,10 +1860,9 @@ impl Mesh {
             self.triangle_ranges.push(0..face_end);
         }
         let shadow_start = self.indices.len() as u32;
-        for vertex in self.shadow_vertices {
-            self.indices.push(self.vertices.len() as u32);
-            self.vertices.push(vertex);
-        }
+        let vertex_start = self.vertices.len() as u32;
+        self.indices.extend(vertex_start..vertex_start + self.shadow_vertices.len() as u32);
+        self.vertices.append(&mut self.shadow_vertices);
         let shadow_range = shadow_start..self.indices.len() as u32;
         SceneCallback {
             shadow_range,
@@ -1479,9 +1887,12 @@ impl Mesh {
 #[derive(Default)]
 struct Occlusion {
     entity: Option<u64>,
-    triangles: Vec<OccludingTriangle>,
-    indices: Vec<usize>,
-    nodes: Vec<OcclusionNode>,
+    outline_order: bool,
+    // Workers share the completed hierarchy. Mutations occur only while
+    // collecting the next mask, through copy-on-write ownership.
+    triangles: Arc<Vec<OccludingTriangle>>,
+    indices: Arc<Vec<usize>>,
+    nodes: Arc<Vec<OcclusionNode>>,
     pending: Vec<usize>,
     spans: Vec<(f64, f64)>,
     insertion_cursor: Option<usize>,
@@ -1506,6 +1917,7 @@ struct CachedVisibility {
     spans: Vec<(f64, f64)>,
 }
 
+#[derive(Clone)]
 struct OccludingTriangle {
     entity: Option<u64>,
     points: [DVec3; 3],
@@ -1566,6 +1978,7 @@ impl OcclusionBounds {
     }
 }
 
+#[derive(Clone)]
 struct OcclusionNode {
     bounds: OcclusionBounds,
     start: usize,
@@ -1632,6 +2045,29 @@ fn clip_positive(interval: &mut (f64, f64), a: f64, b: f64) -> bool {
 }
 
 impl Occlusion {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn prepare_queries(&mut self) {
+        self.finish_collection();
+        if self.nodes.is_empty() && !self.indices.is_empty() {
+            self.build(0, self.indices.len());
+            self.tree_quality = self.quality();
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn query_copy(&self) -> Self {
+        Self {
+            entity: self.entity,
+            outline_order: self.outline_order,
+            triangles: self.triangles.clone(),
+            indices: self.indices.clone(),
+            nodes: self.nodes.clone(),
+            revision: self.revision,
+            tree_quality: self.tree_quality,
+            ..Default::default()
+        }
+    }
+
     fn begin_frame(&mut self) {
         self.insertion_cursor = Some(0);
         self.line_cursor = 0;
@@ -1663,12 +2099,12 @@ impl Occlusion {
             bounds,
         };
         if index < self.triangles.len() {
-            self.triangles[index] = triangle;
+            Arc::make_mut(&mut self.triangles)[index] = triangle;
             self.needs_refit = true;
         } else {
-            self.indices.push(index);
-            self.triangles.push(triangle);
-            self.nodes.clear();
+            Arc::make_mut(&mut self.indices).push(index);
+            Arc::make_mut(&mut self.triangles).push(triangle);
+            Arc::make_mut(&mut self.nodes).clear();
         }
         if let Some(cursor) = &mut self.insertion_cursor {
             *cursor += 1;
@@ -1679,10 +2115,10 @@ impl Occlusion {
     fn finish_collection(&mut self) {
         if let Some(len) = self.insertion_cursor {
             if len < self.triangles.len() {
-                self.triangles.truncate(len);
-                self.indices.clear();
-                self.indices.extend(0..len);
-                self.nodes.clear();
+                Arc::make_mut(&mut self.triangles).truncate(len);
+                Arc::make_mut(&mut self.indices).clear();
+                Arc::make_mut(&mut self.indices).extend(0..len);
+                Arc::make_mut(&mut self.nodes).clear();
                 self.revision = self.revision.wrapping_add(1);
             }
         }
@@ -1699,12 +2135,12 @@ impl Occlusion {
                 } else {
                     self.bounds(node.start, node.end)
                 };
-                self.nodes[index].bounds = bounds;
+                Arc::make_mut(&mut self.nodes)[index].bounds = bounds;
             }
             // Refit is linear during navigation. Repartition only when the
             // old grouping becomes substantially less useful at the new view.
             if self.quality() > self.tree_quality * 2. {
-                self.nodes.clear();
+                Arc::make_mut(&mut self.nodes).clear();
             }
         }
         self.needs_refit = false;
@@ -1735,10 +2171,62 @@ impl Occlusion {
         )
     }
 
+    // Outline masks contain thousands of tiny triangles. Sort their screen
+    // centers once, then construct bounds bottom-up, avoiding repeated bounds
+    // scans and median partitioning at every hierarchy level.
+    fn build_outline_order(&mut self) -> usize {
+        fn spread(value: u32) -> u64 {
+            let mut x = u64::from(value);
+            x = (x | (x << 8)) & 0x00ff_00ff;
+            x = (x | (x << 4)) & 0x0f0f_0f0f;
+            x = (x | (x << 2)) & 0x3333_3333;
+            (x | (x << 1)) & 0x5555_5555
+        }
+        let bounds = self.bounds(0, self.indices.len());
+        let extent = (bounds.hi - bounds.lo).max(DVec3::splat(1e-12));
+        let mut keys: Vec<_> = self.indices.iter().map(|&index| {
+            let triangle = self.triangles[index].bounds;
+            let p = (((triangle.lo + triangle.hi) * 0.5 - bounds.lo) / extent)
+                .clamp(DVec3::ZERO, DVec3::ONE);
+            let x = (p.x * 65535.) as u32;
+            let y = (p.y * 65535.) as u32;
+            let z = (p.z * 65535.) as u64;
+            (((spread(x) | (spread(y) << 1)) << 16) | z, index)
+        }).collect();
+        keys.sort_unstable();
+        let indices = Arc::make_mut(&mut self.indices);
+        indices.clear();
+        indices.extend(keys.into_iter().map(|(_, index)| index));
+        Arc::make_mut(&mut self.nodes).reserve(self.indices.len().div_ceil(4));
+        self.build_ordered(0, self.indices.len())
+    }
+
+    fn build_ordered(&mut self, start: usize, end: usize) -> usize {
+        let index = self.nodes.len();
+        Arc::make_mut(&mut self.nodes).push(OcclusionNode {
+            bounds: OcclusionBounds { lo: DVec3::ZERO, hi: DVec3::ZERO }, start, end, children: None,
+        });
+        let (bounds, children) = if end - start > 8 {
+            let middle = start + (end - start) / 2;
+            let left = self.build_ordered(start, middle);
+            let right = self.build_ordered(middle, end);
+            let a = self.nodes[left].bounds;
+            let b = self.nodes[right].bounds;
+            (OcclusionBounds { lo: a.lo.min(b.lo), hi: a.hi.max(b.hi) }, Some((left, right)))
+        } else { (self.bounds(start, end), None) };
+        let node = &mut Arc::make_mut(&mut self.nodes)[index];
+        node.bounds = bounds;
+        node.children = children;
+        index
+    }
+
     fn build(&mut self, start: usize, end: usize) -> usize {
+        if self.outline_order && start == 0 && end == self.indices.len() {
+            return self.build_outline_order();
+        }
         let bounds = self.bounds(start, end);
         let index = self.nodes.len();
-        self.nodes.push(OcclusionNode {
+        Arc::make_mut(&mut self.nodes).push(OcclusionNode {
             bounds,
             start,
             end,
@@ -1764,14 +2252,14 @@ impl Occlusion {
                     usize::from(spread.y > spread.x)
                 };
             let middle = start + (end - start) / 2;
-            self.indices[start..end].select_nth_unstable_by(middle - start, |&a, &b| {
+            Arc::make_mut(&mut self.indices)[start..end].select_nth_unstable_by(middle - start, |&a, &b| {
                 let a = self.triangles[a].bounds;
                 let b = self.triangles[b].bounds;
                 (a.lo[axis] + a.hi[axis]).total_cmp(&(b.lo[axis] + b.hi[axis]))
             });
             let left = self.build(start, middle);
             let right = self.build(middle, end);
-            self.nodes[index].children = Some((left, right));
+            Arc::make_mut(&mut self.nodes)[index].children = Some((left, right));
         }
         index
     }
@@ -1892,6 +2380,7 @@ impl Occlusion {
                 candidates.push(SurfaceCandidate {
                     index,
                     bounds: None,
+                    planes: None,
                 });
             }
         }
@@ -1918,20 +2407,20 @@ impl Occlusion {
             if triangle.entity.is_some_and(|id| own_entities.contains(&id)) {
                 return false;
             }
-            let planes = triangle.surface_planes(origin, gradient);
-            if planes.iter().any(|&(normal, origin, offset)| {
-                polygon
-                    .iter()
-                    .all(|&p| normal.dot(p - origin) + offset <= 0.)
-            }) {
-                return false;
-            }
             if gpu_depth
                 && triangle.points.iter().all(|p| {
                     origin.z + gradient.dot(p.truncate() - origin.truncate()) - p.z
                         > 4. * f64::from(f32::EPSILON)
                 })
             {
+                return false;
+            }
+            let planes = triangle.surface_planes(origin, gradient);
+            if planes.iter().any(|&(normal, origin, offset)| {
+                polygon
+                    .iter()
+                    .all(|&p| normal.dot(p - origin) + offset <= 0.)
+            }) {
                 return false;
             }
             hidden.clear();
@@ -1959,6 +2448,7 @@ impl Occlusion {
                 hidden.iter().copied().reduce(DVec2::min).unwrap(),
                 hidden.iter().copied().reduce(DVec2::max).unwrap(),
             ]);
+            candidate.planes = Some(planes);
             true
         });
         candidates
@@ -1990,9 +2480,9 @@ impl Occlusion {
             }) {
                 continue;
             }
-            let planes = self.triangles[candidate.index].surface_planes(origin, gradient);
+            let planes = candidate.planes.unwrap_or_else(|| self.triangles[candidate.index].surface_planes(origin, gradient));
             outside.clear();
-            for mut polygon in visible.drain(..) {
+            for polygon in visible.drain(..) {
                 if planes.iter().any(|&(normal, origin, offset)| {
                     polygon
                         .iter()
@@ -2001,27 +2491,20 @@ impl Occlusion {
                     outside.push(polygon);
                     continue;
                 }
+                let first_piece = outside.len();
                 let mut hidden = polygon.clone();
                 for &(normal, origin, offset) in &planes {
-                    hidden = clip_polygon(&hidden, |p| normal.dot(p - origin) + offset);
-                    if hidden.len() < 3 {
-                        break;
-                    }
-                }
-                if !has_surface_area(&hidden) {
-                    outside.push(polygon);
-                    continue;
-                }
-                for &(normal, origin, offset) in &planes {
                     let side = |p: DVec2| normal.dot(p - origin) + offset;
-                    let piece = clip_polygon(&polygon, |p| -side(p));
-                    if piece.len() >= 3 {
-                        outside.push(piece);
-                    }
-                    polygon = clip_polygon(&polygon, side);
-                    if polygon.len() < 3 {
-                        break;
-                    }
+                    let (inside, piece) = split_screen_polygon(&hidden, side);
+                    if !piece.is_empty() { outside.push(piece); }
+                    hidden = inside;
+                    if hidden.is_empty() { break; }
+                }
+                if hidden.is_empty() {
+                    // Tangencies and misses must preserve the original convex
+                    // piece, rather than fragmenting it along irrelevant planes.
+                    outside.truncate(first_piece);
+                    outside.push(polygon);
                 }
             }
             std::mem::swap(&mut visible, &mut outside);
@@ -2118,6 +2601,13 @@ fn has_surface_area(polygon: &[DVec2]) -> bool {
         })
 }
 
+fn annotation_stroke_footprint(a: DVec2, b: DVec2, radius: f64) -> Vec<DVec2> {
+    let along = (b - a).normalize() * radius;
+    let normal = DVec2::new(-along.y, along.x);
+    // Annotation mesh clipping expects a positive polygon winding.
+    vec![a - along - normal, b + along - normal, b + along + normal, a - along + normal]
+}
+
 fn clip_polygon(polygon: &[DVec2], side: impl Fn(DVec2) -> f64) -> Vec<DVec2> {
     if polygon.len() < 3 {
         return Vec::new();
@@ -2125,6 +2615,34 @@ fn clip_polygon(polygon: &[DVec2], side: impl Fn(DVec2) -> f64) -> Vec<DVec2> {
     let mut clipped = Vec::with_capacity(polygon.len() + 1);
     clip_polygon_into(polygon, side, &mut clipped);
     clipped
+}
+
+/// Both halves share side tests and intersections. Visibility subtraction
+/// formerly clipped once to test coverage and twice more to split each plane.
+fn split_screen_polygon(polygon: &[DVec2], side: impl Fn(DVec2) -> f64) -> (Vec<DVec2>, Vec<DVec2>) {
+    if polygon.len() < 3 { return (Vec::new(), Vec::new()); }
+    let mut inside = Vec::with_capacity(polygon.len() + 1);
+    let mut outside = Vec::with_capacity(polygon.len() + 1);
+    let first_distance = side(polygon[0]);
+    let mut da = first_distance;
+    for i in 0..polygon.len() {
+        let a = polygon[i];
+        let b = polygon[(i + 1) % polygon.len()];
+        let db = if i + 1 == polygon.len() { first_distance } else { side(b) };
+        if da >= 0. { inside.push(a); }
+        if da <= 0. { outside.push(a); }
+        let enters = (da >= 0.) != (db >= 0.);
+        let leaves = (da <= 0.) != (db <= 0.);
+        if enters || leaves {
+            let point = a.lerp(b, da / (da - db));
+            if enters { inside.push(point); }
+            if leaves { outside.push(point); }
+        }
+        da = db;
+    }
+    if !has_surface_area(&inside) { inside.clear(); }
+    if !has_surface_area(&outside) { outside.clear(); }
+    (inside, outside)
 }
 
 fn clip_polygon_into(polygon: &[DVec2], side: impl Fn(DVec2) -> f64, clipped: &mut Vec<DVec2>) {
@@ -2926,6 +3444,17 @@ impl FaceCache {
 }
 
 impl CachedFace {
+    pub fn contains_point(&self, point: DVec3) -> bool {
+        let Some(plane) = self.plane else { return false };
+        if (point - plane.origin).dot(plane.normal).abs() > ketchup_core::document::EPS {
+            return false;
+        }
+        let xy = plane.project(point);
+        ketchup_core::faces::in_polygon(xy, &self.rings[0], true)
+            && !self.rings.iter().skip(1).any(|ring|
+                ketchup_core::faces::in_polygon(xy, ring, true))
+    }
+
     pub fn hit(&self, ray: ketchup_core::Ray) -> Option<(f64, DVec3)> {
         let plane = self.plane?;
         let denominator = ray.direction.dot(plane.normal);
@@ -2950,6 +3479,266 @@ impl CachedFace {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn group_marker_geometry_is_shared_across_views_and_replaced_after_model_changes() {
+        use super::*;
+        let mut model = Model::default();
+        model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+        model.add_edge(DVec3::X, DVec3::X + DVec3::Y).unwrap();
+        let group = model.make_object(&model.selectable_entities(), false, "Group").unwrap();
+        let mut cache = GroupMarkerCache::default();
+        let first = cache.update(&model, 1);
+        let point = first.iter().find(|marker| marker.id == group).unwrap().point;
+        assert!(Arc::ptr_eq(&first, &cache.update(&model, 1)));
+        model.move_selection(&std::collections::BTreeSet::from([group]), DVec3::X * 2.).unwrap();
+        let moved = cache.update(&model, 2);
+        let marker = moved.iter().find(|marker| marker.id == group).unwrap();
+        assert!(marker.point.distance(point + DVec3::X * 2.) < 1e-10);
+        assert_eq!(marker.owners, model.expand_entities(&std::collections::BTreeSet::from([group])));
+        assert!(cache.update(&Model::default(), 3).is_empty());
+    }
+
+    #[test]
+    fn narrow_annotation_queries_cover_actual_tessellation_and_antialiasing() {
+        use super::*;
+        for pixels in [1., 2., 2.5] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(pixels);
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                for (a, b) in [(DVec2::new(10., 15.), DVec2::new(400., 330.)),
+                    (DVec2::new(10., 15.), DVec2::new(10., 330.)),
+                    (DVec2::new(10., 15.), DVec2::new(400., 15.))] {
+                    let footprint = annotation_stroke_footprint(a, b, 0.75 + 2. / f64::from(pixels));
+                    let winding = (footprint[1] - footprint[0]).perp_dot(footprint[2] - footprint[1]).signum();
+                    assert!(winding > 0., "annotation clipping expects positive winding");
+                    let shape = egui::Shape::line_segment([egui::pos2(a.x as f32, a.y as f32),
+                        egui::pos2(b.x as f32, b.y as f32)], egui::Stroke::new(1.5, Color32::WHITE));
+                    let primitives = ui.ctx().tessellate(vec![egui::epaint::ClippedShape::new(Rect::EVERYTHING, shape)], pixels);
+                    assert!(!primitives.is_empty());
+                    for primitive in primitives {
+                        if let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive {
+                            for vertex in mesh.vertices {
+                                let p = DVec2::new(f64::from(vertex.pos.x), f64::from(vertex.pos.y));
+                                assert!((0..4).all(|i| winding * (footprint[(i+1)%4] - footprint[i])
+                                    .perp_dot(p - footprint[i]) >= -1e-5), "stroke vertex outside query: {p:?}");
+                            }
+                        }
+                    }
+                    if (b-a).min_element() > 0. {
+                        assert!(polygon_area(&[footprint]) < (b.x-a.x)*(b.y-a.y)*0.15);
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn screen_ordered_outline_hierarchy_matches_general_visibility_queries() {
+        use super::*;
+        let mut general = Occlusion::default();
+        let mut outlines = Occlusion { outline_order: true, ..Default::default() };
+        for i in 0..512 {
+            let lo = DVec2::new((i * 37 % 100) as f64, (i * 53 % 100) as f64);
+            let hi = lo + DVec2::new(3., 0.7);
+            let depth = 0.2 + (i % 7) as f64 * 0.01;
+            occluding_rectangle(&mut general, lo, hi, depth);
+            occluding_rectangle(&mut outlines, lo, hi, depth);
+        }
+        for i in 0..100 {
+            let a = DVec3::new(0., i as f64 + 0.1, 0.7);
+            let b = DVec3::new(104., 100. - i as f64, 0.7);
+            let expected = general.visible_intervals(a, b);
+            let actual = outlines.visible_intervals(a, b);
+            assert_eq!(expected.len(), actual.len());
+            for (a, b) in expected.iter().zip(&actual) {
+                assert!((a.0 - b.0).abs() < 1e-10 && (a.1 - b.1).abs() < 1e-10);
+            }
+        }
+        let polygon = vec![DVec2::ZERO, DVec2::new(104., 0.), DVec2::splat(104.), DVec2::new(0., 104.)];
+        let area = |regions: Vec<Vec<DVec2>>| regions.iter().map(|p| {
+            (1..p.len()-1).map(|i| (p[i]-p[0]).perp_dot(p[i+1]-p[0]).abs()*0.5).sum::<f64>()
+        }).sum::<f64>();
+        assert!((area(general.visible_polygons(polygon.clone(), 0.7)) - area(outlines.visible_polygons(polygon, 0.7))).abs() < 1e-7);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ordinary_parallel_edges_preserve_the_completed_outline_hierarchy_between_frames() {
+        use super::*;
+        let camera = Camera::default();
+        let size = DVec2::splat(512.);
+        let inverse = camera.matrix(size).inverse();
+        let world = |x, y| inverse.project_point3(DVec3::new(x / 256. - 1., 1. - y / 256., 0.4));
+        let edges: Vec<_> = (0..256).map(|i| EdgeDraw {
+            id: i, key: (0, 1), points: [world(10., i as f64 * 1.8), world(500., i as f64 * 1.8)],
+            color: Color32::BLACK, width: 1.8, visible: true, back: false, overlay: false,
+        }).collect();
+        let mut mesh = Mesh::new(&camera, size);
+        mesh.draw_edges(&edges, true, true);
+        mesh.selection_occlusion.prepare_queries();
+        assert!(!mesh.selection_occlusion.nodes.is_empty());
+        let hierarchy = Arc::clone(&mesh.selection_occlusion.nodes);
+        let revision = mesh.selection_occlusion.revision;
+        mesh.selection_occlusion.begin_frame();
+        mesh.draw_edges(&edges, true, true);
+        mesh.selection_occlusion.prepare_queries();
+        assert_eq!(mesh.selection_occlusion.revision, revision);
+        assert!(Arc::ptr_eq(&hierarchy, &mesh.selection_occlusion.nodes),
+            "collecting ordinary edges must not truncate/rebuild the existing hierarchy");
+    }
+
+    #[test]
+    fn shared_polygon_splits_match_independent_half_plane_clipping() {
+        use super::*;
+        let polygon = vec![DVec2::new(-2., -1.), DVec2::new(0., -2.),
+            DVec2::new(3., -1.), DVec2::new(2., 2.), DVec2::new(-1., 3.)];
+        for i in 0..2000 {
+            let angle = i as f64 * 0.37;
+            let normal = DVec2::new(angle.cos(), angle.sin());
+            let offset = (i % 41) as f64 * 0.2 - 4.;
+            let side = |p: DVec2| normal.dot(p) + offset;
+            let (inside, outside) = split_screen_polygon(&polygon, side);
+            assert_eq!(inside, clip_polygon(&polygon, side));
+            assert_eq!(outside, clip_polygon(&polygon, |p| -side(p)));
+        }
+        for offset in [-2. - 1e-14, -2., -2. + 1e-14, 1., 3.] {
+            let side = |p: DVec2| p.x + offset;
+            let (inside, outside) = split_screen_polygon(&polygon, side);
+            assert_eq!(inside, clip_polygon(&polygon, side));
+            assert_eq!(outside, clip_polygon(&polygon, |p| -side(p)));
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn parallel_joint_guides_match_serial_clipping_dashes_and_annotation_masks() {
+        use super::*;
+        let camera = Camera::default();
+        let size = DVec2::splat(512.);
+        let inverse = camera.matrix(size).inverse();
+        let world = |x, y, z| inverse.project_point3(DVec3::new(x / 256. - 1., 1. - y / 256., z));
+        let stock = [
+            [world(10., 10., 0.4), world(500., 10., 0.4), world(500., 500., 0.4)],
+            [world(10., 10., 0.4), world(500., 500., 0.4), world(10., 500., 0.4)],
+        ];
+        let lines: Vec<_> = (0..256).map(|i| {
+            let y = 15. + f64::from(i) * 1.8;
+            [world(15., y, 0.6), world(495., 510. - y, 0.6)]
+        }).collect();
+        let build = |parallel: bool| {
+            let mut mesh = Mesh::new(&camera, size);
+            mesh.enable_gpu_edge_occlusion();
+            for triangle in stock { mesh.world_triangle(&camera, triangle, Color32::WHITE); }
+            mesh.world_triangle(&camera, [world(200., 0., 0.4 - 1e-9), world(260., 512., 0.4 - 1e-9), world(330., 0., 0.4 - 1e-9)], Color32::GRAY);
+            mesh.styled_line(world(0., 240., 0.4 - 1e-9), world(512., 240., 0.4 - 1e-9), 2., Color32::BLACK, false, false);
+            for [a, b] in &lines { mesh.register_joint_guide(1, *a, *b); }
+            let surface = mesh.cached_joint_surface_for_entities(1, &stock, &Default::default());
+            let paint = |mesh: &mut Mesh, &[a, b]: &[DVec3; 2]| {
+                mesh.joint_guide(a, b, &surface, 1.8, Color32::GREEN, true);
+            };
+            if parallel { mesh.paint_overlays(&lines, 64, paint); }
+            else { for line in &lines { paint(&mut mesh, line); } }
+            mesh
+        };
+        let serial = build(false);
+        let parallel = build(true);
+        assert_eq!(serial.indices, parallel.indices);
+        assert_eq!(bytemuck::cast_slice::<_, u8>(&serial.vertices), bytemuck::cast_slice::<_, u8>(&parallel.vertices));
+        assert_eq!(serial.annotation_occluders, parallel.annotation_occluders);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn parallel_face_batches_match_serial_mesh_depth_and_shadow_coverage() {
+        use super::*;
+        let camera = Camera::default();
+        let size = DVec2::splat(512.);
+        let inverse = camera.matrix(size).inverse();
+        let world = |x, y, z| inverse.project_point3(DVec3::new(x / 256. - 1., 1. - y / 256., z));
+        let mut model = Model::default();
+        for i in 0..96 {
+            let x = 10. + f64::from(i % 12) * 40.;
+            let y = 10. + f64::from(i / 12) * 60.;
+            let points = [world(x, y, 0.4), world(x + 30., y, 0.4), world(x, y + 40., 0.4)];
+            for j in 0..3 { model.add_edge(points[j], points[(j + 1) % 3]).unwrap(); }
+        }
+        let mut cache = FaceCache::default();
+        cache.update(&model);
+        assert!(model.faces.len() >= 64);
+        let shadows: Vec<_> = model.faces.keys().map(|id| {
+            let [a, b, c] = cache.get(*id).triangles[0];
+            let mid = (b + c) * 0.5;
+            crate::shadows::FaceShadow { lit: vec![[a, b, mid]], shaded: vec![[a, mid, c]] }
+        }).collect();
+        for antialias in [false, true] {
+            let build = |parallel: bool| {
+                let mut mesh = Mesh::new(&camera, size);
+                mesh.display.fog = true;
+                mesh.display.shadow_antialiasing = antialias;
+                // An existing prefix checks both vertex and index offsets.
+                mesh.world_triangle(&camera, [world(0., 0., 0.8), world(512., 0., 0.8), world(0., 512., 0.8)], Color32::WHITE);
+                let faces: Vec<_> = model.faces.values().zip(&shadows).enumerate().map(|(i, (face, shadow))| FaceDraw {
+                    face, cached: cache.get(face.id), color: Color32::from_rgb(100, 160, 200),
+                    shadow: (i % 3 != 0).then_some((shadow, Color32::DARK_GRAY)),
+                }).collect();
+                if parallel { mesh.draw_faces(&faces); }
+                else { for face in &faces { mesh.draw_faces(std::slice::from_ref(face)); } }
+                mesh
+            };
+            let serial = build(false);
+            let parallel = build(true);
+            assert_eq!(serial.indices, parallel.indices);
+            assert_eq!(serial.triangle_ranges, parallel.triangle_ranges);
+            assert_eq!(bytemuck::cast_slice::<_, u8>(&serial.vertices), bytemuck::cast_slice::<_, u8>(&parallel.vertices));
+            assert_eq!(bytemuck::cast_slice::<_, u8>(&serial.shadow_vertices), bytemuck::cast_slice::<_, u8>(&parallel.shadow_vertices));
+            assert_eq!(serial.occlusion.triangles.iter().map(|t| (t.entity, t.points)).collect::<Vec<_>>(),
+                parallel.occlusion.triangles.iter().map(|t| (t.entity, t.points)).collect::<Vec<_>>());
+            assert!(serial.edge_surfaces.iter().all(|(key, surfaces)| {
+                let other = &parallel.edge_surfaces[key];
+                surfaces.iter().map(|s| (s.gradient, s.inward)).eq(other.iter().map(|s| (s.gradient, s.inward)))
+            }));
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn parallel_edge_batches_match_serial_geometry_and_outline_masks() {
+        use super::*;
+        let camera = Camera::default();
+        let size = DVec2::splat(512.);
+        let inverse = camera.matrix(size).inverse();
+        let world = |x, y, z| inverse.project_point3(DVec3::new(x / 256. - 1., 1. - y / 256., z));
+        for gpu in [false, true] {
+            let build = |parallel: bool| {
+                let mut mesh = Mesh::new(&camera, size);
+                if gpu { mesh.enable_gpu_edge_occlusion(); }
+                mesh.set_entity(Some(9000));
+                mesh.world_triangle(&camera, [world(200., 30., 0.3), world(330., 460., 0.3), world(400., 40., 0.3)], Color32::WHITE);
+                for selected in [false, true] {
+                    if selected { mesh.begin_selected_edges(); }
+                    let edges: Vec<_> = (0..288).map(|i| {
+                        let y = 20. + f64::from(i) * 1.5;
+                        EdgeDraw { id: i as u64 + u64::from(selected) * 1000,
+                            key: (0, 1), points: [world(10., y, 0.4), world(490., 500. - y, 0.4)],
+                            color: if selected { Color32::RED } else { Color32::BLACK },
+                            width: if selected { 3. } else { 1.8 },
+                            back: i % 7 == 0, visible: i % 11 != 0, overlay: i % 13 == 0 }
+                    }).collect();
+                    if parallel { mesh.draw_edges(&edges, true, true); }
+                    else { for edge in &edges { mesh.draw_edges(std::slice::from_ref(edge), true, true); } }
+                }
+                mesh
+            };
+            let serial = build(false);
+            let parallel = build(true);
+            assert_eq!(serial.indices, parallel.indices);
+            assert_eq!(bytemuck::cast_slice::<_, u8>(&serial.vertices), bytemuck::cast_slice::<_, u8>(&parallel.vertices));
+            assert_eq!(serial.annotation_occluders, parallel.annotation_occluders);
+            assert_eq!(serial.selection_occlusion.triangles.iter().map(|t| (t.entity, t.points)).collect::<Vec<_>>(),
+                parallel.selection_occlusion.triangles.iter().map(|t| (t.entity, t.points)).collect::<Vec<_>>());
+        }
+    }
+
     use super::*;
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3141,6 +3930,8 @@ mod tests {
                         false,
                     );
                     let surface = if hybrid {
+                        mesh.register_joint_guide(7, world(9., 28., 0.8), world(55., 28., 0.8));
+                        mesh.register_joint_guide(7, world(12., 48., 0.8), world(52., 48., 0.8));
                         mesh.cached_joint_surface(7, &stock)
                     } else {
                         Arc::new(mesh.joint_surface(stock))
@@ -3195,6 +3986,37 @@ mod tests {
                 );
             }
         }
+        // Back edges use the same shader dash mask, with the original fixed
+        // four-pixel dash and gap rather than the guide's fitted end pattern.
+        let camera = Camera::default();
+        let size = DVec2::splat(64.);
+        let inverse = camera.matrix(size).inverse();
+        let world = |p: DVec2| inverse.project_point3(DVec3::new(p.x / 32. - 1., 1. - p.y / 32., 0.4));
+        for (a, b) in [(DVec2::new(5.17, 15.3), DVec2::new(59.1, 15.3)),
+            (DVec2::new(23.2, 4.1), DVec2::new(23.2, 59.7)),
+            (DVec2::new(5.3, 8.2), DVec2::new(58.2, 49.1))] {
+            let color = Color32::from_rgba_unmultiplied(60, 130, 80, 160);
+            let mut reference = Mesh::new(&camera, size);
+            let mut optimized = Mesh::new(&camera, size);
+            let (a, b) = camera.view(size).segment(world(a), world(b)).unwrap();
+            let length = a.distance(b).max(1.);
+            for i in 0..(length / 8.).ceil() as usize {
+                reference.line(a.lerp(b, (i as f64 * 8. / length).min(1.)).extend(0.),
+                    a.lerp(b, ((i as f64 * 8. + 4.) / length).min(1.)).extend(0.), 1., color);
+            }
+            optimized.overlay_line(world(a), world(b), 1., color, true);
+            assert_eq!(optimized.vertices.len(), 4);
+            let expected = render(reference);
+            let actual = render(optimized);
+            for (i, (expected, actual)) in expected.chunks_exact(4).zip(actual.chunks_exact(4)).enumerate() {
+                let point = DVec2::new((i % 64) as f64 + 0.5, (i / 64) as f64 + 0.5);
+                let phase = ((point - a).dot((b-a).normalize()) / 8.).rem_euclid(1.);
+                assert!(expected.iter().zip(actual).all(|(a,b)| a.abs_diff(*b) <= 3)
+                    || phase.min(1.-phase).min((phase-0.5).abs()) < 0.005,
+                    "shader overlay dash must match subdivided reference at {point:?}: {expected:?}, {actual:?}");
+            }
+        }
+
     }
 
     #[test]
@@ -4953,10 +5775,11 @@ mod tests {
         );
         let color_view = color.create_view(&Default::default());
         let depth_view = depth.create_view(&Default::default());
-        for reverse in [false, true] {
+        for (reverse, hybrid) in [false, true].into_iter().flat_map(|reverse| [false, true].map(|hybrid| (reverse, hybrid))) {
             // Depth zero is used by intentional x-ray/wireframe overlays.
             for rear_depth in [0.7, 0.] {
                 let mut mesh = Mesh::new(&Camera::default(), DVec2::splat(64.));
+                if hybrid { mesh.enable_gpu_edge_occlusion(); }
                 let strokes = [
                     (
                         DVec3::new(8., 32., 0.3),

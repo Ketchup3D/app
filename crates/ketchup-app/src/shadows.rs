@@ -7,13 +7,13 @@ use std::collections::BTreeMap;
 type Triangle = [DVec3; 3];
 const CONTACT_EPS: f64 = 1e-7;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct FaceShadow {
     pub lit: Vec<Triangle>,
     pub shaded: Vec<Triangle>,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct Key {
     revision: u64,
     angle: f64,
@@ -23,16 +23,26 @@ struct Key {
     casters: Vec<u64>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ShadowCache {
     key: Option<Key>,
     enabled: bool,
-    faces: BTreeMap<u64, FaceShadow>,
+    faces: BTreeMap<u64, std::sync::Arc<FaceShadow>>,
+    receivers: BTreeMap<u64, Vec<Triangle>>,
+    casters: BTreeMap<u64, Vec<Triangle>>,
+    #[cfg(test)]
+    pub(crate) builds: usize,
 }
 
 impl ShadowCache {
     pub fn get(&self, id: u64) -> Option<&FaceShadow> {
-        self.enabled.then(|| self.faces.get(&id)).flatten()
+        self.enabled.then(|| self.faces.get(&id).map(std::sync::Arc::as_ref)).flatten()
+    }
+
+    /// A prepared cache accompanies the exact evaluated model. Its face-cache
+    /// revision belongs to the worker, so rebase it when adopting that model.
+    pub(crate) fn adopt_revision(&mut self, revision: u64) {
+        if let Some(key) = &mut self.key { key.revision = revision; }
     }
 
     pub fn update(&mut self, faces: &FaceCache, entities: &EntityCache, d: &DisplaySettings) {
@@ -97,18 +107,72 @@ impl ShadowCache {
             })
             .collect();
         let tree = VolumeTree::new(volumes);
-        self.faces.clear();
+        let same_light = self.key.as_ref().is_some_and(|old|
+            old.angle == key.angle && old.elevation == key.elevation && old.section == key.section);
+        let casters: BTreeMap<_, _> = key.casters.iter()
+            .map(|&id| (id, faces.get(id).triangles.clone())).collect();
+        // Only receivers reached by an old or new changed shadow volume need
+        // repartitioning. Unrelated object movement must not shade every face.
+        let mut changed_bounds = Vec::new();
+        if same_light {
+            for id in self.casters.keys().chain(casters.keys()).copied().collect::<std::collections::BTreeSet<_>>() {
+                if self.casters.get(&id) == casters.get(&id) { continue; }
+                let mut bounds: Option<Bounds> = None;
+                for triangle in self.casters.get(&id).into_iter().flatten()
+                    .chain(casters.get(&id).into_iter().flatten())
+                {
+                    for triangle in section_triangle(*triangle, section) {
+                        let next = Bounds::new(triangle, basis);
+                        bounds = Some(bounds.map_or(next, |old| Bounds {
+                            lo: old.lo.min(next.lo), hi: old.hi.max(next.hi),
+                        }));
+                    }
+                }
+                if let Some(bounds) = bounds { changed_bounds.push(bounds); }
+            }
+        }
+        self.faces.retain(|id, _| key.receivers.binary_search(id).is_ok());
+        self.receivers.retain(|id, _| key.receivers.binary_search(id).is_ok());
+        let mut dirty = Vec::new();
         for &id in &key.receivers {
+            let triangles = &faces.get(id).triangles;
+            if same_light && self.receivers.get(&id) == Some(triangles)
+                && !triangles.iter().any(|&triangle| {
+                    let receiver = Bounds::new(triangle, basis);
+                    changed_bounds.iter().any(|volume| volume.overlaps(receiver))
+                })
+            { continue; }
+            dirty.push((id, triangles));
+        }
+        let shade = |&(id, triangles): &(u64, &Vec<Triangle>)| {
             let mut result = FaceShadow::default();
-            for &triangle in &faces.get(id).triangles {
+            for &triangle in triangles {
                 for triangle in section_triangle(triangle, key.section) {
                     tree.shade(id, triangle, basis, &mut result);
                 }
             }
+            (id, result)
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let results = if dirty.len() >= 16 {
+            let workers = crate::viewport_workers::parallelism();
+            crate::viewport_workers::map(crate::viewport_workers::Kind::Shadows,
+                dirty.chunks(dirty.len().div_ceil(workers)).collect(),
+                |chunk| chunk.iter().map(shade).collect::<Vec<_>>())
+                .into_iter().flatten().collect::<Vec<_>>()
+        } else { dirty.iter().map(shade).collect::<Vec<_>>() };
+        #[cfg(target_arch = "wasm32")]
+        let results = dirty.iter().map(shade).collect::<Vec<_>>();
+        for (id, result) in results {
+            #[cfg(test)] { self.builds += 1; }
             if !result.shaded.is_empty() {
-                self.faces.insert(id, result);
+                self.faces.insert(id, std::sync::Arc::new(result));
+            } else {
+                self.faces.remove(&id);
             }
+            self.receivers.insert(id, faces.get(id).triangles.clone());
         }
+        self.casters = casters;
         self.key = Some(key);
     }
 }
@@ -502,6 +566,33 @@ mod tests {
             sun_elevation: 45.,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn moving_and_removing_a_caster_only_repartitions_affected_receivers() {
+        let mut model = Model::default();
+        let near = square(&mut model, DVec3::ZERO, 2.);
+        let far = square(&mut model, DVec3::new(100., 100., 0.), 2.);
+        let caster = square(&mut model, DVec3::new(0., 0., 1.), 1.);
+        let d = settings();
+        let mut faces = FaceCache::default();
+        let mut entities = EntityCache::default();
+        let mut cache = ShadowCache::default();
+        faces.update(&model); entities.update(&model); cache.update(&faces, &entities, &d);
+        let before = cache.builds;
+        let ids = model.faces[&caster].vertices.clone();
+        for id in ids { model.vertices.get_mut(&id).unwrap().position.x += 1.; }
+        faces.update(&model); entities.update(&model); cache.update(&faces, &entities, &d);
+        assert!(cache.builds - before < 3, "the far receiver must remain cached");
+        let mut fresh = ShadowCache::default();
+        fresh.update(&faces, &entities, &d);
+        for id in [near, far, caster] {
+            close(cache.get(id).map_or(0., |s| area(&s.shaded)),
+                fresh.get(id).map_or(0., |s| area(&s.shaded)));
+        }
+        model.erase(&BTreeSet::from([caster]));
+        faces.update(&model); entities.update(&model); cache.update(&faces, &entities, &d);
+        assert!(cache.get(near).is_none(), "removing a caster must remove its old shadow");
     }
 
     #[test]

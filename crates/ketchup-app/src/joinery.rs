@@ -2,6 +2,7 @@ use super::*;
 use crate::inspector_table::inspector_field;
 use ketchup_core::connections::{Connection, ConnectionOperation};
 use ketchup_core::joinery::{GeometryEvaluation, JointKind, JointSettings};
+use std::collections::BTreeMap;
 
 #[path = "joinery_cards.rs"]
 mod cards;
@@ -88,6 +89,11 @@ struct Preview {
 /// do not repeat boolean operations; every actual board move invalidates it.
 #[derive(Default)]
 pub(super) struct GeometryCache {
+    #[cfg(not(target_arch = "wasm32"))]
+    pending: Option<std::thread::JoinHandle<GeometryCache>>,
+    pub prepared_shadows: Option<(ketchup_core::DisplaySettings, crate::shadows::ShadowCache)>,
+    evaluation: ketchup_core::joinery::EvaluationCache,
+    region_cache: std::collections::BTreeMap<u64, CachedRegion>,
     #[cfg(test)]
     revision: u64,
     source_errors: Option<Vec<(u64, String)>>,
@@ -100,7 +106,77 @@ pub(super) struct GeometryCache {
     entities: crate::renderer::EntityCache,
     picking: crate::picking::PickingCache,
 }
+
+struct CachedRegion {
+    source: ketchup_core::joinery::BoardSnapshot,
+    evaluated: ketchup_core::joinery::BoardSnapshot,
+    settings: JointSettings,
+    region: highlight::Region,
+}
+
 impl GeometryCache {
+    /// Keep one in-flight machining job during a gesture. Completed previews
+    /// are adopted in order; the next job uses the newest pointer position,
+    /// rather than queuing every intermediate position. Exact picking and the
+    /// end of a gesture synchronize through update().
+    pub fn update_render(&mut self, source: &Model, transient: bool, ctx: &egui::Context,
+        display: &ketchup_core::DisplaySettings, shadows: &crate::shadows::ShadowCache) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.pending.as_ref().is_some_and(|job| job.is_finished()) {
+                self.finish_pending();
+            }
+            if transient && self.result.is_some() {
+                if self.pending.is_none() && self.source.as_ref() != Some(source) {
+                    let source = source.clone();
+                    let display = display.clone();
+                    let mut shadows = shadows.clone();
+                    let mut worker = Self {
+                        evaluation: std::mem::take(&mut self.evaluation),
+                        region_cache: std::mem::take(&mut self.region_cache),
+                        faces: std::mem::take(&mut self.faces),
+                        entities: std::mem::take(&mut self.entities),
+                        #[cfg(test)]
+                        revision: self.revision,
+                        ..Default::default()
+                    };
+                    self.pending = Some(std::thread::spawn(move || {
+                        worker.update(&source);
+                        let model = &worker.result.as_ref().unwrap().model;
+                        worker.faces.update(model);
+                        worker.entities.update(model);
+                        shadows.update(&worker.faces, &worker.entities, &display);
+                        worker.prepared_shadows = Some((display, shadows));
+                        worker
+                    }));
+                }
+                if self.pending.is_some() { ctx.request_repaint(); }
+                return;
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (transient, ctx, display, shadows);
+        self.update(source);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_pending(&mut self) {
+        if let Some(job) = self.pending.take() {
+            if let Ok(worker) = job.join() {
+                self.evaluation = worker.evaluation;
+                self.region_cache = worker.region_cache;
+                self.source = worker.source;
+                self.source_errors = worker.source_errors;
+                self.result = worker.result;
+                self.regions = worker.regions;
+                self.faces = worker.faces;
+                self.entities = worker.entities;
+                self.prepared_shadows = worker.prepared_shadows;
+                #[cfg(test)] { self.revision = worker.revision; }
+            }
+        }
+    }
+
     pub fn pick(
         &mut self,
         source: &Model,
@@ -140,7 +216,10 @@ impl GeometryCache {
     }
 
     pub fn update(&mut self, source: &Model) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.finish_pending();
         if self.source.as_ref() != Some(source) {
+            self.prepared_shadows = None;
             // Editing a board must expose its original stock topology. Suspend
             // relations involving the current edit scope only in this viewport
             // model; saved relations and export geometry remain unchanged.
@@ -153,18 +232,36 @@ impl GeometryCache {
                             scope.contains(member) || source.expand_entities(&BTreeSet::from([*member])).contains(&context))
                 });
             }
-            let evaluation=viewport_source.evaluate_joinery();
+            let evaluation = {
+                #[cfg(not(target_arch = "wasm32"))]
+                let _profile = super::viewport_benchmark::scope("joinery_evaluate");
+                self.evaluation.evaluate(&viewport_source)
+            };
             self.source_errors = (viewport_source.connections == source.connections)
                 .then(|| evaluation.errors.clone());
             #[cfg(test)] { self.revision = self.revision.wrapping_add(1); }
             let mut boards = highlight::BoardGeometryCache::default();
-            self.regions=viewport_source.connections.iter().filter(|(id,c)|
-                matches!(c.operation,ConnectionOperation::Joinery(_))
-                && !evaluation.errors.iter().any(|(invalid,_)|invalid==*id))
-                .filter_map(|(_,c)| match &c.operation {
-                    ConnectionOperation::Joinery(settings) => Some(highlight::Region::build_cached(source,&evaluation.model,c.members,settings,&mut boards)),
-                    _ => None,
-                }).collect();
+            #[cfg(not(target_arch = "wasm32"))]
+            let _regions_profile = super::viewport_benchmark::scope("joinery_regions");
+            self.region_cache.retain(|id, _| viewport_source.connections.contains_key(id));
+            self.regions.clear();
+            for (&id, connection) in &viewport_source.connections {
+                let ConnectionOperation::Joinery(settings) = &connection.operation else { continue };
+                if evaluation.errors.iter().any(|(invalid, _)| *invalid == id) { continue; }
+                let stock = ketchup_core::joinery::BoardSnapshot::new(source, connection.members);
+                let machined = ketchup_core::joinery::BoardSnapshot::new(&evaluation.model, connection.members);
+                let reusable = self.region_cache.get(&id).is_some_and(|entry|
+                    entry.settings == *settings && entry.source.same_geometry(&stock)
+                        && entry.evaluated.same_geometry(&machined));
+                if !reusable {
+                    self.region_cache.insert(id, CachedRegion {
+                        source: stock, evaluated: machined, settings: settings.clone(),
+                        region: highlight::Region::build_cached(source, &evaluation.model,
+                            connection.members, settings, &mut boards),
+                    });
+                }
+                self.regions.push(self.region_cache[&id].region.clone());
+            }
             self.result=Some(evaluation);
             self.source = Some(source.clone());
         }
@@ -313,8 +410,8 @@ impl KetchupApp {
             let model = self.joinery_geometry.result.as_ref()
                 .map_or(&self.doc.model, |evaluation| &evaluation.model);
             let owners = model.expand_entities(&connection.members.into_iter().collect());
-            if !self.picking_cache.marker_visible(
-                &self.face_cache, &self.entity_cache, &self.doc.camera,
+            if !self.render_picking_cache.marker_visible(
+                &self.render_face_cache, &self.render_entity_cache, &self.doc.camera,
                 dv(rect.size()), center, &owners,
             ) { return None; }
             let point = rect.min + pv(self.doc.camera.project(center, dv(rect.size()))?);
@@ -589,10 +686,27 @@ impl KetchupApp {
         #[cfg(not(target_arch = "wasm32"))]
         let _profile = super::viewport_benchmark::scope("joint_guides");
         if !display.wood_joinery { return; }
-        for region in &self.joinery_geometry.regions {region.paint(mesh,model,display,dark,false);}
-        if self.joint_highlight_preview_key().is_some() {
-            if let Some(preview)=&self.joinery_dialog.preview {preview.region.paint(mesh,model,display,dark,true);}
+        let preview = self.joint_highlight_preview_key().and(self.joinery_dialog.preview.as_ref());
+        let mut surfaces = BTreeMap::new();
+        for region in &self.joinery_geometry.regions {
+            region.register_guides(mesh);
+            region.surface_requests(&mut surfaces);
         }
+        if let Some(preview) = preview {
+            preview.region.register_guides(mesh);
+            preview.region.surface_requests(&mut surfaces);
+        }
+        // Prepare each shared board once, then balance all strokes together.
+        // Nested region/line workers duplicated masks and left uneven chunks.
+        mesh.prepare_joint_surfaces(&surfaces.into_values().collect::<Vec<_>>());
+        let mut guides = Vec::new();
+        for region in &self.joinery_geometry.regions {
+            region.prepare(mesh, model, display, dark, false, &mut guides);
+        }
+        if let Some(preview) = preview {
+            preview.region.prepare(mesh, model, display, dark, true, &mut guides);
+        }
+        mesh.paint_overlays(&guides, 64, |mesh, guide| guide.paint(mesh));
     }
 }
 
@@ -600,6 +714,43 @@ impl KetchupApp {
 mod tests {
     use super::*;
     use crate::test_ui::ContextExt;
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn background_gesture_previews_settle_to_the_latest_source_and_cancel_cleanly() {
+        let (mut app, ctx, members) = fixture();
+        app.doc.model.add_connection(Connection {
+            members, entry_face: None,
+            operation: ConnectionOperation::Joinery(JointSettings::default()),
+        }).unwrap();
+        let source = app.doc.model.clone();
+        let mut cache = GeometryCache::default();
+        cache.update(&source);
+        let initial_revision = cache.revision;
+        let mut latest = source.clone();
+        for offset in [0.001, 0.003, 0.007] {
+            latest = source.clone();
+            latest.move_selection(&BTreeSet::from([members[0]]), DVec3::X * offset).unwrap();
+            cache.update_render(&latest, true, &ctx, &app.doc.display, &app.shadow_cache);
+            assert!(cache.pending.is_some());
+            assert!(cache.result.is_some(), "the last complete preview stays drawable");
+        }
+        cache.update(&latest);
+        assert!(cache.pending.is_none());
+        assert_eq!(cache.source.as_ref(), Some(&latest));
+        assert_eq!(cache.result.as_ref().unwrap().model, latest.evaluate_joinery().model);
+        assert!(cache.revision > initial_revision);
+        let revision = cache.revision;
+        cache.update_render(&latest, true, &ctx, &app.doc.display, &app.shadow_cache);
+        assert!(cache.pending.is_none());
+        assert_eq!(cache.revision, revision);
+        latest.move_selection(&BTreeSet::from([members[0]]), DVec3::X * 0.01).unwrap();
+        cache.update_render(&latest, true, &ctx, &app.doc.display, &app.shadow_cache);
+        cache.update(&source);
+        assert!(cache.pending.is_none());
+        assert_eq!(cache.source.as_ref(), Some(&source));
+        assert_eq!(cache.result.as_ref().unwrap().model, source.evaluate_joinery().model);
+    }
+
     fn fixture() -> (KetchupApp, egui::Context, [u64; 2]) {
         let mut model = Model::default();
         let mut members = [0; 2];

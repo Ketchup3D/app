@@ -11,6 +11,30 @@ pub(crate) struct Scope(Option<(&'static str, Instant)>);
 pub(crate) fn scope(name: &'static str) -> Scope {
     Scope(TIMINGS.with(|timings| timings.borrow().as_ref().map(|_| (name, Instant::now()))))
 }
+
+pub(crate) fn profiling() -> bool {
+    TIMINGS.with(|timings| timings.borrow().is_some())
+}
+
+pub(crate) fn profile_worker<T>(enabled: bool, work: impl FnOnce() -> T)
+    -> (T, Option<BTreeMap<&'static str, f64>>)
+{
+    let previous = TIMINGS.with(|timings| timings.replace(enabled.then(BTreeMap::new)));
+    let result = work();
+    (result, TIMINGS.with(|timings| timings.replace(previous)))
+}
+
+/// Worker scopes represent accumulated CPU work, overlapping the UI thread.
+/// Parent scopes and actual frame intervals remain wall-clock measurements.
+pub(crate) fn absorb_worker(timings: Option<BTreeMap<&'static str, f64>>) {
+    if let Some(worker) = timings {
+        TIMINGS.with(|timings| {
+            if let Some(timings) = timings.borrow_mut().as_mut() {
+                for (name, elapsed) in worker { *timings.entry(name).or_default() += elapsed; }
+            }
+        });
+    }
+}
 impl Drop for Scope {
     fn drop(&mut self) {
         if let Some((name, start)) = self.0 {

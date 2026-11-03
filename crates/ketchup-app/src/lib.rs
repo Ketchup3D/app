@@ -21,6 +21,8 @@ mod release_notes;
 mod renderer;
 mod screenshots;
 mod shadows;
+#[cfg(not(target_arch = "wasm32"))]
+mod viewport_workers;
 mod storage;
 mod theme;
 #[cfg(not(target_arch = "wasm32"))]

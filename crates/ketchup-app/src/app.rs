@@ -379,6 +379,13 @@ pub struct KetchupApp {
     shadow_cache: crate::shadows::ShadowCache,
     section_cache: display_scene::SectionCache,
     picking_cache: crate::picking::PickingCache,
+    // Rendering consumes machined/preview geometry. Input queries consume the
+    // source document. Keep both sets alive instead of alternately invalidating
+    // their triangulation, BVH and the shadow cache on every pointer event.
+    render_face_cache: renderer::FaceCache,
+    group_marker_cache: renderer::GroupMarkerCache,
+    render_entity_cache: renderer::EntityCache,
+    render_picking_cache: crate::picking::PickingCache,
     #[cfg(test)]
     picking_preparations: usize,
     paste_face_cache: renderer::FaceCache,
@@ -542,6 +549,10 @@ impl KetchupApp {
             shadow_cache: crate::shadows::ShadowCache::default(),
             section_cache: Default::default(),
             picking_cache: crate::picking::PickingCache::default(),
+            render_face_cache: renderer::FaceCache::default(),
+            group_marker_cache: Default::default(),
+            render_entity_cache: renderer::EntityCache::default(),
+            render_picking_cache: crate::picking::PickingCache::default(),
             #[cfg(test)]
             picking_preparations: 0,
             paste_face_cache: renderer::FaceCache::default(),
@@ -3907,6 +3918,18 @@ impl KetchupApp {
     }
 
     fn paint_scene_with_background(&mut self, ui: &egui::Ui, rect: Rect, background: bool) {
+        // All scene helpers see the same evaluated geometry while painting.
+        // Restore source caches before handling input/inspector queries again.
+        std::mem::swap(&mut self.face_cache, &mut self.render_face_cache);
+        std::mem::swap(&mut self.entity_cache, &mut self.render_entity_cache);
+        std::mem::swap(&mut self.picking_cache, &mut self.render_picking_cache);
+        self.paint_evaluated_scene(ui, rect, background);
+        std::mem::swap(&mut self.face_cache, &mut self.render_face_cache);
+        std::mem::swap(&mut self.entity_cache, &mut self.render_entity_cache);
+        std::mem::swap(&mut self.picking_cache, &mut self.render_picking_cache);
+    }
+
+    fn paint_evaluated_scene(&mut self, ui: &egui::Ui, rect: Rect, background: bool) {
         #[cfg(not(target_arch = "wasm32"))]
         let _profile = viewport_benchmark::scope("scene");
         let colors = Palette::for_ui(ui);
@@ -3922,8 +3945,11 @@ impl KetchupApp {
         {
             #[cfg(not(target_arch = "wasm32"))]
             let _profile = viewport_benchmark::scope("geometry_update");
-            self.joinery_geometry.update(model);
+            self.joinery_geometry.update_render(model,
+                self.history_preview.is_none() && self.modeling.as_ref().is_some_and(|edit| edit.preview.is_some()),
+                ui.ctx(), &self.doc.display, &self.shadow_cache);
         }
+        let prepared_shadows = self.joinery_geometry.prepared_shadows.take();
         let model=&self.joinery_geometry.result.as_ref().unwrap().model;
         let model_revision = self.render_model.update(model);
         let empty_selection = BTreeSet::new();
@@ -4078,9 +4104,33 @@ impl KetchupApp {
             drop(grid_profile);
             #[cfg(not(target_arch = "wasm32"))]
             let face_profile = viewport_benchmark::scope("faces");
-            self.face_cache.update(model);
-            self.shadow_cache
-                .update(&self.face_cache, entities, display);
+            {
+                #[cfg(not(target_arch = "wasm32"))]
+                let _profile = viewport_benchmark::scope("face_cache");
+                self.face_cache.update(model);
+            }
+            if let Some((prepared_display, mut shadows)) = prepared_shadows {
+                // Adopt only the partitions computed with the current shadow
+                // and visibility settings, paired with this completed model.
+                if prepared_display.shadows == display.shadows
+                    && (prepared_display.shadow_darkness > 0.) == (display.shadow_darkness > 0.)
+                    && prepared_display.sun_angle == display.sun_angle
+                    && prepared_display.sun_elevation == display.sun_elevation
+                    && prepared_display.section_limits() == display.section_limits()
+                    && prepared_display.hidden_objects == display.hidden_objects
+                    && prepared_display.hidden_geometry == display.hidden_geometry
+                    && (prepared_display.face_style == ketchup_core::FaceStyle::Wireframe)
+                        == (display.face_style == ketchup_core::FaceStyle::Wireframe)
+                {
+                    shadows.adopt_revision(self.face_cache.revision());
+                    self.shadow_cache = shadows;
+                }
+            }
+            {
+                #[cfg(not(target_arch = "wasm32"))]
+                let _profile = viewport_benchmark::scope("shadow_update");
+                self.shadow_cache.update(&self.face_cache, entities, display);
+            }
             let mut visible_faces: Vec<_> = model
                 .faces
                 .values()
@@ -4108,14 +4158,13 @@ impl KetchupApp {
                 }) => Some(ids),
                 _ => None,
             };
+            let mut face_draws = Vec::new();
             for (face, _) in visible_faces
                 .into_iter()
                 .filter(|_| display.face_style != ketchup_core::FaceStyle::Wireframe)
             {
                 let entity = entities.get(face.id);
-                mesh.set_entity(Some(face.id));
                 let cached = self.face_cache.get(face.id);
-                mesh.face_edges(face, cached);
                 let normal = cached.normal;
                 let tag_color = entity.tag_color;
                 let rgb = if display.color_by_tag {
@@ -4179,14 +4228,16 @@ impl KetchupApp {
                 } else {
                     color
                 };
-                if let Some(shadow) = self.shadow_cache.get(face.id) {
-                    let shadow_color = display_scene::shadow_color(color, display.shadow_darkness);
-                    mesh.shadow_face(&cached.triangles, shadow, color, shadow_color);
-                } else {
-                    for &triangle in &cached.triangles {
-                        mesh.world_triangle(camera, triangle, color);
-                    }
-                }
+                face_draws.push(renderer::FaceDraw {
+                    face, cached, color,
+                    shadow: self.shadow_cache.get(face.id).map(|shadow|
+                        (shadow, display_scene::shadow_color(color, display.shadow_darkness))),
+                });
+            }
+            {
+                #[cfg(not(target_arch = "wasm32"))]
+                let _profile = viewport_benchmark::scope("face_emit");
+                mesh.draw_faces(&face_draws);
             }
             mesh.set_entity(None);
             display_scene::paint_sections(
@@ -4201,10 +4252,14 @@ impl KetchupApp {
             );
             #[cfg(not(target_arch = "wasm32"))]
             drop(face_profile);
-            let profiles = if display.profiles && !emphasize_group {
+            let profiles = {
+                #[cfg(not(target_arch = "wasm32"))]
+                let _profile = viewport_benchmark::scope("profile_edges");
+                if display.profiles && !emphasize_group {
                 display_scene::profile_edges(model, camera, &self.face_cache, entities, display)
             } else {
                 BTreeSet::new()
+                }
             };
             // Resolve ordinary edges in f64 before drawing selected strokes.
             // GPU depth alone can round nearby edges to the same value, letting
@@ -4214,6 +4269,9 @@ impl KetchupApp {
                     mesh.begin_selected_edges();
                     if selected_entities.is_empty() { continue; }
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                let style_profile = viewport_benchmark::scope("edge_styles");
+                let mut edge_draws = Vec::new();
                 for e in model
                     .edges
                     .values()
@@ -4221,7 +4279,6 @@ impl KetchupApp {
                     .filter(|e| selected_entities.contains(&e.id) == selected_pass)
                 {
                     let entity = entities.get(e.id);
-                    mesh.set_entity(Some(e.id));
                     let selected = selected_entities.contains(&e.id);
                     let emphasized = emphasized_entities.contains(&e.id);
                     let root = entity.context;
@@ -4280,33 +4337,20 @@ impl KetchupApp {
                         } else {
                             color
                         };
-                    if display.back_edges || entity.entity_hidden {
-                        mesh.overlay_line(a, b, 1., color.gamma_multiply(0.4), true);
-                    }
-                    if entity.entity_hidden {
-                        continue;
-                    }
-                    if display.edges
-                        || emphasize_group
-                        || profiles.contains(&e.id)
-                        || active
-                        || display.face_style == ketchup_core::FaceStyle::Wireframe
-                    {
-                        if display.x_ray || display.face_style == ketchup_core::FaceStyle::Wireframe
-                        {
-                            mesh.overlay_line(a, b, width, color, false);
-                        } else {
-                            mesh.styled_edge(
-                                e,
-                                model,
-                                width,
-                                color,
-                                display.extensions,
-                                display.endpoints,
-                            );
-                        }
-                    }
+                    edge_draws.push(renderer::EdgeDraw {
+                        id: e.id,
+                        key: (e.a.min(e.b), e.a.max(e.b)),
+                        points: [a, b], width, color,
+                        back: display.back_edges || entity.entity_hidden,
+                        visible: !entity.entity_hidden && (display.edges || emphasize_group
+                            || profiles.contains(&e.id) || active
+                            || display.face_style == ketchup_core::FaceStyle::Wireframe),
+                        overlay: display.x_ray || display.face_style == ketchup_core::FaceStyle::Wireframe,
+                    });
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                drop(style_profile);
+                mesh.draw_edges(&edge_draws, display.extensions, display.endpoints);
             }
             if let (Some(start), Some(snap)) = (self.line_start, self.line_preview_snap()) {
                 let color = self
@@ -4362,7 +4406,11 @@ impl KetchupApp {
                 shapes.extend(self.text_shapes(&mut mesh, &p, rect, model));
                 shapes
             };
-            mesh.paint_cached(&p, rect, &mut self.scene_cache);
+            {
+                #[cfg(not(target_arch = "wasm32"))]
+                let _profile = viewport_benchmark::scope("mesh_prepare");
+                mesh.paint_cached(&p, rect, &mut self.scene_cache);
+            }
             p.extend(annotations.iter().cloned());
             self.scene_cache.remember_annotations(&p, rect, annotations);
             self.scene_cache.key = key;
@@ -4373,27 +4421,19 @@ impl KetchupApp {
         self.picking_cache.set_display(display);
         self.picking_cache.update(&self.face_cache);
         if display.group_names {
-            for object in model.objects.values().filter(|object| {
-                matches!(object.kind, ketchup_core::ObjectKind::Group)
-                    && model.parent(object.id) == model.edit_context
-                    && !object.name.trim().is_empty()
-                    && entities.get(object.id).displayed(display)
-            }) {
-                let vertices = model.selection_vertices(&object.entities);
-                let mut bounds: Option<(DVec3, DVec3)> = None;
-                for id in vertices {
-                    if let Some(vertex) = model.vertices.get(&id) {
-                        let point = vertex.position;
-                        bounds = Some(bounds.map_or((point, point), |(lo, hi)| {
-                            (lo.min(point), hi.max(point))
-                        }));
-                    }
-                }
-                let owners = model.expand_entities(&BTreeSet::from([object.id]));
-                let anchor = bounds.map(|(lo, hi)| (lo + hi) * 0.5);
-                if let Some(position) = anchor.filter(|point| self.picking_cache.marker_visible(
-                    &self.face_cache, entities, camera, size, *point, &owners,
-                )).and_then(screen) {
+            #[cfg(not(target_arch = "wasm32"))]
+            let _profile = viewport_benchmark::scope("group_labels");
+            let markers = self.group_marker_cache.update(model, model_revision);
+            for marker in markers.iter() {
+                let Some(object) = model.objects.get(&marker.id).filter(|object| {
+                    matches!(object.kind, ketchup_core::ObjectKind::Group)
+                        && entities.get(object.id).context == Some(object.id)
+                        && !object.name.trim().is_empty()
+                        && entities.get(object.id).displayed(display)
+                }) else { continue; };
+                if let Some(position) = self.picking_cache.marker_visible(
+                    &self.face_cache, entities, camera, size, marker.point, &marker.owners,
+                ).then(|| screen(marker.point)).flatten() {
                     if rect.contains(position) {
                         let is_selected = selected.contains(&object.id);
                         let foreground = if is_selected { Color32::WHITE } else { colors.ink };

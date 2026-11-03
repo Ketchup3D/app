@@ -54,18 +54,65 @@ pub struct SnapQuery<'a> {
     picking: &'a PickingCache,
     faces: &'a FaceCache,
     entities: &'a EntityCache,
+    excluded: Option<&'a std::collections::BTreeSet<u64>>,
+}
+impl<'a> SnapQuery<'a> {
+    pub fn excluding(mut self, excluded: Option<&'a std::collections::BTreeSet<u64>>) -> Self {
+        self.excluded = excluded;
+        self
+    }
 }
 impl ketchup_core::inference::FaceQuery for SnapQuery<'_> {
     fn nearest(&self, ray: Ray, scoped: bool) -> Option<(u64, f64, DVec3)> {
-        self.picking
-            .nearest_in_scope(self.faces, self.entities, ray, false, scoped, &mut 0)
+        self.picking.nearest_matching(
+            self.faces, self.entities, ray, false, scoped, &mut 0,
+            |id| self.excluded.is_none_or(|ids| !ids.contains(&id)),
+        )
     }
 
     fn is_hidden(&self, _model: &Model, id: u64) -> bool {
-        self.entities.get(id).hidden
+        self.entities.get(id).hidden || self.excluded.is_some_and(|ids| ids.contains(&id))
     }
 }
 impl PickingCache {
+    /// Attachment eligibility needs neither barycentric weights nor another
+    /// triangulation. Query the existing edge and face indices at the snap.
+    pub fn contains_geometry_point(&mut self, model: &Model, faces: &FaceCache,
+        entities: &EntityCache, camera: &Camera, size: DVec2, point: DVec3) -> bool
+    {
+        let epsilon = ketchup_core::document::EPS;
+        self.edges.update(model, camera, size);
+        if let Some(pixel) = camera.view(size).project(point) {
+            for (id, _) in self.edges.candidates(pixel, 0.01, entities) {
+                let (a, b) = model.points(&model.edges[&id]);
+                let delta = b - a;
+                let t = ((point - a).dot(delta) / delta.length_squared()).clamp(0., 1.);
+                if (point - (a + delta * t)).length() < epsilon { return true; }
+            }
+        }
+        if self.nodes.is_empty() { return false; }
+        let contains = |bounds: Bounds| (point.cmpge(bounds.lo - DVec3::splat(epsilon))
+            & point.cmple(bounds.hi + DVec3::splat(epsilon))).all();
+        let mut pending = [0; usize::BITS as usize + 1];
+        let mut len = 1;
+        while len != 0 {
+            len -= 1;
+            let node = &self.nodes[pending[len]];
+            if !contains(node.bounds) { continue; }
+            if let Some((a, b)) = node.children {
+                pending[len..len + 2].copy_from_slice(&[a, b]); len += 2;
+            } else {
+                for item in &self.items[node.start..node.end] {
+                    let state = entities.get(item.id);
+                    if !state.hidden && (model.edit_context.is_none() || state.context.is_some())
+                        && contains(item.bounds) && faces.get(item.id).contains_point(point)
+                    { return true; }
+                }
+            }
+        }
+        false
+    }
+
     pub fn set_display(&mut self, display: &ketchup_core::DisplaySettings) {
         self.display = display.clone();
     }
@@ -78,6 +125,7 @@ impl PickingCache {
             picking: self,
             faces,
             entities,
+            excluded: None,
         }
     }
     pub fn update(&mut self, faces: &FaceCache) {

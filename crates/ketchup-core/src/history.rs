@@ -105,7 +105,7 @@ impl SetChange {
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-struct ModelChange {
+pub(crate) struct ModelChange {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     connections: Changes<u64, crate::connections::Connection>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -138,7 +138,7 @@ struct ModelChange {
     edit_context: Option<(Option<u64>, Option<u64>)>,
 }
 impl ModelChange {
-    fn between(before: &Model, after: &Model) -> Self {
+    pub(crate) fn between(before: &Model, after: &Model) -> Self {
         Self {
             connections: difference(&before.connections, &after.connections),
             vertices: difference(&before.vertices, &after.vertices),
@@ -175,7 +175,7 @@ impl ModelChange {
             && self.next_id.is_none()
             && self.edit_context.is_none()
     }
-    fn apply_checked(&self, model: &mut Model, forward: bool) -> bool {
+    pub(crate) fn apply_checked(&self, model: &mut Model, forward: bool) -> bool {
         if !(matches(&self.connections, &model.connections, forward)
             && matches(&self.vertices, &model.vertices, forward)
             && matches(&self.edges, &model.edges, forward)

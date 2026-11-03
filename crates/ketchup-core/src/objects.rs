@@ -177,7 +177,7 @@ impl Model {
         }
         result
     }
-    fn boundary_edges(&self, faces: &BTreeSet<u64>) -> BTreeSet<u64> {
+    pub(crate) fn boundary_edges(&self, faces: &BTreeSet<u64>) -> BTreeSet<u64> {
         let pairs: BTreeSet<_> = faces
             .iter()
             .filter_map(|id| self.faces.get(id))
@@ -313,17 +313,40 @@ impl Model {
     pub fn copy_entities(&self, roots: &BTreeSet<u64>) -> Self {
         let mut ids = self.expand_entities(roots);
         ids.extend(self.boundary_edges(&ids));
-        let mut copy = self.clone();
-        copy.connections
-            .retain(|_, c| c.members.iter().all(|id| ids.contains(id)));
-        copy.sync_dimensions();
-        copy.dimensions.retain(|id, _| ids.contains(id));
-        copy.texts.retain(|id, _| ids.contains(id));
-        copy.edges.retain(|id, _| ids.contains(id));
-        copy.faces.retain(|id, _| ids.contains(id));
-        copy.objects.retain(|id, _| ids.contains(id));
+        fn subset<T: Clone>(source: &BTreeMap<u64, T>, ids: &BTreeSet<u64>) -> BTreeMap<u64, T> {
+            ids.iter().filter_map(|id| source.get(id).map(|value| (*id, value.clone()))).collect()
+        }
+        // Machining, measurements and previews frequently copy just one board.
+        // Clone the selected collections directly rather than cloning every
+        // object and its settings before discarding most of the document.
+        let mut copy = Self {
+            connections: self.connections.iter()
+                .filter(|(_, c)| c.members.iter().all(|id| ids.contains(id)))
+                .map(|(id, c)| (*id, c.clone())).collect(),
+            edges: subset(&self.edges, &ids),
+            faces: subset(&self.faces, &ids),
+            objects: subset(&self.objects, &ids),
+            dimensions: subset(&self.dimensions, &ids),
+            texts: subset(&self.texts, &ids),
+            face_colors: subset(&self.face_colors, &ids),
+            entity_tags: subset(&self.entity_tags, &ids),
+            hidden: self.hidden.intersection(&ids).copied().collect(),
+            locked: self.locked.intersection(&ids).copied().collect(),
+            tags: self.tags.clone(),
+            stock_materials: self.stock_materials.clone(),
+            next_id: self.next_id,
+            ..Default::default()
+        };
         let used: BTreeSet<_> = copy.edges.values().flat_map(|e| [e.a, e.b]).collect();
-        copy.vertices.retain(|id, _| used.contains(id));
+        copy.vertices = subset(&self.vertices, &used);
+        // Resolve attached positions against the complete source before the
+        // second synchronization drops weights outside the copied selection.
+        for dimension in copy.dimensions.values_mut() {
+            let (a, b) = dimension.points(self);
+            dimension.start.point = a;
+            dimension.end.point = b;
+        }
+        for text in copy.texts.values_mut() { text.anchor.point = text.anchor.position(self); }
         copy.sync_dimensions();
         copy.face_colors.retain(|id, _| copy.faces.contains_key(id));
         copy.clean_entity_state();

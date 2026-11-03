@@ -9,12 +9,24 @@ struct Guide {
     b: DVec3,
     owner: u64,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Region {
     members: [u64; 2],
     lines: Vec<Guide>,
     stock_surfaces: BTreeMap<u64, Arc<[[DVec3; 3]]>>,
     own_entities: BTreeMap<u64, Arc<BTreeSet<u64>>>,
+}
+
+pub(super) struct PreparedGuide {
+    a: DVec3,
+    b: DVec3,
+    surface: Arc<renderer::JointSurface>,
+    color: Color32,
+}
+impl PreparedGuide {
+    pub fn paint(&self, mesh: &mut renderer::Mesh) {
+        mesh.joint_guide(self.a, self.b, &self.surface, 1.8, self.color, true);
+    }
 }
 
 /// Lives for one geometry evaluation, so boards shared by several joints only
@@ -156,6 +168,10 @@ fn key(a: DVec3, b: DVec3) -> ([i64; 3], [i64; 3]) {
     if a < b { (a, b) } else { (b, a) }
 }
 impl Region {
+    pub(super) fn register_guides(&self, mesh: &mut renderer::Mesh) {
+        for line in &self.lines { mesh.register_joint_guide(line.owner, line.a, line.b); }
+    }
+
     pub fn build(
         source: &Model,
         evaluated: &Model,
@@ -309,13 +325,14 @@ impl Region {
         result.lines.extend(outlines.into_values());
         result
     }
-    pub fn paint(
+    pub fn prepare(
         &self,
         mesh: &mut renderer::Mesh,
         model: &Model,
         display: &ketchup_core::DisplaySettings,
         dark: bool,
         preview: bool,
+        guides: &mut Vec<PreparedGuide>,
     ) {
         if self.members.iter().any(|id| {
             !model.objects.contains_key(id)
@@ -345,17 +362,25 @@ impl Region {
             })
             .collect();
         for line in &self.lines {
-            let color = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-            mesh.joint_guide(
-                line.a,
-                line.b,
-                surfaces.get(&line.owner).unwrap(),
-                1.8,
-                color,
-                true,
-            );
+            guides.push(PreparedGuide {
+                a: line.a, b: line.b,
+                surface: Arc::clone(&surfaces[&line.owner]),
+                color: Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
+            });
         }
     }
+
+    pub fn surface_requests(&self, requests: &mut BTreeMap<u64, renderer::JointSurfaceRequest>) {
+        for member in self.members {
+            if let (Some(stock), Some(own_entities)) = (self.stock_surfaces.get(&member), self.own_entities.get(&member)) {
+                requests.entry(member).or_insert_with(|| renderer::JointSurfaceRequest {
+                    owner: member, stock: Arc::clone(stock), own_entities: Arc::clone(own_entities),
+                });
+            }
+        }
+    }
+
+
 }
 
 #[cfg(test)]

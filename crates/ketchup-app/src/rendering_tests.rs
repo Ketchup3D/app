@@ -11,6 +11,43 @@ fn render(app: &mut KetchupApp, ctx: &egui::Context, rect: Rect) {
 }
 
 #[test]
+fn source_picking_and_preview_markers_do_not_invalidate_render_or_shadow_geometry() {
+    let mut app = KetchupApp::with_document(Document::default(), None, true);
+    let first = ui_solid_box(&mut app.doc.model, DVec3::ZERO, DVec3::new(0.3, 0.1, 0.04));
+    let second = ui_solid_box(&mut app.doc.model, DVec3::new(0.25, 0., 0.), DVec3::new(0.55, 0.1, 0.04));
+    app.doc.model.add_connection(ketchup_core::connections::Connection {
+        members: [first, second], entry_face: None,
+        operation: ketchup_core::connections::ConnectionOperation::Joinery(Default::default()),
+    }).unwrap();
+    let ctx = egui::Context::default();
+    let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(1064., 748.));
+    app.doc.display.shadows = true;
+    app.doc.display.wood_joinery = true;
+    render(&mut app, &ctx, rect);
+    let revision = app.render_face_cache.revision();
+    let shadow_builds = app.shadow_cache.builds;
+    for i in 0..4 {
+        app.prepare_picking();
+        app.doc.camera.yaw += 0.01;
+        render(&mut app, &ctx, rect);
+        assert_eq!(app.render_face_cache.revision(), revision);
+        assert_eq!(app.shadow_cache.builds, shadow_builds, "hover/orbit must reuse shadows");
+        // A preview replaces topology before the next paint. Marker queries
+        // must keep their hierarchy paired with its matching face snapshot.
+        if i == 3 {
+            let mut preview = app.doc.model.clone();
+            let member = preview.connections.values().next().unwrap().members[0];
+            preview.move_selection(&BTreeSet::from([member]), DVec3::X * 2.).unwrap();
+            app.joinery_geometry.update(&preview);
+            let _ = ctx.run_test_ui(egui::RawInput {
+                events: vec![egui::Event::PointerMoved(rect.center())],
+                ..Default::default()
+            }, |ui| { app.joint_marker_under_pointer(ui.ctx(), rect); });
+        }
+    }
+}
+
+#[test]
 fn unchanged_views_skip_mesh_builds_and_appearance_changes_invalidate_them() {
     let ctx = egui::Context::default();
     ctx.set_theme(egui::Theme::Light);

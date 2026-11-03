@@ -42,6 +42,26 @@ pub(crate) fn triangle_grid(count: usize) -> Model {
 }
 
 #[test]
+fn cached_attachment_eligibility_matches_dimension_anchors() {
+    let mut model = triangle_grid(16);
+    let mut camera = Camera::default();
+    let size = DVec2::new(1200., 800.);
+    camera.fit(model.bounds(), size);
+    let mut faces = FaceCache::default();
+    let mut entities = EntityCache::default();
+    let mut picking = PickingCache::default();
+    for hidden in [false, true] {
+        if hidden { model.hidden.extend(model.faces.keys().take(4)); }
+        faces.update(&model); entities.update(&model); picking.update(&faces);
+        for i in 0..160 {
+            let point = DVec3::new(i as f64 * 0.3, (i % 7) as f64 * 0.2, 0.);
+            assert_eq!(picking.contains_geometry_point(&model, &faces, &entities, &camera, size, point),
+                !model.dimension_anchor(point).weights.is_empty(), "{point:?}, hidden={hidden}");
+        }
+    }
+}
+
+#[test]
 fn edge_hover_reuses_projection_and_queries_only_nearby_edges() {
     let mut model = triangle_grid(4096);
     let mut camera = Camera::default();
