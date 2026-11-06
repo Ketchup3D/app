@@ -6077,3 +6077,32 @@ fn move_hover_previews_the_anchor_used_by_first_click() {
         assert!(h.app.modeling.as_ref().unwrap().anchor.distance(snap.point) < 1e-7);
     }
 }
+
+
+#[test]
+fn web_physical_control_keys_toggle_move_copy_and_allow_arrays() {
+    for key in [Key::ControlLeft, Key::ControlRight] {
+        let mut h = Harness::new();
+        begin_move_copy(&mut h, false);
+        // Return to Move before sending the browser's physical Ctrl key event.
+        h.frame(vec![], egui::Modifiers::CTRL);
+        h.frame(vec![], egui::Modifiers::NONE);
+        assert!(!h.app.move_copy);
+        h.frame(vec![egui::Event::Key {
+            key, physical_key: Some(key), pressed: true, repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        }], egui::Modifiers::CTRL);
+        assert!(h.app.move_copy);
+        assert!(h.app.modeling.as_ref().unwrap().copy);
+        h.frame(vec![egui::Event::Key {
+            key, physical_key: Some(key), pressed: false, repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }], egui::Modifiers::NONE);
+        assert!(h.app.move_copy);
+        modeling_number(&mut h, "6");
+        modeling_number(&mut h, "/5");
+        assert_copy_positions(&h, &[0., 1.2, 2.4, 3.6, 4.8, 6.]);
+        modeling_number(&mut h, "*5");
+        assert_copy_positions(&h, &[0., 6., 12., 18., 24., 30.]);
+    }
+}

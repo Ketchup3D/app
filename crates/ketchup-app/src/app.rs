@@ -2085,23 +2085,19 @@ impl KetchupApp {
         let copy_event = events.iter().any(|e| matches!(e, egui::Event::Copy));
         let cut_event = events.iter().any(|e| matches!(e, egui::Event::Cut));
         let paste_event = events.iter().any(|e| matches!(e, egui::Event::Paste(_)));
-        let shortcuts = events.iter().any(|event| {
-            matches!(
-                event,
-                egui::Event::Copy
-                    | egui::Event::Cut
-                    | egui::Event::Paste(_)
-                    | egui::Event::Key {
-                        pressed: true,
-                        modifiers: egui::Modifiers { ctrl: true, .. },
-                        ..
-                    }
-                    | egui::Event::Key {
-                        pressed: true,
-                        modifiers: egui::Modifiers { mac_cmd: true, .. },
-                        ..
-                    }
-            )
+        let shortcuts = events.iter().any(|event| match event {
+            egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) => true,
+            egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                // Web backends emit physical modifier keys as Key events too.
+                // Ctrl itself is the Move/Copy toggle, not a Ctrl shortcut.
+                (modifiers.ctrl || modifiers.mac_cmd)
+                    && !matches!(key,
+                        Key::ControlLeft | Key::ControlRight
+                        | Key::AltLeft | Key::AltRight
+                        | Key::ShiftLeft | Key::ShiftRight
+                        | Key::SuperLeft | Key::SuperRight)
+            }
+            _ => false,
         });
         for event in events {
             match event {
