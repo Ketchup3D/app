@@ -1,5 +1,25 @@
 [
   {
+    "version": "0.6.3",
+    "date": "2026-11-06",
+    "title": "Clearer Move snapping and faster tool navigation",
+    "sections": [
+      {
+        "title": "Move and snapping",
+        "changes": [
+          "Automatically show unselected geometry in X-Ray while Move has a selection, whether selected before or after activating the tool.",
+          "Snap moving geometry to corners behind faces, including intermediate corners of recesses created with Push Pull."
+        ]
+      },
+      {
+        "title": "Workspace",
+        "changes": [
+          "Use the mouse wheel over the left toolbar to select the previous or next tool, keeping remembered tool choices."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.2",
     "date": "2026-11-06",
     "title": "Precise rotation with flexible pivots",
