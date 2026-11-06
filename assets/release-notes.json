@@ -1,5 +1,37 @@
 [
   {
+    "version": "0.6.4",
+    "date": "2026-11-06",
+    "title": "Smoother modeling and fork-aware releases",
+    "sections": [
+      {
+        "title": "Modeling and viewports",
+        "changes": [
+          "Use geometry at different heights to define a rotation angle while preserving the locked rotation plane and snapping options.",
+          "Fix Ctrl toggling Move copies in the browser, including Linux; use /5 or *5 after placing a copy to divide or repeat it.",
+          "Append new viewports to the end of the tab list."
+        ]
+      },
+      {
+        "title": "Workspace",
+        "changes": [
+          "Use normal scrolling in the left toolbar when the tools do not all fit; otherwise use the wheel to switch tools.",
+          "Show only the green insertion indicator when joining an existing inspector area, reserving the area highlight for new splits.",
+          "Expand inspector split targets to 15 pixels and double automatic scrolling speed while dragging sections.",
+          "Remove individual entries from Recent Projects without deleting their files."
+        ]
+      },
+      {
+        "title": "Releases and forks",
+        "changes": [
+          "Use the building repository for desktop update feeds, including fork releases and local GitHub origin remotes.",
+          "Resolve website repository links from the publishing repository and synchronize README links for forks and custom Pages domains.",
+          "Use the same current screenshot in the README, website, and sharing previews."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.3",
     "date": "2026-11-06",
     "title": "Clearer Move snapping and faster tool navigation",
