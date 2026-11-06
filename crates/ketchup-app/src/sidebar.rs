@@ -3927,7 +3927,14 @@ fn inspector_section_sized<R>(
     sticky_viewport: Option<Rect>,
     contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<egui::Response> {
-    let body_margin = if id == "outliner" { 0 } else { 10 };
+    let body_margin = if id == "outliner" {
+        egui::Margin {
+            bottom: 10,
+            ..egui::Margin::same(0)
+        }
+    } else {
+        egui::Margin::same(10)
+    };
     let header_action_width = if matches!(id, "materials" | "time_cost_estimates") {
         44.
     } else {
