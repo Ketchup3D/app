@@ -92,13 +92,13 @@ impl Default for DisplaySettings {
     fn default() -> Self {
         Self {
             joinery_preview: true,
-            wood_joinery: false,
+            wood_joinery: true,
             fasteners: true,
             fastener_preview: false,
             fastener_face_handles: false,
             units: crate::UnitSettings::default(),
             shadow_antialiasing: true,
-            grid: false,
+            grid: true,
             grid_auto_size: true,
             grid_spacing: 1.,
             grid_infinite: true,
@@ -236,6 +236,22 @@ impl DisplaySettings {
 mod tests {
     use super::*;
     use crate::Document;
+
+    #[test]
+    fn grid_and_wood_joinery_default_on_and_preserve_saved_visibility() {
+        for display in [
+            DisplaySettings::default(),
+            serde_json::from_str::<DisplaySettings>("{}").unwrap(),
+        ] {
+            assert!(display.grid);
+            assert!(display.wood_joinery);
+        }
+        let saved: DisplaySettings =
+            serde_json::from_str(r#"{"grid":false,"wood_joinery":false}"#).unwrap();
+        assert!(!saved.grid);
+        assert!(!saved.wood_joinery);
+    }
+
     #[test]
     fn finite_grid_defaults_round_trip_and_validate_length() {
         let old: DisplaySettings =

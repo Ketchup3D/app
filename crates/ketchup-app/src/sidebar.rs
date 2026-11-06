@@ -664,19 +664,18 @@ pub(super) fn restore_order(
         order.push(section);
     }
     // Append missing sections in introduction order, regardless of their default position.
-    for section in InspectorSection::ALL
-        .into_iter()
-        .filter(|section| *section != InspectorSection::Units)
-        .filter(|section| *section != InspectorSection::TimeCostEstimates)
-        .filter(|section| *section != InspectorSection::Materials)
-        .filter(|section| *section != InspectorSection::History)
-        .chain([
-            InspectorSection::Units,
-            InspectorSection::TimeCostEstimates,
-            InspectorSection::Materials,
-            InspectorSection::History,
-        ])
-    {
+    for section in [
+        InspectorSection::Outliner,
+        InspectorSection::EntityInfo,
+        InspectorSection::Components,
+        InspectorSection::Tags,
+        InspectorSection::Display,
+        InspectorSection::View,
+        InspectorSection::Units,
+        InspectorSection::TimeCostEstimates,
+        InspectorSection::Materials,
+        InspectorSection::History,
+    ] {
         if !order.contains(&section) {
             order.push(section);
         }
@@ -928,6 +927,7 @@ mod preference_tests {
             result.unwrap()
         }
         let ctx = egui::Context::default();
+        set_section_open(&ctx, "time_cost_estimates", true);
         let (rect, id, _) = frame(&ctx, vec![]);
         let pos = rect.center();
         frame(
@@ -1656,13 +1656,15 @@ mod preference_tests {
     }
 
     #[test]
-    fn wood_joinery_save_without_model_edits_and_default_off() {
+    fn grid_and_wood_joinery_save_without_model_edits_and_default_on() {
         let old: DisplaySettings = serde_json::from_str("{}").unwrap();
-        assert!(!old.wood_joinery);
+        assert!(old.grid);
+        assert!(old.wood_joinery);
         let ctx = egui::Context::default();
         let mut storage = SavedPreferences::default();
         let mut app = KetchupApp::with_document(Document::default(), None, true);
         for enabled in [true, false] {
+            app.doc.display.grid = enabled;
             app.doc.display.wood_joinery = enabled;
             storage.flushed = false;
             app.persist_inspector_changes(&ctx, Some(&mut storage), false);
@@ -1671,8 +1673,10 @@ mod preference_tests {
             assert!(app.dirty_since.is_none());
             let mut restored = KetchupApp::with_document(Document::default(), None, true);
             restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.doc.display.grid, enabled);
             assert_eq!(restored.doc.display.wood_joinery, enabled);
             restored.new_model(&ctx);
+            assert_eq!(restored.doc.display.grid, enabled);
             assert_eq!(restored.doc.display.wood_joinery, enabled);
         }
     }
@@ -3074,13 +3078,77 @@ mod preference_tests {
     }
 
     #[test]
-    fn units_default_below_entity_info_and_append_to_existing_layouts() {
+    fn inspector_disclosure_defaults_and_saved_overrides_survive_reload() {
+        fn render(ctx: &egui::Context, section: InspectorSection, sticky: bool) -> bool {
+            let mut visible = false;
+            let _ = ctx.run_test_ui(egui::RawInput::default(), |ui| {
+                ui.push_id((section.id(), sticky), |ui| {
+                    let viewport = ui.clip_rect();
+                    inspector_section_sized(
+                        ui,
+                        section.title(),
+                        section.id(),
+                        true,
+                        None,
+                        sticky.then_some(viewport),
+                        |_| visible = true,
+                    );
+                });
+            });
+            visible
+        }
+
+        for sticky in [false, true] {
+            for legacy in [false, true] {
+                let ctx = egui::Context::default();
+                let mut storage = SavedPreferences::default();
+                if legacy {
+                    eframe::set_value(
+                        &mut storage,
+                        PREFERENCE_KEY,
+                        &serde_json::from_str::<InspectorPreferences>("{}").unwrap(),
+                    );
+                }
+                let mut app = KetchupApp::with_document(Document::default(), None, true);
+                app.restore_inspector_preferences(&ctx, Some(&storage));
+                for section in InspectorSection::ALL {
+                    let expected = matches!(
+                        section,
+                        InspectorSection::EntityInfo | InspectorSection::Outliner
+                    );
+                    assert_eq!(render(&ctx, section, sticky), expected, "{section:?}");
+                    set_section_open(&ctx, section.id(), !expected);
+                }
+                app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+                assert!(storage.flushed);
+                assert!(!app.project.modified);
+                assert!(app.dirty_since.is_none());
+
+                let reloaded_ctx = egui::Context::default();
+                let mut reloaded = KetchupApp::with_document(Document::default(), None, true);
+                reloaded.restore_inspector_preferences(&reloaded_ctx, Some(&storage));
+                for section in InspectorSection::ALL {
+                    assert_eq!(
+                        render(&reloaded_ctx, section, !sticky),
+                        !section.default_open(),
+                        "{section:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn properties_and_outliner_default_first_and_units_append_to_existing_layouts() {
         let defaults = restore_order(None);
-        let entity = defaults
-            .iter()
-            .position(|s| *s == InspectorSection::EntityInfo)
-            .unwrap();
-        assert_eq!(defaults[entity + 1], InspectorSection::Units);
+        assert_eq!(
+            &defaults[..3],
+            &[
+                InspectorSection::EntityInfo,
+                InspectorSection::Outliner,
+                InspectorSection::Units,
+            ]
+        );
 
         let previous = vec![
             InspectorSection::View,
@@ -3375,11 +3443,16 @@ mod preference_tests {
             Some(&InspectorSection::Materials)
         );
 
-        // Older preferences have no disclosure entry, so Materials starts open.
+        // Older preferences have no disclosure entry, so Materials starts collapsed.
         let id = egui::Id::unique("materials_default");
-        restore_section(&ctx, id, "materials", true);
+        restore_section(
+            &ctx,
+            id,
+            "materials",
+            InspectorSection::Materials.default_open(),
+        );
         assert!(
-            egui::collapsing_header::CollapsingState::load(&ctx, id)
+            !egui::collapsing_header::CollapsingState::load(&ctx, id)
                 .unwrap()
                 .is_open()
         );
@@ -3552,8 +3625,8 @@ impl InspectorSection {
     pub(super) const COUNT: usize = 10;
 
     pub(super) const ALL: [Self; Self::COUNT] = [
-        Self::Outliner,
         Self::EntityInfo,
+        Self::Outliner,
         Self::Units,
         Self::Components,
         Self::Tags,
@@ -3563,6 +3636,10 @@ impl InspectorSection {
         Self::Materials,
         Self::History,
     ];
+
+    fn default_open(self) -> bool {
+        matches!(self, Self::EntityInfo | Self::Outliner)
+    }
 
     fn title(self) -> &'static str {
         match self {
@@ -3927,6 +4004,10 @@ fn inspector_section_sized<R>(
     sticky_viewport: Option<Rect>,
     contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<egui::Response> {
+    let default_open = InspectorSection::ALL
+        .into_iter()
+        .find(|section| section.id() == id)
+        .map_or(primary, InspectorSection::default_open);
     let body_margin = if id == "outliner" {
         egui::Margin {
             bottom: 10,
@@ -3977,11 +4058,11 @@ fn inspector_section_sized<R>(
                 let (_, natural_rect) = ui.allocate_space(egui::vec2(ui.available_width(), height));
                 let header_id = ui.make_persistent_id(id);
                 let mut state = fill_size.is_none().then(|| {
-                    restore_section(ui.ctx(), header_id, id, primary);
+                    restore_section(ui.ctx(), header_id, id, default_open);
                     egui::collapsing_header::CollapsingState::load_with_default_open(
                         ui.ctx(),
                         header_id,
-                        primary,
+                        default_open,
                     )
                 });
                 let openness = state.as_ref().map_or(1., |state| state.openness(ui.ctx()));
@@ -4141,10 +4222,10 @@ fn inspector_section_sized<R>(
                 });
                 return header;
             }
-            let open = restored_header_open(ui, id, primary);
+            let open = restored_header_open(ui, id, default_open);
             let header = egui::CollapsingHeader::new(RichText::new(title).strong())
                 .id_salt(id)
-                .default_open(primary)
+                .default_open(default_open)
                 .open(open)
                 .icon(move |ui, openness, response| {
                     let center = response.rect.center() - egui::vec2(12., 0.);
