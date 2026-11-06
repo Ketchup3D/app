@@ -2917,6 +2917,45 @@ impl KetchupApp {
                     .inner_margin(egui::Margin::symmetric(10, 18)),
             )
             .show(ui, |ui| {
+                if ui.rect_contains_pointer(ui.max_rect().expand2(egui::vec2(10., 18.))) {
+                    // Use wheel events, not inertial smoothing, for one tool change
+                    // per wheel input. Consume scrolling before the rail scroll area.
+                    let wheel = ui.input_mut(|input| {
+                        let mut delta = 0.;
+                        input.events.retain(|event| {
+                            if let egui::Event::MouseWheel { delta: scroll, .. } = event {
+                                delta += scroll.y;
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                        input.smooth_scroll_delta = Vec2::ZERO;
+                        delta
+                    });
+                    if wheel != 0. {
+                        let current = Tool::RAIL.iter().position(|tool| {
+                            *tool == self.tool
+                                || (*tool == Tool::Line && self.tool.is_drawing())
+                                || (*tool == Tool::Dimensions && self.tool.is_measuring())
+                                || (*tool == Tool::Union && self.tool.is_solid())
+                        }).unwrap_or(0);
+                        let next = if wheel > 0. {
+                            current.saturating_sub(1)
+                        } else {
+                            (current + 1).min(Tool::RAIL.len() - 1)
+                        };
+                        if next != current {
+                            let tool = match Tool::RAIL[next] {
+                                Tool::Line => self.drawing_tool,
+                                Tool::Dimensions => self.measurement_tool,
+                                Tool::Union => self.solid_tool,
+                                tool => tool,
+                            };
+                            self.set_tool(tool);
+                        }
+                    }
+                }
                 let scroll = sidebar::restored_scroll_area(
                     ui,
                     "sidebar_left",
