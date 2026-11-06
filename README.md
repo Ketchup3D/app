@@ -9,7 +9,7 @@
 [![Download for Windows x64](https://img.shields.io/badge/Windows_x64-0078D4?style=for-the-badge)](https://github.com/Ketchup3D/app/releases/latest/download/io.github.Ketchup3D.Ketchup-win-x64-Setup.exe)
 [![Download for macOS Apple Silicon](https://img.shields.io/badge/macOS_Apple_Silicon-6E40C9?style=for-the-badge)](https://github.com/Ketchup3D/app/releases/latest/download/io.github.Ketchup3D.Ketchup-osx-arm64-Setup.pkg)
 [![Download for Linux x64](https://img.shields.io/badge/Linux_x64-E95420?style=for-the-badge)](https://github.com/Ketchup3D/app/releases/latest/download/io.github.Ketchup3D.Ketchup-linux-x64.AppImage)
-[![See all downloads](https://img.shields.io/badge/All_downloads-555555?style=for-the-badge)](https://github.com/Ketchup3D/app/releases/tag/v0.6.2)
+[![See all downloads](https://img.shields.io/badge/All_downloads-555555?style=for-the-badge)](https://github.com/Ketchup3D/app/releases/latest)
 
 A small 3D edge and face editor written in Rust. The same editor runs as a native Windows, macOS, or Linux application and in a desktop browser through WebAssembly.
 
@@ -333,3 +333,11 @@ without Git metadata default to `Ketchup3D/app`. Set `KETCHUP_UPDATE_REPOSITORY`
 to `owner/repository` at build time to select an explicit feed. The fork must
 publish its own compatible installer and update assets through the release
 workflow. Already installed upstream binaries retain their original update feed.
+
+Forks use their own GitHub repository for website source, documentation, license,
+and release links. Pages resolves these links from `GITHUB_REPOSITORY` during
+staging. Enable Actions in a fork and run **Synchronize repository links** once
+(or push a README change) to update the README links; later README changes on
+the default branch synchronize automatically. Set the repository variable
+`PAGES_BASE_URL` when using a custom Pages domain. The fork must enable Pages
+and publish its own releases before its browser and download links are available.

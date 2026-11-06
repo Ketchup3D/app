@@ -1,0 +1,42 @@
+name: Synchronize repository links
+
+on:
+  push:
+    paths:
+      - README.md
+      - scripts/sync_repository_links.py
+      - .github/workflows/repository-links.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repository-links-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  synchronize:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Synchronize README links
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          PAGES_BASE_URL: ${{ vars.PAGES_BASE_URL }}
+        run: |
+          python3 -B -m unittest discover -s scripts -p test_sync_repository_links.py
+          python3 -B scripts/sync_repository_links.py --repository "$SOURCE_REPOSITORY" --base-url "$PAGES_BASE_URL"
+          if ! git diff --quiet -- README.md; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -- README.md
+            git commit -m 'Synchronize README links with this repository'
+            git push
+          fi

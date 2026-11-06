@@ -34,6 +34,19 @@ class StageSiteTests(unittest.TestCase):
                     for name in FILES:
                         self.assertNotIn(DEFAULT_URL, (target / name).read_text())
 
+    def test_fork_links_use_the_building_repository(self):
+        source = Path(__file__).resolve().parents[1] / 'site'
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            stage(source, target, 'https://fork.example.org/', 'someone/wood-editor')
+            for name in FILES:
+                self.assertNotIn('https://github.com/Ketchup3D/app', (target / name).read_text())
+            page = (target / 'index.html').read_text()
+            self.assertIn('https://github.com/someone/wood-editor/releases/latest', page)
+            self.assertIn('https://github.com/someone/wood-editor/blob/main/LICENSE', page)
+            self.assertIn('https://fork.example.org/assets/screenshots/ketchup.jpg', page)
+            self.assertTrue((target / 'assets/screenshots/ketchup.jpg').is_file())
+
     def test_reject_invalid_public_urls(self):
         for url in ('http://example.org', 'https://', 'https://user:secret@example.org',
                     'https://example.org/?a=b', 'https://example.org/#fragment',
