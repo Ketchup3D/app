@@ -1,10 +1,10 @@
 //! Persistent, nested split areas for inspector sections. A center drop joins
-//! the hovered stack; a drop within 10 points inside an edge splits that area.
+//! the hovered stack; a drop within 15 points inside an edge splits that area.
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
 use super::*;
 
-const SNAP_RANGE: f32 = 10.;
+const SNAP_RANGE: f32 = 15.;
 const DIVIDER: f32 = 6.;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -105,6 +105,7 @@ impl DockLayout {
         }
     }
 
+    #[cfg(test)]
     fn pane_for(&self, section: InspectorSection) -> Option<u64> {
         match self {
             Self::Stack { id, sections } if sections.contains(&section) => Some(*id),
@@ -383,14 +384,9 @@ impl InspectorLayout {
     }
 
     fn show_layout_preview(&self, target: DropTarget) -> bool {
-        self.drag.is_some_and(|drag| {
-            target.side != Side::Center
-                || self
-                    .dock
-                    .as_ref()
-                    .and_then(|dock| dock.pane_for(drag.section))
-                    != Some(target.pane)
-        })
+        // Joining an existing pane already shows the green insertion slot.
+        // Reserve the area highlight for an edge drop that creates a new pane.
+        self.drag.is_some() && target.side != Side::Center
     }
 
     fn insertion_index(
@@ -513,7 +509,7 @@ impl KetchupApp {
                     let clip = pane.rect;
                     let speed = ((clip.top() + 32. - pointer.y).max(0.)
                         - (pointer.y - (clip.bottom() - 32.)).max(0.))
-                        * 12.;
+                        * 24.;
                     if speed != 0. {
                         let dt = ui.input(|i| i.stable_dt.min(0.05));
                         ui.scroll_with_delta_animation(
@@ -655,7 +651,7 @@ impl KetchupApp {
             });
             let header = header.interact(egui::Sense::click_and_drag())
                 .on_hover_cursor(egui::CursorIcon::Grab)
-                .on_hover_text("Drop within 10px inside an area's edge to split; cross a section's vertical midpoint to reorder, or drop in another area's center to join");
+                .on_hover_text("Drop within 15px inside an area's edge to split; cross a section's vertical midpoint to reorder, or drop in another area's center to join");
             if let Some(rect) = action_rect {
                 // Use the header's layer so the button follows sticky and floating headers.
                 let mut action_ui = panel_ui.new_child(
@@ -804,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn edge_zones_extend_ten_points_inward_and_never_outward() {
+    fn edge_zones_extend_fifteen_points_inward_and_never_outward() {
         let rect = Rect::from_min_size(egui::pos2(100., 200.), egui::vec2(300., 400.));
         for (side, border, direction) in [
             (Side::Top, egui::pos2(250., 200.), egui::vec2(0., -1.)),
@@ -812,7 +808,7 @@ mod tests {
             (Side::Bottom, egui::pos2(250., 600.), egui::vec2(0., 1.)),
             (Side::Left, egui::pos2(100., 400.), egui::vec2(-1., 0.)),
         ] {
-            for distance in [0., 0.1, 5., 10.] {
+            for distance in [0., 0.1, 5., 10., 15.] {
                 let (actual, preview) = drop_target(rect, border - direction * distance).unwrap();
                 assert_eq!(actual, side);
                 assert!(rect.contains_rect(preview));
@@ -823,7 +819,7 @@ mod tests {
                 }
             }
             assert_eq!(
-                drop_target(rect, border - direction * 10.1),
+                drop_target(rect, border - direction * 15.1),
                 Some((Side::Center, rect))
             );
             for distance in [0.1, 5., 10., 30.] {
@@ -840,7 +836,7 @@ mod tests {
             Side::Top
         );
         assert!(drop_target(rect, rect.min - egui::vec2(1., 4.)).is_none());
-        let small = Rect::from_min_size(Pos2::ZERO, egui::vec2(30., 30.));
+        let small = Rect::from_min_size(Pos2::ZERO, egui::vec2(40., 40.));
         assert_eq!(
             drop_target(small, small.center()),
             Some((Side::Center, small))
