@@ -104,15 +104,19 @@ class Desktop:
         self.x.XWarpPointer(self.display, 0, window, 0, 0, 0, 0, 0, HEIGHT - 1)
         self.x.XFlush(self.display)
 
-    def dismiss_notes(self, window):
+    def dismiss_modals(self, window):
         self.x.XSetInputFocus(self.display, window, 2, 0)
         keycode = self.x.XKeysymToKeycode(self.display, 0xFF1B)
-        for type_, mask in ((2, 1), (3, 2)):
-            event = Event()
-            event.key = KeyEvent(type=type_, send_event=1, display=self.display,
-                window=window, root=self.root, keycode=keycode, same_screen=1)
-            self.x.XSendEvent(self.display, window, 0, mask, C.byref(event))
-        self.x.XFlush(self.display)
+        # Escape closes the top popup/modal. Allow a frame between presses so
+        # nested popups and dialogs, including release notes, can all dismiss.
+        for _ in range(4):
+            for type_, mask in ((2, 1), (3, 2)):
+                event = Event()
+                event.key = KeyEvent(type=type_, send_event=1, display=self.display,
+                    window=window, root=self.root, keycode=keycode, same_screen=1)
+                self.x.XSendEvent(self.display, window, 0, mask, C.byref(event))
+            self.x.XFlush(self.display)
+            time.sleep(0.2)
 
     def close(self):
         self.x.XCloseDisplay(self.display)
@@ -176,8 +180,7 @@ def main():
                         raise RuntimeError("Could not find the launched desktop window.")
                     desktop.prepare(window)
                     stable_frame(window, process)
-                    desktop.dismiss_notes(window)
-                    time.sleep(0.5)
+                    desktop.dismiss_modals(window)
                     image = stable_frame(window, process)
                     destination = ROOT / "assets/screenshots/ketchup.jpg"
                     temporary = destination.with_suffix(".jpg.tmp")

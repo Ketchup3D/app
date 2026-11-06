@@ -219,10 +219,12 @@ Python Pillow. The script selects the newest existing executable from the native
 release and debug output directories; `--binary /path/to/ketchup-app` selects one
 explicitly. It launches the desktop app in an isolated temporary profile, loads
 [`assets/examples/Example.ketchup`](assets/examples/Example.ketchup) with its saved
-camera and display settings, captures the settled window at 1920 × 1080, and
-updates `assets/screenshots/ketchup.jpg` and its README link. It never compiles
-the app, runs tests, or starts benchmarks. The screenshot reflects the existing
-executable; a missing executable is reported without building one.
+camera and display settings, dismisses open dialogs and popups, captures the
+settled window at 1920 × 1080, and updates `assets/screenshots/ketchup.jpg` and its
+README link. Visually verify that no modal remains open before using the image.
+It never compiles the app, runs tests, or starts benchmarks. The screenshot
+reflects the existing executable; a missing executable is reported without
+building one.
 
 ```sh
 cargo check --workspace --locked
