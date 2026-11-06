@@ -574,7 +574,11 @@ impl KetchupApp {
         sidebar::remember_scroll(ui.ctx(), key, scroll.state.clamped_offset());
         if self.gesture.is_none() {
             if add {
-                if let Some(pane) = self.viewports.layout.pane_for_tab(self.viewports.active) {
+                // Append to the final pane in tab order, regardless of which
+                // viewport is active (including Current in a split layout).
+                if let Some(pane) = tabs.last()
+                    .and_then(|tab| self.viewports.layout.pane_for_tab(*tab))
+                {
                     activate = Some(self.viewports.add(pane, &self.doc.camera));
                 }
             }
