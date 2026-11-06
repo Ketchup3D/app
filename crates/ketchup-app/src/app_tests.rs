@@ -4206,6 +4206,116 @@ fn ui_solid_box(model: &mut Model, min: DVec3, max: DVec3) -> u64 {
     let entities = model.paste_entities(&body, DVec3::ZERO);
     model.make_object(&entities, false, "Solid box").unwrap()
 }
+
+fn properties_output(h: &mut Harness) -> egui::FullOutput {
+    h.ctx.run_test_ui(egui::RawInput::default(), |ui| {
+        h.app.entity_info_contents(ui);
+    })
+}
+
+fn properties_outline(model: &mut Model, points: &[DVec3]) -> u64 {
+    let before: BTreeSet<_> = model.faces.keys().copied().collect();
+    for i in 0..points.len() {
+        model
+            .add_edge(points[i], points[(i + 1) % points.len()])
+            .unwrap();
+    }
+    *model.faces.keys().find(|id| !before.contains(id)).unwrap()
+}
+
+#[test]
+fn properties_show_edge_lengths_totals_units_and_geometry_changes() {
+    let mut h = Harness::new();
+    let edge = h
+        .app
+        .doc
+        .model
+        .add_edge(DVec3::ZERO, DVec3::new(3., 0., 4.))
+        .unwrap();
+    h.app.selected = BTreeSet::from([edge]);
+    let output = properties_output(&mut h);
+    text_position(&output, "Length");
+    text_position(&output, "5.000 m");
+
+    let other = h
+        .app
+        .doc
+        .model
+        .add_edge(DVec3::splat(10.), DVec3::new(10., 12., 10.))
+        .unwrap();
+    h.app.selected.insert(other);
+    h.app.doc.display.units.length = ketchup_core::LengthUnit::Millimeters;
+    h.app.doc.display.units.precision.length = Some(1);
+    let output = properties_output(&mut h);
+    text_position(&output, "Total edge length");
+    text_position(&output, "7000.0 mm");
+
+    let end = h.app.doc.model.edges[&edge].b;
+    h.app.doc.model.vertices.get_mut(&end).unwrap().position = DVec3::new(0., 0., 10.);
+    h.app.selected = BTreeSet::from([edge]);
+    text_position(&properties_output(&mut h), "10000.0 mm");
+}
+
+#[test]
+fn properties_show_face_sides_and_include_holes_in_the_perimeter() {
+    let mut h = Harness::new();
+    // A tilted square ensures lengths are measured in 3D, not projected onto XY.
+    let face = properties_outline(
+        &mut h.app.doc.model,
+        &[
+            DVec3::ZERO,
+            DVec3::new(3., 0., 4.),
+            DVec3::new(3., 5., 4.),
+            DVec3::new(0., 5., 0.),
+        ],
+    );
+    properties_outline(
+        &mut h.app.doc.model,
+        &[
+            DVec3::new(0.6, 1., 0.8),
+            DVec3::new(1.2, 1., 1.6),
+            DVec3::new(1.2, 2., 1.6),
+            DVec3::new(0.6, 2., 0.8),
+        ],
+    );
+    assert_eq!(h.app.doc.model.faces[&face].holes.len(), 1);
+    h.app.selected = BTreeSet::from([face]);
+    h.app.doc.display.units.precision.length = Some(2);
+    let output = properties_output(&mut h);
+    text_position(&output, "Perimeter");
+    text_position(&output, "24.00 m");
+    text_position(&output, "Side lengths");
+    text_position(&output, "5.00 m · 5.00 m · 5.00 m · 5.00 m");
+    text_position(&output, "Hole 1 side lengths");
+    text_position(&output, "1.00 m · 1.00 m · 1.00 m · 1.00 m");
+    text_position(&output, "Surface area");
+}
+
+#[test]
+fn properties_keep_face_perimeters_separate_from_selected_edge_lengths() {
+    let mut h = Harness::new();
+    let first = properties_outline(
+        &mut h.app.doc.model,
+        &[DVec3::ZERO, DVec3::X, DVec3::new(1., 1., 0.), DVec3::Y],
+    );
+    let second = properties_outline(
+        &mut h.app.doc.model,
+        &[
+            DVec3::X,
+            DVec3::new(2., 0., 0.),
+            DVec3::new(2., 1., 0.),
+            DVec3::new(1., 1., 0.),
+        ],
+    );
+    let edge = *h.app.doc.model.edges.keys().next().unwrap();
+    h.app.selected = BTreeSet::from([first, second, edge]);
+    let output = properties_output(&mut h);
+    text_position(&output, "Length");
+    text_position(&output, "1.000 m");
+    text_position(&output, "Total perimeter");
+    text_position(&output, "8.000 m");
+}
+
 #[test]
 fn selected_object_volume_is_reused_across_inspector_redraws_and_selection_changes() {
     let mut h = Harness::new();

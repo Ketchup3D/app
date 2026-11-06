@@ -3216,6 +3216,18 @@ impl KetchupApp {
             if self.doc.model.selection_locked(&self.selected) {
                 ui.text_label(RichText::new("Locked").color(self.axis_color(Axis::Z)));
             }
+            if edges > 0 {
+                let length: f64 = entities
+                    .iter()
+                    .filter_map(|id| self.doc.model.edges.get(id))
+                    .map(|edge| self.doc.model.edge_length(edge))
+                    .sum();
+                Self::property_row(
+                    ui,
+                    if edges == 1 { "Length" } else { "Total edge length" },
+                    &self.doc.display.units.format_length(length),
+                );
+            }
             if faces > 0 {
                 let area: f64 = entities
                     .iter()
@@ -3227,6 +3239,51 @@ impl KetchupApp {
                     "Surface area",
                     &self.doc.display.units.format_area(area),
                 );
+                let side_lengths = |ring: &[u64]| {
+                    (0..ring.len())
+                        .map(|i| {
+                            self.doc.model.vertices[&ring[i]].position.distance(
+                                self.doc.model.vertices[&ring[(i + 1) % ring.len()]].position,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let selected_faces: Vec<_> = entities
+                    .iter()
+                    .filter_map(|id| self.doc.model.faces.get(id))
+                    .collect();
+                let perimeter: f64 = selected_faces
+                    .iter()
+                    .flat_map(|face| std::iter::once(&face.vertices).chain(face.holes.iter()))
+                    .flat_map(|ring| side_lengths(ring))
+                    .sum();
+                Self::property_row(
+                    ui,
+                    if faces == 1 {
+                        "Perimeter"
+                    } else {
+                        "Total perimeter"
+                    },
+                    &self.doc.display.units.format_length(perimeter),
+                );
+                if let [face] = selected_faces.as_slice() {
+                    for (index, ring) in std::iter::once(&face.vertices)
+                        .chain(face.holes.iter())
+                        .enumerate()
+                    {
+                        let label = if index == 0 {
+                            "Side lengths".to_owned()
+                        } else {
+                            format!("Hole {index} side lengths")
+                        };
+                        let lengths = side_lengths(ring)
+                            .into_iter()
+                            .map(|length| self.doc.display.units.format_length(length))
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        Self::property_row(ui, &label, &lengths);
+                    }
+                }
             }
             if self.selected.len() == 1
                 && let Some(&id) = self.selected.first()
