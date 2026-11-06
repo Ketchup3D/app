@@ -119,6 +119,7 @@ impl KetchupApp {
         ui.menu_button("Recent Projects", |ui| {
             if self.project.recent.is_empty() { ui.label("No recent projects"); }
             let mut chosen = None;
+            let mut remove = None;
             for (index, entry) in self.project.recent.iter().enumerate() {
                 let detail = entry.description();
                 let mut label = egui::text::LayoutJob::default();
@@ -132,11 +133,22 @@ impl KetchupApp {
                     color: ui.visuals().weak_text_color(),
                     ..Default::default()
                 });
-                if ui.add(egui::Button::new(label).wrap()).on_hover_text(detail).clicked() {
-                    chosen = Some(index);
-                }
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(label).wrap()).on_hover_text(detail).clicked() {
+                        chosen = Some(index);
+                    }
+                    if ui.small_button("Remove")
+                        .on_hover_text("Remove from recent projects")
+                        .clicked()
+                    {
+                        remove = Some(index);
+                    }
+                });
             }
-            if let Some(index) = chosen {
+            if let Some(index) = remove {
+                self.project.recent.remove(index);
+                ctx.request_repaint();
+            } else if let Some(index) = chosen {
                 self.request_project(Action::Recent(index), ctx);
                 ui.close();
             }
