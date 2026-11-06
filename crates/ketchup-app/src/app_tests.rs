@@ -4,6 +4,8 @@ use eframe::App;
 
 #[path = "axis_lock_tests.rs"]
 mod axis_locks;
+#[path = "rotate_tool_tests.rs"]
+mod rotate_tool;
 #[path = "scale_tool_tests.rs"]
 mod scale_tool;
 #[path = "offset_tool_tests.rs"]

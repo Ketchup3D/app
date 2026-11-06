@@ -59,6 +59,8 @@ mod grid;
 mod measurement_tools;
 #[path = "move_tool.rs"]
 mod move_tool;
+#[path = "rotate_tool.rs"]
+mod rotate_tool;
 #[path = "scale_tool.rs"]
 mod scale_tool;
 #[path = "precision.rs"]
@@ -203,6 +205,7 @@ struct Modeling {
     pointer: Pos2,
     center: DVec3,
     scale_constraint: Option<AxisConstraint>,
+    rotation: Option<rotate_tool::Rotation>,
     direction: DVec3,
     // Keep Push/Pull's original normal when switching or clearing axis locks.
     unlocked_direction: DVec3,
@@ -1060,7 +1063,7 @@ impl KetchupApp {
             .filter(|pos| self.viewport.contains(*pos))
             .or_else(|| {
                 self.modeling.as_ref()
-                    .filter(|_| matches!(self.tool, Tool::Move | Tool::Scale | Tool::PushPull | Tool::Offset))
+                    .filter(|_| matches!(self.tool, Tool::Move | Tool::Rotate | Tool::Scale | Tool::PushPull | Tool::Offset))
                     .map(|edit| edit.pointer)
             })
         {
@@ -1449,6 +1452,7 @@ impl KetchupApp {
             .selection_center(&self.selected)
             .unwrap_or(anchor);
         let snap_excluded = self.modeling_snap_exclusions(face_id);
+        let rotation = (self.tool == Tool::Rotate).then(|| self.rotation_at(anchor, ray));
         self.modeling = Some(Modeling {
             base: self.doc.model.clone(),
             entities: self.selected.clone(),
@@ -1458,6 +1462,7 @@ impl KetchupApp {
             pointer: pos,
             center,
             scale_constraint: self.axis_constraint(),
+            rotation,
             direction: if self.tool == Tool::PushPull {
                 self.pull_direction(direction)
             } else {
@@ -1468,9 +1473,13 @@ impl KetchupApp {
             value: if self.tool == Tool::Scale { 1. } else { 0. },
             copy: self.tool == Tool::Move && self.move_copy,
             preview: None,
-            move_snap: matches!(self.tool, Tool::Move | Tool::Scale)
+            move_snap: matches!(self.tool, Tool::Move | Tool::Rotate | Tool::Scale)
                 .then(|| {
-                    ketchup_core::inference::MoveSnapCache::excluding(&self.doc.model, &snap_excluded)
+                    if self.tool == Tool::Rotate {
+                        ketchup_core::inference::MoveSnapCache::new(&self.doc.model)
+                    } else {
+                        ketchup_core::inference::MoveSnapCache::excluding(&self.doc.model, &snap_excluded)
+                    }
                 }),
             snap_excluded,
             move_preview: (self.tool == Tool::Move)
@@ -1560,6 +1569,10 @@ impl KetchupApp {
     }
 
     fn update_modeling(&mut self, pos: Pos2) {
+        if self.tool == Tool::Rotate {
+            self.update_rotation(pos);
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let _profile = viewport_benchmark::scope("modeling_preview");
         // Recompute when a lock is set, switched, or cleared during a pull.
@@ -1705,7 +1718,7 @@ impl KetchupApp {
             edit.value = (edit.value / spacing).round() * spacing;
         }
         let value =
-            precision::modeling_value(self.tool, &self.length_input, self.doc.display.units.length)
+            precision::modeling_value_with_units(self.tool, &self.length_input, self.doc.display.units)
                 .unwrap_or(edit.value);
         if matches!(self.tool, Tool::PushPull | Tool::Offset)
             && value.abs() < 1e-7
@@ -1760,11 +1773,12 @@ impl KetchupApp {
         }
         // Typed values move the live marker to the same point as the preview,
         // just as typed drawing lengths move the drawing tool's endpoint.
-        let value = precision::modeling_value(
-            self.tool, &self.length_input, self.doc.display.units.length,
+        let value = precision::modeling_value_with_units(
+            self.tool, &self.length_input, self.doc.display.units,
         ).unwrap_or(edit.value);
         let point = match self.tool {
             Tool::Move => edit.anchor + Self::move_delta(edit, value).ok()?,
+            Tool::Rotate => Self::rotation_marker(edit, value)?,
             Tool::Scale => {
                 let reference = edit.anchor - edit.center;
                 let reference = edit.scale_constraint.map_or(reference, |lock| lock.project(reference));
@@ -1797,6 +1811,17 @@ impl KetchupApp {
                 model.offset_face(face, value)?;
                 model.edit_context = context;
             }
+            Tool::Rotate => {
+                let rotation = edit.rotation.as_ref().unwrap();
+                if rotation.reference.is_none() {
+                    return Err("Click a reference point away from the pivot first");
+                }
+                let reference = rotation.reference.unwrap();
+                if (reference - rotation.normal * reference.dot(rotation.normal)).length_squared() < 1e-12 {
+                    return Err("The reference lies on the rotation axis; clear the lock or restart with another reference");
+                }
+                model.rotate_selection(&edit.entities, edit.anchor, rotation.normal, value)?;
+            }
             Tool::Scale => model.scale_selection_constrained(
                 &edit.entities, edit.center, value, edit.scale_constraint,
             )?,
@@ -1821,16 +1846,19 @@ impl KetchupApp {
         {
             self.update_modeling(pos);
         }
+        if self.tool == Tool::Rotate && self.choose_rotation_reference(ctx) {
+            return;
+        }
         let Some(edit) = self.modeling.as_ref() else {
             return;
         };
         let value = if self.length_input.trim().is_empty() {
             edit.value
         } else {
-            match precision::modeling_value(
+            match precision::modeling_value_with_units(
                 self.tool,
                 &self.length_input,
-                self.doc.display.units.length,
+                self.doc.display.units,
             ) {
                 Ok(value) => value,
                 Err(message) => {
@@ -2175,7 +2203,7 @@ impl KetchupApp {
                         }
                         Key::ArrowRight | Key::ArrowLeft | Key::ArrowUp
                             if self.tool.is_drawing()
-                                || matches!(self.tool, Tool::Move | Tool::Scale | Tool::PushPull | Tool::Offset)
+                                || matches!(self.tool, Tool::Move | Tool::Rotate | Tool::Scale | Tool::PushPull | Tool::Offset)
                                 || self.tool.is_measuring() =>
                         {
                             let axis = match key {
@@ -2195,7 +2223,7 @@ impl KetchupApp {
                         c.is_ascii_alphanumeric()
                             || matches!(
                                 c,
-                                '.' | '-' | '+' | '*' | '/' | '(' | ')' | ',' | '\'' | '"' | ' '
+                                '.' | '-' | '+' | '*' | '/' | '(' | ')' | ',' | '\'' | '"' | ' ' | '°'
                             )
                     }) && self.length_input.len() + text.len() <= precision::MAX_INPUT_LEN
                     {
@@ -2666,6 +2694,8 @@ impl KetchupApp {
                         }
                     } else if self.paste_preview.is_some() {
                         "Click to place the copy · Escape to cancel"
+                    } else if self.tool == Tool::Rotate {
+                        self.rotation_status()
                     } else if self.tool == Tool::Move {
                         if self.last_move_copy.is_some() {
                             "Copy placed · Type /3 to divide the span or 3x to repeat · Enter to apply"
@@ -2723,7 +2753,7 @@ impl KetchupApp {
                         }
                         let available = self.precision_available();
                         let hint = if let Some(edit) = &self.modeling {
-                            if self.tool == Tool::Scale { format!("{:.3}", edit.value) } else { self.doc.display.units.format_length(edit.value) }
+                            if self.tool == Tool::Scale { format!("{:.3}", edit.value) } else if self.tool == Tool::Rotate { self.doc.display.units.format_angle(edit.value) } else { self.doc.display.units.format_length(edit.value) }
                         } else if self.last_move_copy.is_some() {
                             "/3 or 3x".into()
                         } else if self.drawing.is_some() && self.tool == Tool::Rectangle {
@@ -2743,7 +2773,11 @@ impl KetchupApp {
                                 .hint_text(hint)
                                 .char_limit(precision::MAX_INPUT_LEN)
                                 .margin(egui::vec2(9., 6.)),
-                        ).on_hover_text(format!("Use lengths or formulas: 60cm - 89mm, (1m + 20cm) / 2. Operators: + - * / and parentheses. Plain numbers default to {}; multipliers are unitless. Units: mm, cm, m, km, in, ft, yd. Rectangles accept one formula per dimension, separated by a comma. Scale uses numbers without units.", self.doc.display.units.length.label()));
+                        ).on_hover_text(if self.tool == Tool::Rotate {
+                            format!("Enter an angle or formula, such as 90 or (45 + 45) / 2. Plain numbers use {}. Add deg, °, rad, or gon after the formula to override the unit.", self.doc.display.units.angle.label())
+                        } else {
+                            format!("Use lengths or formulas: 60cm - 89mm, (1m + 20cm) / 2. Operators: + - * / and parentheses. Plain numbers default to {}; multipliers are unitless. Units: mm, cm, m, km, in, ft, yd. Rectangles accept one formula per dimension, separated by a comma. Scale uses numbers without units.", self.doc.display.units.length.label())
+                        });
                         if (field.has_focus() || field.lost_focus())
                             && ctx.input(|i| i.key_pressed(Key::Enter))
                         {
@@ -2761,6 +2795,7 @@ impl KetchupApp {
                         ui.text_label(
                             RichText::new(match self.tool {
                                 Tool::Scale => "Factor",
+                                Tool::Rotate => "Angle",
                                 Tool::PushPull => "Distance",
                                 Tool::Offset => "Offset",
                                 Tool::Move if self.last_move_copy.is_some() => "Copies",
@@ -3494,7 +3529,7 @@ impl KetchupApp {
     fn pick_at(&mut self, pixel: DVec2, size: DVec2, include_faces: bool) -> Option<u64> {
         // Select and move the visible machined boards, retaining their source
         // object IDs. The cache restores stock geometry in the active edit scope.
-        if matches!(self.tool,Tool::Select|Tool::Move|Tool::Scale)
+        if matches!(self.tool,Tool::Select|Tool::Move|Tool::Rotate|Tool::Scale)
             && self.doc.model.connections.values().any(|c| matches!(c.operation,ketchup_core::connections::ConnectionOperation::Joinery(_)))
             {
             return self.joinery_geometry.pick(&self.doc.model,&self.doc.camera,&self.doc.display,size,pixel,include_faces);
@@ -3523,7 +3558,7 @@ impl KetchupApp {
             self.flip_hover = None;
             return;
         }
-        if self.modeling.is_some() && matches!(self.tool, Tool::Move | Tool::Scale) {
+        if self.modeling.is_some() && matches!(self.tool, Tool::Move | Tool::Rotate | Tool::Scale) {
             self.hover = None;
             self.update_modeling(pos);
             return;
@@ -3563,7 +3598,7 @@ impl KetchupApp {
                         Some(id)
                     }
                 })
-        } else if matches!(self.tool, Tool::Select | Tool::Move | Tool::Scale)
+        } else if matches!(self.tool, Tool::Select | Tool::Move | Tool::Rotate | Tool::Scale)
             || self.tool.is_solid()
         {
             self.pick_at(local, size, true)
@@ -3576,7 +3611,7 @@ impl KetchupApp {
         if self.tool.is_measuring() {
             self.update_measurement(pos);
         }
-        if matches!(self.tool, Tool::Move | Tool::Scale)
+        if matches!(self.tool, Tool::Move | Tool::Rotate | Tool::Scale)
             && self.modeling.is_none()
             && self.paste_preview.is_none()
         {
@@ -3968,6 +4003,7 @@ impl KetchupApp {
                                 | Tool::Scale
                                 | Tool::Offset
                                 | Tool::Move
+                                | Tool::Rotate
                                 | Tool::Paint => GestureKind::Modeling,
                                 Tool::Erase => GestureKind::Erase {
                                     ids: self.sweep_erase(pos, pos),
@@ -4290,7 +4326,7 @@ impl KetchupApp {
         } * (size * 0.36);
         // Keep tool icons clear of the snapped anchor, as for Dimensions.
         let offset = if tool.is_measuring()
-            || matches!(tool, Tool::Move | Tool::Scale | Tool::PushPull | Tool::Offset)
+            || matches!(tool, Tool::Move | Tool::Rotate | Tool::Scale | Tool::PushPull | Tool::Offset)
         {
             egui::vec2(15., 15.)
         } else {
@@ -4990,13 +5026,13 @@ impl KetchupApp {
                 }
             }
         }
-        let modeling_anchor = matches!(self.tool, Tool::Move | Tool::Scale | Tool::Offset | Tool::PushPull)
+        let modeling_anchor = matches!(self.tool, Tool::Move | Tool::Rotate | Tool::Scale | Tool::Offset | Tool::PushPull)
             && self.modeling.is_none()
             && self.paste_preview.is_none()
             && !self.navigating()
             && p.ctx().input(|i| i.pointer.hover_pos()).is_some_and(|pos| rect.contains(pos));
         let modeling_start = self.modeling.as_ref()
-            .filter(|_| matches!(self.tool, Tool::Move | Tool::Scale | Tool::Offset | Tool::PushPull))
+            .filter(|_| matches!(self.tool, Tool::Move | Tool::Rotate | Tool::Scale | Tool::Offset | Tool::PushPull))
             .map(|edit| edit.anchor);
         if self.tool.is_drawing() || self.tool == Tool::Text || modeling_anchor || modeling_start.is_some() {
             if let Some(start) = self.line_start.or(self.drawing.as_ref().map(|d| d.origin)).or_else(|| {
@@ -5135,13 +5171,19 @@ impl KetchupApp {
         }
         if let Some(edit) = &self.modeling {
             let text = edit.error.map(str::to_owned).unwrap_or_else(|| {
-                let value = precision::modeling_value(
+                let value = precision::modeling_value_with_units(
                     self.tool,
                     &self.length_input,
-                    self.doc.display.units.length,
+                    self.doc.display.units,
                 )
                 .unwrap_or(edit.value);
-                if self.tool == Tool::Scale {
+                if self.tool == Tool::Rotate {
+                    if edit.rotation.as_ref().is_some_and(|rotation| rotation.reference.is_none()) {
+                        "Click a reference point away from the pivot · Esc to cancel".into()
+                    } else {
+                        format!("{} · Click to confirm · Esc to cancel", self.doc.display.units.format_angle(value))
+                    }
+                } else if self.tool == Tool::Scale {
                     format!("{value:.3} × · Click to confirm · Esc to cancel")
                 } else {
                     let alignment = if edit.guides.len() > 1 && self.length_input.is_empty() {
@@ -5190,6 +5232,9 @@ impl KetchupApp {
                 colors.paper,
             );
             p.galley(at, galley, colors.ink);
+            if self.tool == Tool::Rotate {
+                self.paint_rotation(&p, rect);
+            }
             if matches!(self.tool, Tool::Move | Tool::Scale) {
                 if display.guides && self.length_input.is_empty() {
                     for guide in &edit.guides {
@@ -5287,14 +5332,14 @@ impl KetchupApp {
     }
     fn drawing_lock_buttons(&mut self, ui: &mut egui::Ui) {
         let enabled = self.tool.is_drawing()
-            || matches!(self.tool, Tool::Move | Tool::Scale | Tool::PushPull | Tool::Offset)
+            || matches!(self.tool, Tool::Move | Tool::Rotate | Tool::Scale | Tool::PushPull | Tool::Offset)
             || self.tool.is_measuring();
         let colors = Palette::for_ui(ui);
         // The viewport toolbar flows right to left: show X, Y, then Z.
         for (axis, label) in [
-            (Axis::Z, "Toggle Z axis lock (↑). Select up to two axes to lock their plane; ↓ clears all locks. Shapes use a single lock as their plane normal."),
-            (Axis::Y, "Toggle Y axis lock (←). Select up to two axes to lock their plane; ↓ clears all locks. Shapes use a single lock as their plane normal."),
-            (Axis::X, "Toggle X axis lock (→). Select up to two axes to lock their plane; ↓ clears all locks. Shapes use a single lock as their plane normal."),
+            (Axis::Z, "Toggle Z axis lock (↑). Select up to two axes to lock their plane; ↓ clears all locks. Shapes and Rotate use a single lock as their plane normal."),
+            (Axis::Y, "Toggle Y axis lock (←). Select up to two axes to lock their plane; ↓ clears all locks. Shapes and Rotate use a single lock as their plane normal."),
+            (Axis::X, "Toggle X axis lock (→). Select up to two axes to lock their plane; ↓ clears all locks. Shapes and Rotate use a single lock as their plane normal."),
         ] {
             let active = self.lock == Some(axis) || self.second_lock == Some(axis);
             let available = enabled && (active || self.second_lock.is_none());

@@ -123,6 +123,7 @@ impl KetchupApp {
                     ("Scale geometry", "S"),
                     ("Offset a face", "F"),
                     ("Move geometry", "M"),
+                    ("Rotate geometry", "Q"),
                     ("Toggle Move / Copy", Self::move_copy_key(ctx)),
                     ("Divide a copy span", "/N + Enter"),
                     ("Repeat copies", "Nx + Enter"),
@@ -188,6 +189,7 @@ impl KetchupApp {
                                 | (Tool::Scale, "Scale geometry")
                                 | (Tool::Offset, "Offset a face")
                                 | (Tool::Move, "Move geometry")
+                                | (Tool::Rotate, "Rotate geometry")
                         )
                 }) {
                     *keys = self.general_settings.tool_shortcut(*tool).to_owned();

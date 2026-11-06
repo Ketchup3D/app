@@ -411,6 +411,17 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, colors: ToolPalette) {
                 p.arrow(c, egui::vec2(x * r, y * r), stroke);
             }
         }
+        Tool::Rotate => {
+            let points: Vec<_> = (0..=28).map(|i| {
+                let angle = -2.5 + i as f32 * 5. / 28.;
+                xy(angle.cos() * 0.85, angle.sin() * 0.85)
+            }).collect();
+            let tip = points[28];
+            p.add(egui::Shape::line(points, stroke));
+            p.arrow(tip - egui::vec2(-2.5_f32.sin(), 2.5_f32.cos()) * 4.,
+                egui::vec2(-2.5_f32.sin(), 2.5_f32.cos()) * 4., stroke);
+            p.circle_filled(c, 2., red);
+        }
         Tool::Paint => {
             let bucket = |x: f32, y: f32| {
                 let diagonal = std::f32::consts::FRAC_1_SQRT_2;

@@ -79,6 +79,7 @@ pub enum Tool {
     Scale,
     Offset,
     Move,
+    Rotate,
     Paint,
     TapeMeasure,
     Protractor,
@@ -120,7 +121,7 @@ impl Tool {
     pub fn is_drawing(self) -> bool {
         Self::DRAWING.contains(&self)
     }
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Select,
         Self::Line,
         Self::Rectangle,
@@ -137,6 +138,7 @@ impl Tool {
         Self::Scale,
         Self::Offset,
         Self::Move,
+        Self::Rotate,
         Self::Paint,
         Self::TapeMeasure,
         Self::Protractor,
@@ -145,7 +147,7 @@ impl Tool {
         Self::Erase,
         Self::Orbit,
     ];
-    pub const RAIL: [Self; 11] = [
+    pub const RAIL: [Self; 12] = [
         Self::Select,
         Self::Line,
         Self::Erase,
@@ -154,6 +156,7 @@ impl Tool {
         Self::Scale,
         Self::Offset,
         Self::Move,
+        Self::Rotate,
         Self::Paint,
         Self::Dimensions,
         Self::Union,
@@ -176,6 +179,7 @@ impl Tool {
             Self::Scale => "Scale",
             Self::Offset => "Offset",
             Self::Move => "Move",
+            Self::Rotate => "Rotate",
             Self::Paint => "Paint",
             Self::TapeMeasure => "Tape Measure",
             Self::Protractor => "Protractor",
@@ -203,6 +207,7 @@ impl Tool {
             Self::Scale => "S",
             Self::Offset => "F",
             Self::Move => "M",
+            Self::Rotate => "Q",
             Self::Paint => "B",
             Self::TapeMeasure => "T",
             Self::Protractor => "A",
@@ -248,6 +253,9 @@ impl Tool {
             }
             Self::Move => {
                 "Select geometry · Click a base point and destination · Arrow keys lock axes"
+            }
+            Self::Rotate => {
+                "Select geometry · Click a pivot, reference point, then angle · Arrow keys lock the rotation plane"
             }
             Self::Paint => {
                 "Choose a color and Face or Group in the inspector · Click a face to paint"

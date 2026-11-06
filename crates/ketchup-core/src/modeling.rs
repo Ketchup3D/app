@@ -133,6 +133,35 @@ impl Model {
         Ok(())
     }
 
+    /// Rotate atomically about any world-space pivot, retaining component frames.
+    pub fn rotate_selection(
+        &mut self,
+        selected: &BTreeSet<u64>,
+        pivot: DVec3,
+        axis: DVec3,
+        degrees: f64,
+    ) -> Result<(), &'static str> {
+        if !pivot.is_finite() || !axis.is_finite() || !degrees.is_finite() {
+            return Err("Enter a finite rotation and pivot");
+        }
+        let axis = axis.try_normalize().ok_or("Choose a rotation axis first")?;
+        if self.edit_context.is_some() {
+            return self.edit_in_context(|model| model.rotate_selection(selected, pivot, axis, degrees));
+        }
+        let rotation = glam::DMat3::from_axis_angle(axis, degrees.to_radians());
+        let rotate = |p: DVec3| pivot + rotation * (p - pivot);
+        self.transform_selection(selected, rotate)?;
+        for id in self.expand_entities(selected) {
+            if let Some(object) = self.objects.get_mut(&id) {
+                let mut frame = object.transform.unwrap_or_default();
+                frame.translation = rotate(frame.translation);
+                frame.basis = rotation * frame.basis;
+                object.transform = Some(frame);
+            }
+        }
+        Ok(())
+    }
+
     /// Mirror the selection about its bounds center without detaching component instances.
     pub fn flip_selection(
         &mut self,
@@ -153,6 +182,8 @@ impl Model {
             if let Some(object) = self.objects.get_mut(&id) {
                 let mut frame = object.transform.unwrap_or_default();
                 frame.translation = mirror(frame.translation);
+                frame.basis = glam::DMat3::from_diagonal(signs) * frame.basis
+                    * glam::DMat3::from_diagonal(signs);
                 frame.axes *= signs;
                 object.transform = Some(frame);
             }
@@ -207,6 +238,8 @@ impl Model {
             if let Some(object) = self.objects.get_mut(&id) {
                 let mut frame = object.transform.unwrap_or_default();
                 frame.translation = center + (frame.translation - center) * factors;
+                frame.basis = glam::DMat3::from_diagonal(factors) * frame.basis
+                    * glam::DMat3::from_diagonal(DVec3::ONE / factors);
                 frame.axes *= factors;
                 object.transform = Some(frame);
             }

@@ -2001,6 +2001,28 @@ mod preference_tests {
     }
 
     #[test]
+    fn rotate_and_its_locks_restore_after_an_immediate_save_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.set_tool(Tool::Rotate);
+        app.toggle_axis_lock(Axis::X, &ctx);
+        app.toggle_axis_lock(Axis::Y, &ctx);
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!(restored.tool, Tool::Rotate);
+        assert_eq!(restored.plane_lock(), Some(Axis::Z));
+        assert!(restored.modeling.is_none());
+        assert_eq!(restored.general_settings.tool_shortcut(Tool::Rotate), "Q");
+        let defaults: InspectorPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.tools.active, Tool::Select);
+        assert_eq!(defaults.tools.axis_lock, None);
+    }
+
+    #[test]
     fn tool_menu_choices_and_options_restore_without_transient_state() {
         let ctx = egui::Context::default();
         let mut storage = SavedPreferences::default();

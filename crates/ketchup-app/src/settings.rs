@@ -109,7 +109,7 @@ impl Section {
     }
 }
 
-pub(super) const TOOLS: [(Tool, &str); 16] = [
+pub(super) const TOOLS: [(Tool, &str); 17] = [
     (Tool::Select, "Space"),
     (Tool::Line, "L"),
     (Tool::Rectangle, "R"),
@@ -126,6 +126,8 @@ pub(super) const TOOLS: [(Tool, &str); 16] = [
     (Tool::TapeMeasure, "T"),
     (Tool::Protractor, "A"),
     (Tool::Dimensions, "I"),
+    // Append to preserve the indices of saved custom shortcuts.
+    (Tool::Rotate, "Q"),
 ];
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -171,6 +173,14 @@ impl GeneralSettings {
             } else {
                 1.
             };
+        }
+        // Migrate older shortcut lists without discarding custom assignments.
+        if self.tool_keys.len() + 1 == TOOLS.len() {
+            let key = std::iter::once("Q")
+                .chain(["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"])
+                .find(|key| !self.tool_keys.iter().any(|saved| saved.as_str() == *key))
+                .unwrap();
+            self.tool_keys.push(key.into());
         }
         if self.tool_keys.len() != TOOLS.len()
             || self
@@ -682,6 +692,23 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn adding_rotate_migrates_existing_custom_keys_and_resolves_conflicts() {
+        for custom in ["H", "Q"] {
+            let mut settings = GeneralSettings::default();
+            settings.tool_keys.pop();
+            settings.tool_keys[1] = custom.into();
+            let old = settings.tool_keys.clone();
+            settings.normalize();
+            assert_eq!(&settings.tool_keys[..old.len()], old.as_slice());
+            assert_eq!(settings.tool_keys.len(), TOOLS.len());
+            assert_eq!(settings.tool_for_key(Key::from_name(custom).unwrap()), Some(Tool::Line));
+            let rotation = settings.tool_shortcut(Tool::Rotate);
+            assert_ne!(rotation, custom);
+            assert_eq!(settings.tool_for_key(Key::from_name(rotation).unwrap()), Some(Tool::Rotate));
+        }
+    }
 
     #[test]
     fn reassigning_shortcuts_swaps_conflicts_and_repairs_invalid_saved_values() {

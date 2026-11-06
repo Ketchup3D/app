@@ -1,11 +1,12 @@
 //! Scoped editing and propagation of component definitions between instances.
 use crate::{DVec3, Model, ObjectKind, Ray};
 use serde::{Deserialize, Serialize};
+use glam::DMat3;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 /// Instance geometry is stored in world coordinates. This frame preserves the
-/// translation and per-axis scale when its shared definition changes.
+/// translation, rotation and per-axis scale when its shared definition changes.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstanceTransform {
     pub translation: DVec3,
@@ -13,6 +14,12 @@ pub struct InstanceTransform {
     /// Signed per-axis multipliers, including reflections and axis-locked scaling.
     #[serde(default = "identity_axes")]
     pub axes: DVec3,
+    /// Additional linear frame, preserving rotations and subsequent world-axis edits.
+    #[serde(default = "identity_basis")]
+    pub basis: DMat3,
+}
+fn identity_basis() -> DMat3 {
+    DMat3::IDENTITY
 }
 fn identity_axes() -> DVec3 {
     DVec3::ONE
@@ -23,6 +30,7 @@ impl Default for InstanceTransform {
             translation: DVec3::ZERO,
             scale: 1.,
             axes: DVec3::ONE,
+            basis: DMat3::IDENTITY,
         }
     }
 }
@@ -33,7 +41,15 @@ impl InstanceTransform {
             && self.scale > 0.
             && self.axes.is_finite()
             && self.axes.abs().min_element() > 0.
+            && self.basis.is_finite()
+            && self.basis.determinant().is_finite()
+            && self.basis.determinant() != 0.
+            && self.basis.inverse().is_finite()
     }
+    pub fn linear(self) -> DMat3 {
+        self.basis * DMat3::from_diagonal(self.axes * self.scale)
+    }
+
     pub fn translated(self, delta: DVec3) -> Self {
         Self {
             translation: self.translation + delta,
@@ -186,26 +202,26 @@ impl Model {
         }
         self.objects.get_mut(&id).unwrap().definition_entities = mapping;
     }
-    fn transform_contents(&mut self, scale: DVec3, translation: DVec3) {
+    fn transform_contents(&mut self, linear: DMat3, translation: DVec3) {
         self.sync_dimensions();
         for d in self.dimensions.values_mut() {
-            d.start.point = d.start.point * scale + translation;
-            d.end.point = d.end.point * scale + translation;
-            d.offset *= scale;
+            d.start.point = linear * d.start.point + translation;
+            d.end.point = linear * d.end.point + translation;
+            d.offset = linear * d.offset;
         }
         for text in self.texts.values_mut() {
-            text.anchor.point = text.anchor.point * scale + translation;
-            text.offset *= scale;
+            text.anchor.point = linear * text.anchor.point + translation;
+            text.offset = linear * text.offset;
         }
         for vertex in self.vertices.values_mut() {
-            vertex.position = vertex.position * scale + translation;
+            vertex.position = linear * vertex.position + translation;
         }
         for object in self.objects.values_mut() {
             let transform = object.transform.unwrap_or_default();
             object.transform = Some(InstanceTransform {
-                translation: transform.translation * scale + translation,
-                scale: transform.scale * scale.abs().x,
-                axes: transform.axes * (scale / scale.abs().x),
+                translation: linear * transform.translation + translation,
+                basis: linear * transform.basis,
+                ..transform
             });
         }
     }
@@ -311,8 +327,8 @@ impl Model {
             let transform = instance.transform.unwrap_or_default();
             let mut canonical = self.object_contents(source).ok_or("Missing component")?;
             canonical.transform_contents(
-                DVec3::ONE / (transform.axes * transform.scale),
-                -transform.translation / (transform.axes * transform.scale),
+                transform.linear().inverse(),
+                -(transform.linear().inverse() * transform.translation),
             );
             let peers: Vec<_> = self
                 .objects
@@ -322,7 +338,7 @@ impl Model {
                 .collect();
             for (peer, frame) in peers {
                 let mut contents = canonical.clone();
-                contents.transform_contents(frame.axes * frame.scale, frame.translation);
+                contents.transform_contents(frame.linear(), frame.translation);
                 // Keep surviving peer vertices stable so dimensions attached
                 // from outside the component continue to track its geometry.
                 let mut stable_vertices = BTreeMap::new();
@@ -426,10 +442,8 @@ impl Model {
             let mut contents = self
                 .object_contents(reference.id)
                 .ok_or("Missing component definition")?;
-            contents.transform_contents(
-                to.axes / from.axes * (to.scale / from.scale),
-                to.translation - from.translation * to.axes / from.axes * (to.scale / from.scale),
-            );
+            let linear = to.linear() * from.linear().inverse();
+            contents.transform_contents(linear, to.translation - linear * from.translation);
             copy.remove_contents(id)?;
             let (entities, remap) = copy.paste_mapped(&contents, DVec3::ZERO, false);
             let object = copy.objects.get_mut(&id).unwrap();
@@ -477,8 +491,8 @@ impl Model {
                         let (c, d) = self.points(other);
                         let reference_frame = reference.transform.unwrap_or_default();
                         let scale = a.distance(b) / c.distance(d) * reference_frame.scale;
-                        let canonical_start = (c - reference_frame.translation)
-                            / (reference_frame.axes * reference_frame.scale);
+                        let canonical_start = reference_frame.linear().inverse()
+                            * (c - reference_frame.translation);
                         frame = InstanceTransform {
                             scale,
                             translation: a - canonical_start * scale,

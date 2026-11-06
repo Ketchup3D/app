@@ -359,3 +359,68 @@ fn dimensions_outside_an_instance_keep_tracking_vertices_after_shared_edits() {
     assert!(!model.dimensions[&dimension].start.weights.is_empty());
     model.validate().unwrap();
 }
+
+fn assert_matching_component_frames(model: &Model, source: u64, peer: u64) {
+    let a = &model.objects[&source];
+    let b = &model.objects[&peer];
+    assert_eq!(a.kind, b.kind);
+    let from = a.transform.unwrap();
+    let to = b.transform.unwrap();
+    for (key, id) in &a.definition_entities {
+        if let Some(edge) = model.edges.get(id) {
+            let other = &model.edges[&b.definition_entities[key]];
+            for (left, right) in [(edge.a, other.a), (edge.b, other.b)] {
+                let left = from.linear().inverse() * (model.vertices[&left].position - from.translation);
+                let right = to.linear().inverse() * (model.vertices[&right].position - to.translation);
+                assert!(left.distance(right) < 1e-6, "{left:?} != {right:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn rotated_component_frames_survive_nested_edits_scaling_reflection_copy_and_reload() {
+    for reflected in [false, true] {
+        let mut model = Model::default();
+        rectangle(&mut model);
+        object(&mut model, false, "Nested group");
+        let original = object(&mut model, true, "Panel");
+        let copy = model.copy_entities(&BTreeSet::from([original]));
+        let peer = *model.paste_entities(&copy, DVec3::X * 6.).first().unwrap();
+        let selected = BTreeSet::from([peer]);
+        let pivot = DVec3::new(5., -1., 2.);
+        model.rotate_selection(&selected, pivot, DVec3::new(1., 2., 3.), 63.).unwrap();
+        model.scale_selection_constrained(
+            &selected, pivot, 1.5, Some(inference::AxisConstraint::Axis(Axis::Y)),
+        ).unwrap();
+        if reflected { model.flip_selection(&selected, Axis::X).unwrap(); }
+        model = serde_json::from_str(&serde_json::to_string(&model).unwrap()).unwrap();
+        assert_matching_component_frames(&model, original, peer);
+        assert!(model.enter_object(original));
+        let group = child_object(&model, original);
+        assert!(model.enter_object(group));
+        model.push_pull(first_face(&model, group), 0.5).unwrap();
+        assert_matching_component_frames(&model, original, peer);
+        // Editing through the rotated instance must invert its full linear frame.
+        model.edit_context = Some(peer);
+        let group = child_object(&model, peer);
+        assert!(model.enter_object(group));
+        model.move_selection(&model.selectable_entities(), DVec3::Z * 0.3).unwrap();
+        assert_matching_component_frames(&model, original, peer);
+        model.edit_context = None;
+        let copy = model.copy_entities(&selected);
+        let pasted = *model.paste_entities(&copy, DVec3::Y * 5.).first().unwrap();
+        assert_matching_component_frames(&model, original, pasted);
+        model.validate().unwrap();
+    }
+}
+
+#[test]
+fn old_instance_frames_default_to_an_identity_rotation() {
+    let old: InstanceTransform = serde_json::from_str(
+        r#"{"translation":[1,2,3],"scale":2,"axes":[-1,2,1]}"#,
+    ).unwrap();
+    assert_eq!(old.basis, glam::DMat3::IDENTITY);
+    assert_eq!(old.linear() * DVec3::ONE, DVec3::new(-2., 4., 2.));
+    assert!(old.valid());
+}

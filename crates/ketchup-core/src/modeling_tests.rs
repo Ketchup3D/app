@@ -588,3 +588,31 @@ fn move_preview_preserves_connected_face_constraints_and_locks() {
     model.locked.insert(face);
     assert!(MovePreview::new(&model, &selected).is_err());
 }
+
+#[test]
+fn rotation_uses_an_offset_pivot_preserves_lengths_and_is_atomic_on_failure() {
+    let mut model = Model::default();
+    let edge = model.add_edge(DVec3::X, DVec3::X * 3.).unwrap();
+    let selected = BTreeSet::from([edge]);
+    let pivot = DVec3::new(0., 1., 2.);
+    let before = model.clone();
+    model.rotate_selection(&selected, pivot, DVec3::Z * 2., 90.).unwrap();
+    let (a, b) = model.points(&model.edges[&edge]);
+    assert!(a.distance(DVec3::new(1., 2., 0.)) < 1e-7);
+    assert!((a.distance(b) - 2.).abs() < 1e-7);
+    let rotated = model.clone();
+    for (axis, degrees) in [(DVec3::ZERO, 90.), (DVec3::Z, f64::NAN)] {
+        assert!(model.rotate_selection(&selected, pivot, axis, degrees).is_err());
+        assert_eq!(model, rotated);
+    }
+    model.locked.insert(edge);
+    let locked = model.clone();
+    assert!(model.rotate_selection(&selected, pivot, DVec3::Z, -90.).is_err());
+    assert_eq!(model, locked);
+    model.locked.remove(&edge);
+    model.rotate_selection(&selected, pivot, DVec3::Z, -90.).unwrap();
+    for (id, vertex) in &before.vertices {
+        assert!(model.vertices[id].position.distance(vertex.position) < 1e-7);
+    }
+    model.validate().unwrap();
+}

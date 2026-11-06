@@ -226,11 +226,40 @@ pub(super) fn positive_length(input: &str, unit: LengthUnit) -> Result<f64, &'st
     }
 }
 
+/// Bare angles use the display unit; a suffix can override it for the whole formula.
+pub(super) fn angle(input: &str, unit: ketchup_core::AngleUnit) -> Result<f64, &'static str> {
+    let input = input.trim();
+    let lower = input.to_ascii_lowercase();
+    let (formula, factor) = [
+        ("degrees", 1.), ("degree", 1.), ("deg", 1.), ("°", 1.),
+        ("radians", 180. / std::f64::consts::PI),
+        ("radian", 180. / std::f64::consts::PI),
+        ("grad", 0.9), ("gon", 0.9),
+        ("rad", 180. / std::f64::consts::PI),
+    ].into_iter().find_map(|(suffix, factor)| {
+        lower.ends_with(suffix).then(|| (&input[..input.len() - suffix.len()], factor))
+    }).unwrap_or((input, unit.factor()));
+    Formula::parse(formula, false, 1.).map(|value| value.number * factor)
+        .and_then(|degrees| if degrees.is_finite() { Ok(degrees) } else { Err("Enter a finite angle") })
+}
+
+pub(super) fn modeling_value_with_units(
+    tool: Tool,
+    input: &str,
+    units: ketchup_core::UnitSettings,
+) -> Result<f64, &'static str> {
+    if tool == Tool::Rotate { angle(input, units.angle) }
+    else { modeling_value(tool, input, units.length) }
+}
+
 pub(super) fn modeling_value(
     tool: Tool,
     input: &str,
     unit: LengthUnit,
 ) -> Result<f64, &'static str> {
+    if tool == Tool::Rotate {
+        return angle(input, ketchup_core::AngleUnit::Degrees);
+    }
     if tool != Tool::Scale {
         return length(input, unit);
     }
@@ -266,7 +295,10 @@ impl KetchupApp {
     pub(super) fn precision_available(&self) -> bool {
         (self.tool == Tool::Line && self.line_start.is_some())
             || self.drawing.is_some()
-            || self.modeling.is_some()
+            || self.modeling.as_ref().is_some_and(|edit| {
+                self.tool != Tool::Rotate
+                    || edit.rotation.as_ref().is_some_and(|rotation| rotation.reference.is_some())
+            })
             || self.last_move_copy.is_some()
     }
 
@@ -339,6 +371,24 @@ mod tests {
 
     fn modeling_value(tool: Tool, input: &str) -> Result<f64, &'static str> {
         super::modeling_value(tool, input, LengthUnit::Meters)
+    }
+
+    #[test]
+    fn rotation_angles_support_display_units_suffixes_and_signed_formulas() {
+        use ketchup_core::AngleUnit;
+        for (input, unit, expected) in [
+            ("(45 + 45) / 2", AngleUnit::Degrees, 45.),
+            ("-90°", AngleUnit::Radians, -90.),
+            ("100gon", AngleUnit::Degrees, 90.),
+            ("(1 + 1) rad", AngleUnit::Gradians, 2_f64.to_degrees()),
+            ("1", AngleUnit::Radians, 1_f64.to_degrees()),
+            ("100", AngleUnit::Gradians, 90.),
+        ] {
+            assert!((angle(input, unit).unwrap() - expected).abs() < 1e-9);
+        }
+        for invalid in ["NaN", "inf", "1e999", "45m", "1 / 0", ""] {
+            assert!(angle(invalid, AngleUnit::Degrees).is_err());
+        }
     }
 
     #[test]

@@ -26,7 +26,7 @@ fn has_start_marker(output: &egui::FullOutput, at: Pos2) -> bool {
 
 #[test]
 fn modeling_anchor_preview_and_first_click_share_exact_snaps_inside_groups() {
-    for tool in [Tool::Move, Tool::Scale, Tool::Offset, Tool::PushPull] {
+    for tool in [Tool::Move, Tool::Rotate, Tool::Scale, Tool::Offset, Tool::PushPull] {
         for grouped in [false, true] {
             let mut h = Harness::new();
             let face = modeling_rectangle(&mut h);
