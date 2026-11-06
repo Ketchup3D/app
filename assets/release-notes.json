@@ -1,5 +1,28 @@
 [
   {
+    "version": "0.6.2",
+    "date": "2026-11-06",
+    "title": "Precise rotation with flexible pivots",
+    "sections": [
+      {
+        "title": "Modeling and rotation",
+        "changes": [
+          "Rotate selected geometry with the new Rotate tool below Move, using Q by default or a custom shortcut.",
+          "Choose a pivot on or away from the selection, set a reference point, and preview the rotation with geometry and grid snapping. Use arrow keys to lock the rotation plane.",
+          "Enter precise angles or formulas in the selected angle unit, or specify degrees, radians, or gradians explicitly. Rotation supports undo and redo.",
+          "Preserve rotated component orientations through shared edits, scaling, reflection, copying, and project reloads."
+        ]
+      },
+      {
+        "title": "Workspace and preferences",
+        "changes": [
+          "Remember the Rotate tool and its axis and plane locks across restarts, even without a model edit.",
+          "Keep existing custom keyboard shortcuts when adding Rotate, choosing an available shortcut if Q is already assigned."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.1",
     "date": "2026-11-06",
     "title": "Clearer measurements and scoped joinery",
