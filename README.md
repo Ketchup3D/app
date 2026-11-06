@@ -101,8 +101,11 @@ python3 scripts/desktop_release.py version --tag vX.Y.Z
 python3 scripts/desktop_release.py notes --tag vX.Y.Z
 ```
 
-Commit and push the release changes and notes before creating and pushing the
-matching tag. Release validation rejects missing or mismatched notes. The same
+Refresh the README screenshot by launching an existing desktop executable as
+described below. Deploy requests do not run local builds or tests; GitHub Actions
+performs the desktop and browser builds, tests, and packaging. Commit and push
+the release changes and notes before creating and pushing the matching tag.
+Release validation rejects missing or mismatched notes. The same
 catalog supplies the GitHub Release description and **Help → Release notes**
 in the app. Publishing uses GitHub's automatic token. Signing needs the credentials below.
 
@@ -205,22 +208,21 @@ networks.
 
 ## Development and verification
 
-Refresh the README screenshot from an existing Web build (no compilation is started):
+Refresh the README screenshot from an existing desktop executable:
 
 ```sh
-node scripts/capture_readme.mjs
+python3 -B scripts/capture_readme_desktop.py
 ```
 
-Requires Node.js 22+ and Chromium/Chrome. Set `CHROME_BIN` or pass
-`--browser /path/to/chrome` if it is not detected; `--dist path/to/web-build`
-selects a different Trunk output directory. The script serves the app locally,
-launches an isolated headless browser at 1920 × 1080, waits for the loading
-screen to disappear and the rendered frame to stabilize, then saves a JPEG to
-`assets/screenshots/ketchup.jpg` and adds or updates its README image link.
-The temporary profile loads [`assets/examples/Example.ketchup`](assets/examples/Example.ketchup),
-including its saved camera and display settings, and does not use personal
-preferences. The image reflects the supplied Web build; rebuild it separately
-when needed to capture newer application changes.
+On Linux, this requires X11 or XWayland, ImageMagick's `import` command, and
+Python Pillow. The script selects the newest existing executable from the native
+release and debug output directories; `--binary /path/to/ketchup-app` selects one
+explicitly. It launches the desktop app in an isolated temporary profile, loads
+[`assets/examples/Example.ketchup`](assets/examples/Example.ketchup) with its saved
+camera and display settings, captures the settled window at 1920 × 1080, and
+updates `assets/screenshots/ketchup.jpg` and its README link. It never compiles
+the app, runs tests, or starts benchmarks. The screenshot reflects the existing
+executable; a missing executable is reported without building one.
 
 ```sh
 cargo check --workspace --locked
