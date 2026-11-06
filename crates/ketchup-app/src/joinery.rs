@@ -114,6 +114,13 @@ struct CachedRegion {
     region: highlight::Region,
 }
 
+/// Root is the assembled overview; inside an object, show only joints between
+/// its immediate children. Opening a board therefore exposes its original stock.
+fn joint_in_view(model: &Model, connection: &Connection) -> bool {
+    model.edit_context.is_none()
+        || connection.members.iter().all(|member| model.entity_in_context(*member) == Some(*member))
+}
+
 impl GeometryCache {
     /// Keep one in-flight machining job during a gesture. Completed previews
     /// are adopted in order; the next job uses the newest pointer position,
@@ -220,18 +227,13 @@ impl GeometryCache {
         self.finish_pending();
         if self.source.as_ref() != Some(source) {
             self.prepared_shadows = None;
-            // Editing a board must expose its original stock topology. Suspend
-            // relations involving the current edit scope only in this viewport
-            // model; saved relations and export geometry remain unchanged.
+            // Scope machining and guides together without changing saved
+            // relations or the fully assembled geometry used by exports.
             let mut viewport_source = source.clone();
-            if let Some(context) = source.edit_context {
-                let scope = source.expand_entities(&BTreeSet::from([context]));
-                viewport_source.connections.retain(|_, connection| {
-                    !matches!(connection.operation, ConnectionOperation::Joinery(_))
-                        || !connection.members.iter().any(|member|
-                            scope.contains(member) || source.expand_entities(&BTreeSet::from([*member])).contains(&context))
-                });
-            }
+            viewport_source.connections.retain(|_, connection| {
+                !matches!(connection.operation, ConnectionOperation::Joinery(_))
+                    || joint_in_view(source, connection)
+            });
             let evaluation = {
                 #[cfg(not(target_arch = "wasm32"))]
                 let _profile = super::viewport_benchmark::scope("joinery_evaluate");
@@ -394,7 +396,9 @@ impl KetchupApp {
             return Vec::new();
         }
         self.doc.model.connections.iter().filter_map(|(id, connection)| {
-            if !matches!(connection.operation, ConnectionOperation::Joinery(_)) {
+            if !matches!(connection.operation, ConnectionOperation::Joinery(_))
+                || !joint_in_view(&self.doc.model, connection)
+            {
                 return None;
             }
             if connection.members.iter().any(|id| self.doc.model.is_hidden(*id)) {
@@ -943,6 +947,67 @@ mod tests {
         app.joinery_geometry.update(&app.doc.model);
         assert!(app.joinery_geometry.result.as_ref().unwrap().errors.is_empty());
         assert_eq!(app.joint_markers(rect).len(), 1);
+    }
+
+    #[test]
+    fn joint_icons_cuts_and_guides_follow_the_current_group_and_restore_at_root() {
+        let (mut app, _, members) = fixture();
+        let joint = app.doc.model.add_connection(Connection {
+            members, entry_face: None,
+            operation: ConnectionOperation::Joinery(JointSettings::default()),
+        }).unwrap();
+        let boards = app.doc.model.copy_entities(&BTreeSet::from(members));
+        let group = app.doc.model.make_object(&BTreeSet::from(members), false, "Assembly").unwrap();
+        let assembly = app.doc.model.copy_entities(&BTreeSet::from([group]));
+        let sibling = *app.doc.model.paste_entities(&assembly, DVec3::Y * 0.4).iter().next().unwrap();
+        app.doc.model.paste_entities(&boards, DVec3::Y * 0.8);
+        let outer = app.doc.model.make_object(&BTreeSet::from([group]), false, "Outer").unwrap();
+        let group = app.doc.model.parent(app.doc.model.connections[&joint].members[0]).unwrap();
+        let board = app.doc.model.connections[&joint].members[0];
+        let sibling_joint = *app.doc.model.connections.iter().find(|(_, connection)|
+            app.doc.model.parent(connection.members[0]) == Some(sibling)).unwrap().0;
+        let root_joint = *app.doc.model.connections.iter().find(|(_, connection)|
+            app.doc.model.parent(connection.members[0]).is_none()).unwrap().0;
+        let saved = app.doc.model.clone();
+        let all = BTreeSet::from([joint, sibling_joint, root_joint]);
+        app.doc.display.wood_joinery = true;
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(1000., 800.));
+        app.doc.camera.fit(app.doc.model.bounds(), dv(rect.size()));
+
+        for (context, visible) in [
+            (None, all.clone()),
+            (Some(outer), BTreeSet::new()),
+            (Some(group), BTreeSet::from([joint])),
+            (Some(board), BTreeSet::new()),
+            (Some(sibling), BTreeSet::from([sibling_joint])),
+            (None, all),
+        ] {
+            app.doc.model.edit_context = context;
+            app.joinery_geometry.update(&app.doc.model);
+            let evaluated = &app.joinery_geometry.result.as_ref().unwrap();
+            assert!(evaluated.errors.is_empty());
+            assert_eq!(app.joinery_geometry.regions.len(), visible.len());
+            for (&id, connection) in &saved.connections {
+                let pair = BTreeSet::from(connection.members);
+                let stock = saved.copy_entities(&pair);
+                let machined = evaluated.model.copy_entities(&pair);
+                let stock_volume: f64 = connection.members.iter().map(|member|
+                    stock.solid_volume(*member).unwrap()).sum();
+                let visible_volume: f64 = connection.members.iter().map(|member|
+                    machined.solid_volume(*member).unwrap()).sum();
+                if visible.contains(&id) {
+                    assert!(visible_volume < stock_volume - 1e-9,
+                        "joint #{id} must cut its boards in context {context:?}");
+                } else {
+                    assert!((visible_volume - stock_volume).abs() < 1e-9,
+                        "joint #{id} must show stock in context {context:?}");
+                }
+            }
+            let markers: BTreeSet<_> = app.joint_markers(rect).into_iter().map(|(id, _)| id).collect();
+            assert_eq!(markers, visible, "icons must match machining in context {context:?}");
+            assert_eq!(app.doc.model.connections, saved.connections);
+        }
+        assert_eq!(app.doc.model, saved, "scoping must leave the saved model intact");
     }
 
     #[test]
