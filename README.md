@@ -325,3 +325,11 @@ compatible cookie policies. Use HTTPS outside localhost.
 `.env` supports `KETCHUP_SERVER_URL=value`, single/double quoted values, optional
 `export`, and trailing comments. It is ignored by Git; do not put secrets in the
 URL because Web builds expose it to the browser.
+
+Desktop update feeds follow the repository that built the application. GitHub
+Actions embeds `github.repository`, so fork releases update from that fork's
+GitHub Releases. Local builds use the GitHub `origin` remote; source archives
+without Git metadata default to `Ketchup3D/app`. Set `KETCHUP_UPDATE_REPOSITORY`
+to `owner/repository` at build time to select an explicit feed. The fork must
+publish its own compatible installer and update assets through the release
+workflow. Already installed upstream binaries retain their original update feed.

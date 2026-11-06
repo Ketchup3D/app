@@ -8,7 +8,7 @@ use std::{
 };
 use velopack::{UpdateCheck, UpdateManager, VelopackAsset, sources::GithubSource};
 
-const REPOSITORY: &str = "https://github.com/Ketchup3D/app";
+const REPOSITORY: &str = env!("KETCHUP_UPDATE_REPOSITORY_URL");
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub fn initialize() {
