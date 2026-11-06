@@ -1479,6 +1479,7 @@ impl KetchupApp {
                         ketchup_core::inference::MoveSnapCache::new(&self.doc.model)
                     } else {
                         ketchup_core::inference::MoveSnapCache::excluding(&self.doc.model, &snap_excluded)
+                            .with_x_ray(self.tool == Tool::Move)
                     }
                 }),
             snap_excluded,
@@ -4536,6 +4537,9 @@ impl KetchupApp {
             } else {
                 model.expand_entities(selected)
             };
+            // Keep the moving selection solid while exposing surrounding geometry.
+            // Derive this every frame so selecting after entering Move works too.
+            let move_x_ray = self.tool == Tool::Move && !selected_entities.is_empty();
             let mut mesh = renderer::Mesh::cached(camera, size, &mut self.scene_cache);
             mesh.set_pixels_per_point(ui.ctx().pixels_per_point());
             mesh.set_display(display);
@@ -4615,7 +4619,7 @@ impl KetchupApp {
                 .map(|face| {
                     (
                         face,
-                        if display.x_ray {
+                        if display.x_ray || move_x_ray {
                             view.view_distance(self.face_cache.get(face.id).center)
                         } else {
                             0.
@@ -4623,7 +4627,7 @@ impl KetchupApp {
                     )
                 })
                 .collect();
-            if display.x_ray {
+            if display.x_ray || move_x_ray {
                 visible_faces.sort_by(|a, b| b.1.total_cmp(&a.1));
             }
             let lighting = display_scene::FaceLighting::new(camera);
@@ -4699,7 +4703,9 @@ impl KetchupApp {
                 } else {
                     lighting.shade(color, normal, model.vertices[&face.vertices[0]].position)
                 };
-                let color = if display.x_ray || entity.entity_hidden {
+                let color = if display.x_ray || entity.entity_hidden
+                    || (move_x_ray && !selected_entities.contains(&face.id))
+                {
                     color.gamma_multiply(0.18)
                 } else {
                     color
@@ -4821,7 +4827,8 @@ impl KetchupApp {
                         visible: !entity.entity_hidden && (display.edges || emphasize_group
                             || profiles.contains(&e.id) || active
                             || display.face_style == ketchup_core::FaceStyle::Wireframe),
-                        overlay: display.x_ray || display.face_style == ketchup_core::FaceStyle::Wireframe,
+                        overlay: display.x_ray || (move_x_ray && !selected)
+                            || display.face_style == ketchup_core::FaceStyle::Wireframe,
                     });
                 }
                 #[cfg(not(target_arch = "wasm32"))]

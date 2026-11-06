@@ -117,6 +117,11 @@ impl Default for SnapTargets {
 /// Cached face queries for snapping. Scoped queries include descendants of the
 /// current editing level; unscoped queries include every visible surface.
 pub trait FaceQuery {
+    /// X-ray interactions may target geometry behind otherwise visible faces.
+    fn snap_through_faces(&self) -> bool {
+        false
+    }
+
     fn nearest(&self, ray: crate::Ray, scoped: bool) -> Option<(u64, f64, DVec3)>;
 
     /// Reuse inherited visibility when the caller has already prepared it.
@@ -229,6 +234,12 @@ impl MoveSnapCache {
             guides: None,
         }
     }
+    /// Match a transient X-ray viewport without including hidden entities.
+    pub fn with_x_ray(mut self, enabled: bool) -> Self {
+        self.faces.1 = enabled;
+        self
+    }
+
     pub fn infer(
         &mut self,
         camera: &Camera,
@@ -1129,7 +1140,7 @@ struct MoveFace {
     hi: DVec2,
     in_context: bool,
 }
-struct MoveFaces(Vec<MoveFace>);
+struct MoveFaces(Vec<MoveFace>, bool);
 impl MoveFaces {
     fn new(model: &Model) -> Self {
         Self(
@@ -1163,10 +1174,15 @@ impl MoveFaces {
                     })
                 })
                 .collect(),
+            false,
         )
     }
 }
 impl FaceQuery for MoveFaces {
+    fn snap_through_faces(&self) -> bool {
+        self.1
+    }
+
     fn nearest(&self, ray: crate::Ray, scoped: bool) -> Option<(u64, f64, DVec3)> {
         self.0
             .iter()
@@ -1210,6 +1226,9 @@ fn query_visible(
     let Some(pixel) = view.project(point) else {
         return false;
     };
+    if faces.snap_through_faces() {
+        return true;
+    }
     let ray = view.ray(pixel);
     faces
         .nearest(ray, true)

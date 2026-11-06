@@ -315,3 +315,37 @@ fn prepared_move_snaps_match_uncached_queries_across_camera_settings_and_context
         }
     }
 }
+
+
+#[test]
+fn x_ray_move_snaps_to_push_pull_recess_corners_behind_faces() {
+    use crate::inference::MoveSnapCache;
+    let mut model = Model::default();
+    let corners = [DVec3::ZERO, DVec3::new(8., 0., 0.),
+        DVec3::new(8., 6., 0.), DVec3::new(0., 6., 0.)];
+    for i in 0..4 {
+        model.add_edge(corners[i], corners[(i + 1) % 4]).unwrap();
+    }
+    let base = *model.faces.keys().next().unwrap();
+    let normal = crate::faces::plane(&model, &model.faces[&base].vertices).unwrap().normal;
+    let top = model.push_pull(base, 4. / normal.z).unwrap();
+    model.offset_face(top, 1.).unwrap();
+    let inner = model.faces.values().find(|face|
+        model.face_contains(face, DVec3::new(4., 3., 4.), false)).unwrap().id;
+    let normal = crate::faces::plane(&model, &model.faces[&inner].vertices).unwrap().normal;
+    let floor = model.push_pull(inner, -1.5 / normal.z).unwrap();
+    let target = model.vertices[&model.faces[&floor].vertices[0]].position;
+    let camera = Camera { target, pitch: -0.6, ..Camera::default() };
+    let size = DVec2::new(1600., 1000.);
+    let cursor = camera.project(target, size).unwrap();
+    let start = DVec3::new(-4., -3., 1.);
+    assert!(!crate::selection::visible(&model, &camera, size, target));
+    let ordinary = MoveSnapCache::new(&model)
+        .infer(&camera, size, cursor, start, None, true, false).unwrap();
+    assert!(ordinary.snap.point.distance(target) > 1e-5);
+    let snapped = MoveSnapCache::new(&model).with_x_ray(true)
+        .infer(&camera, size, cursor, start, None, true, true).unwrap();
+    assert_eq!(snapped.snap.kind, Inference::Endpoint);
+    assert!(snapped.snap.point.distance(target) < 1e-7);
+    model.validate().unwrap();
+}
