@@ -254,3 +254,27 @@ fn rotation_infers_a_tilted_surface_and_keeps_grid_targets_in_that_plane() {
     h.key(Key::Enter);
     assert_eq!(h.app.doc.model, preview);
 }
+
+
+#[test]
+fn rotation_projects_external_corner_into_locked_plane_and_respects_edge_toggle() {
+    let mut h = Harness::new();
+    let pivot = DVec3::new(-0.7, -0.5, 0.4);
+    let target = pivot + DVec3::new(0., 2., 1.);
+    h.app.doc.model.add_edge(target, target + DVec3::new(0.3, 0.2, 0.4)).unwrap();
+    start(&mut h, pivot, DVec3::X, &[Key::ArrowUp]);
+    h.app.snap_to_grid = false;
+    h.app.update_modeling(h.at(target));
+    let edit = h.app.modeling.as_ref().unwrap();
+    assert!(edit.snap.unwrap().point.distance(pivot + DVec3::Y * 2.) < 1e-6);
+    assert_eq!(edit.snap.unwrap().kind, Inference::Endpoint);
+    assert!((edit.value - 90.).abs() < 1e-5);
+    assert!(edit.rotation.as_ref().unwrap().normal.distance(DVec3::Z) < 1e-7);
+    h.app.snap_to_edge = false;
+    h.app.snap_to_face = false;
+    h.app.snap_to_face_center = false;
+    h.app.update_modeling(h.at(target));
+    let edit = h.app.modeling.as_ref().unwrap();
+    assert_eq!(edit.snap.unwrap().kind, Inference::Plane);
+    assert!((edit.snap.unwrap().point - pivot).z.abs() < 1e-6);
+}

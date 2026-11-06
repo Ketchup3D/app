@@ -75,11 +75,40 @@ impl KetchupApp {
                 face_centers: self.snap_to_face_center,
             },
         );
-        let snap = inferred
-            .filter(|inference| {
-                inference.snap.kind != Inference::Plane
-                    && (inference.snap.point - edit.anchor).dot(normal).abs() < 1e-6
+        let in_plane = inferred.filter(|inference| {
+            inference.snap.kind != Inference::Plane
+                && (inference.snap.point - edit.anchor).dot(normal).abs() < 1e-6
+        });
+        // An external corner can define the angle even at a different height.
+        // Resolve its geometry target first, then project into the locked plane;
+        // never let the target change the rotation axis or enable disabled snaps.
+        let projected = if in_plane.is_none() && self.doc.snap_to_geometry {
+            edit.move_snap.as_mut().unwrap().infer_with_constraint(
+                &self.doc.camera,
+                size,
+                cursor,
+                edit.anchor,
+                None,
+                true,
+                false,
+                ketchup_core::inference::SnapTargets {
+                    edges: self.snap_to_edge,
+                    faces: self.snap_to_face,
+                    face_centers: self.snap_to_face_center,
+                },
+            ).filter(|inference| matches!(inference.snap.kind,
+                Inference::Endpoint | Inference::Midpoint | Inference::FaceCenter
+                    | Inference::Origin | Inference::OnEdge | Inference::OnFace))
+            .and_then(|mut inference| {
+                let offset = (inference.snap.point - edit.anchor).dot(normal);
+                inference.snap.point -= normal * offset;
+                ((inference.snap.point - edit.anchor).length_squared() > 1e-12)
+                    .then_some(inference)
             })
+        } else {
+            None
+        };
+        let snap = in_plane.or(projected)
             .map(|inference| {
                 edit.guides = inference.guides;
                 inference.snap
