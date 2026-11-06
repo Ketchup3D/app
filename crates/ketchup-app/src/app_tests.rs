@@ -59,6 +59,17 @@ impl Harness {
             size: egui::vec2(1440., 900.),
             maximized: false,
         };
+        // Interaction tests use an explicit, expanded legacy workspace so
+        // control access and cached row positions do not depend on defaults.
+        // Fresh-layout defaults and restoration have separate preference tests.
+        use sidebar::InspectorSection::*;
+        let order = [Outliner, EntityInfo, Units, Components, Tags, Display, View,
+            TimeCostEstimates, Materials, History];
+        harness.app.inspector_order = order;
+        for key in ["outliner", "entity_info", "units", "components", "tags",
+            "display", "view", "time_cost_estimates", "materials", "history"] {
+            sidebar::set_section_open(&harness.ctx, key, true);
+        }
         harness.frame(vec![], egui::Modifiers::NONE);
         harness.frame(vec![], egui::Modifiers::NONE);
         harness
@@ -4216,9 +4227,10 @@ fn properties_output(h: &mut Harness) -> egui::FullOutput {
 fn properties_outline(model: &mut Model, points: &[DVec3]) -> u64 {
     let before: BTreeSet<_> = model.faces.keys().copied().collect();
     for i in 0..points.len() {
-        model
-            .add_edge(points[i], points[(i + 1) % points.len()])
-            .unwrap();
+        match model.add_edge(points[i], points[(i + 1) % points.len()]) {
+            Ok(_) | Err("That edge already exists") => {}
+            Err(error) => panic!("Could not create properties fixture: {error}"),
+        }
     }
     *model.faces.keys().find(|id| !before.contains(id)).unwrap()
 }

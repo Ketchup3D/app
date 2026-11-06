@@ -1,5 +1,28 @@
 [
   {
+    "version": "0.6.1",
+    "date": "2026-11-06",
+    "title": "Clearer measurements and scoped joinery",
+    "sections": [
+      {
+        "title": "Properties and workspace",
+        "changes": [
+          "Inspect selected edge lengths and face perimeters in Properties.",
+          "New inspector layouts place Properties first and Outliner second, both expanded, with other sections collapsed. Existing saved layouts and disclosure choices are preserved.",
+          "Add breathing room below Outliner contents for easier scrolling and selection.",
+          "Enable the grid and wood joinery display by default while preserving saved visibility choices."
+        ]
+      },
+      {
+        "title": "Wood joinery",
+        "changes": [
+          "Show joinery icons, machining, and guides for the immediate children of the group being edited. Opening a board exposes its original stock geometry.",
+          "Restore the assembled joinery overview when returning to the model root, while preserving saved connections and fully assembled export geometry."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.0",
     "date": "2026-11-03",
     "title": "Woodworking joinery and connected projects",
