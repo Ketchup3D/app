@@ -1,5 +1,4 @@
 //! Reusable finishing-product prices, stored with the device's material catalog.
-use crate::natural_text::TextUi as _;
 use super::*;
 use crate::inspector_table::{Column, InspectorTable};
 

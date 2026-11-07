@@ -1,4 +1,5 @@
 use super::*;
+use ketchup_core::Projection;
 
 #[test]
 fn fit_selection_frames_nested_geometry_and_annotations_without_unselected_entities() {

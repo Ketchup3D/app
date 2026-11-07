@@ -1,4 +1,3 @@
-use crate::natural_text::TextUi as _;
 use super::*;
 use crate::screenshots::{self, Format, Paper, Settings, VIEW_LABELS};
 use eframe::{egui_wgpu, wgpu};

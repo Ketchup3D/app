@@ -1,5 +1,4 @@
 //! Shared entity menu and commands for the app bar, viewport, and Outliner.
-use crate::natural_text::TextUi as _;
 use super::*;
 
 #[derive(Clone, Copy)]

@@ -1239,7 +1239,7 @@ mod tests {
             assert!(app.fastener_pair_eligible(&ctx, members));
             app.connection_sidebar_selection(&ctx);
             assert!(app.joinery.open, "the panel must stay open on the next frame");
-            let disclosure = egui::Id::new("joint_marker_open_section");
+            let disclosure = egui::Id::unique("joint_marker_open_section");
             sidebar::restore_section(&ctx, disclosure, "connections/wood_joinery", false);
             assert!(egui::collapsing_header::CollapsingState::load(&ctx, disclosure).unwrap().is_open());
             let mut expected = source;

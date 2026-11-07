@@ -1,7 +1,5 @@
 //! Persistent, nested split areas for inspector sections. A center drop joins
 //! the hovered stack; a drop within 15 points inside an edge splits that area.
-#[cfg(test)]
-use crate::test_ui::ContextExt as _;
 use super::*;
 
 const SNAP_RANGE: f32 = 15.;

@@ -1,6 +1,5 @@
 //! A shared document with independently framed cameras. Tools use the active
 //! document camera while every view shares the model, selection and history.
-use crate::natural_text::TextUi as _;
 use super::*;
 use std::collections::BTreeMap;
 

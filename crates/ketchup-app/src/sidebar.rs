@@ -1,6 +1,5 @@
 #[cfg(test)]
 use crate::test_ui::ContextExt as _;
-use crate::natural_text::TextUi as _;
 use super::*;
 use ketchup_core::{
     AngleUnit, AreaUnit, DisplaySettings, FaceStyle, LengthUnit, Projection, VolumeUnit,

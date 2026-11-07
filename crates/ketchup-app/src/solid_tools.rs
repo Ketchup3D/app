@@ -1,4 +1,3 @@
-use crate::natural_text::TextUi as _;
 use super::*;
 use ketchup_core::SolidOperation;
 

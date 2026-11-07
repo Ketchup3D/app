@@ -1,5 +1,4 @@
 //! Finishing estimates use actual model surfaces and reusable, user-adjustable rates.
-use crate::natural_text::TextUi as _;
 use super::*;
 use crate::inspector_table::{Column, InspectorTable, product_cell_text};
 use ketchup_core::Model;
