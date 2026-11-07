@@ -25,12 +25,39 @@ pub fn pick_entity(
 ) -> Option<u64> {
     pick_text(model, camera, size, point, radius)
         .or_else(|| pick_dimension(model, camera, size, point, radius))
+        .or_else(|| pick_guide(model, camera, size, point, radius))
         .or_else(|| pick(model, camera, size, point, radius))
         .or_else(|| {
             model
                 .nearest_context_face(camera.ray(point, size))
                 .and_then(|(id, _, _)| model.entity_in_context(id))
         })
+}
+
+/// Guides are drawn over geometry; hit the visible line, including its dash gaps.
+pub fn pick_guide(
+    model: &Model,
+    camera: &Camera,
+    size: DVec2,
+    point: DVec2,
+    radius: f64,
+) -> Option<u64> {
+    model
+        .guides
+        .iter()
+        .filter(|(id, _)| !model.is_hidden(**id))
+        .filter_map(|(id, guide)| {
+            let context = model.entity_in_context(*id)?;
+            let distance = if guide.direction.is_some() {
+                let (a, b) = guide.screen_segment(camera, size)?;
+                distance_to_segment(point, a, b)
+            } else {
+                camera.project(guide.origin, size)?.distance(point)
+            };
+            (distance <= radius).then_some((context, distance))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+        .map(|(id, _)| id)
 }
 
 /// Leader text is selectable both on its leader and over its readable label.
@@ -187,6 +214,17 @@ pub fn box_select(
     start: DVec2,
     end: DVec2,
 ) -> BTreeSet<u64> {
+    box_select_with_guides(model, camera, size, start, end, true)
+}
+
+pub fn box_select_with_guides(
+    model: &Model,
+    camera: &Camera,
+    size: DVec2,
+    start: DVec2,
+    end: DVec2,
+    include_guides: bool,
+) -> BTreeSet<u64> {
     let lo = start.min(end);
     let hi = start.max(end);
     let inside = |p: DVec2| p.cmpge(lo).all() && p.cmple(hi).all();
@@ -232,6 +270,24 @@ pub fn box_select(
             });
         if hit {
             selected.insert(text.id);
+        }
+    }
+    for (id, guide) in model
+        .guides
+        .iter()
+        .filter(|(id, _)| include_guides && !model.is_hidden(**id))
+    {
+        // An infinite guide cannot be enclosed by a finite marquee. Select it
+        // when the visible line crosses the box; points must be inside it.
+        let hit = if guide.direction.is_some() {
+            guide
+                .screen_segment(camera, size)
+                .is_some_and(|(a, b)| intersects_rect(a, b, lo, hi))
+        } else {
+            camera.project(guide.origin, size).is_some_and(inside)
+        };
+        if hit {
+            selected.insert(*id);
         }
     }
     let hits = selected.clone();

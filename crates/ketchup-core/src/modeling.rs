@@ -18,7 +18,8 @@ impl Model {
     }
 
     pub fn selection_center(&self, selected: &BTreeSet<u64>) -> Option<DVec3> {
-        self.selection_bounds(selected).map(|(lo, hi)| (lo + hi) * 0.5)
+        self.selection_bounds(selected)
+            .map(|(lo, hi)| (lo + hi) * 0.5)
     }
 
     pub fn selection_bounds(&self, selected: &BTreeSet<u64>) -> Option<(DVec3, DVec3)> {
@@ -30,11 +31,17 @@ impl Model {
                 .filter_map(|id| self.dimensions.get(id))
                 .flat_map(|d| d.layout(self)),
         );
-        let mut points = points.chain(
+        let points = points.chain(
             entities
                 .iter()
                 .filter_map(|id| self.texts.get(id))
                 .flat_map(|t| t.layout(self)),
+        );
+        let mut points = points.chain(
+            entities
+                .iter()
+                .filter_map(|id| self.guides.get(id))
+                .map(|g| g.origin),
         );
         let first = points.next()?;
         Some(points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p))))
@@ -59,8 +66,13 @@ impl Model {
             .into_iter()
             .filter(|id| self.texts.contains_key(id))
             .collect();
-        if vertices.is_empty() && dimensions.is_empty() && texts.is_empty() {
-            return Err("Select geometry, a dimension, or text first");
+        let guides: Vec<_> = self
+            .expand_entities(selected)
+            .into_iter()
+            .filter(|id| self.guides.contains_key(id))
+            .collect();
+        if vertices.is_empty() && dimensions.is_empty() && texts.is_empty() && guides.is_empty() {
+            return Err("Select geometry, a dimension, text, or a guide first");
         }
         let protected: BTreeSet<_> = self
             .edges
@@ -73,6 +85,20 @@ impl Model {
             return Err("Unlock the connected geometry before editing it");
         }
         let mut next = self.clone();
+        for id in guides {
+            let source = &self.guides[&id];
+            let origin = f(source.origin);
+            let direction = source
+                .direction
+                .map(|d| {
+                    (f(source.origin + d) - origin)
+                        .try_normalize()
+                        .ok_or("This change would collapse a guide")
+                })
+                .transpose()?;
+            next.guides
+                .insert(id, crate::ConstructionGuide { origin, direction });
+        }
         for id in dimensions {
             let d = &self.dimensions[&id];
             let (a, b) = d.points(self);
@@ -149,7 +175,8 @@ impl Model {
         }
         let axis = axis.try_normalize().ok_or("Choose a rotation axis first")?;
         if self.edit_context.is_some() {
-            return self.edit_in_context(|model| model.rotate_selection(selected, pivot, axis, degrees));
+            return self
+                .edit_in_context(|model| model.rotate_selection(selected, pivot, axis, degrees));
         }
         let rotation = glam::DMat3::from_axis_angle(axis, degrees.to_radians());
         let rotate = |p: DVec3| pivot + rotation * (p - pivot);
@@ -185,7 +212,8 @@ impl Model {
             if let Some(object) = self.objects.get_mut(&id) {
                 let mut frame = object.transform.unwrap_or_default();
                 frame.translation = mirror(frame.translation);
-                frame.basis = glam::DMat3::from_diagonal(signs) * frame.basis
+                frame.basis = glam::DMat3::from_diagonal(signs)
+                    * frame.basis
                     * glam::DMat3::from_diagonal(signs);
                 frame.axes *= signs;
                 object.transform = Some(frame);
@@ -241,7 +269,8 @@ impl Model {
             if let Some(object) = self.objects.get_mut(&id) {
                 let mut frame = object.transform.unwrap_or_default();
                 frame.translation = center + (frame.translation - center) * factors;
-                frame.basis = glam::DMat3::from_diagonal(factors) * frame.basis
+                frame.basis = glam::DMat3::from_diagonal(factors)
+                    * frame.basis
                     * glam::DMat3::from_diagonal(DVec3::ONE / factors);
                 frame.axes *= factors;
                 object.transform = Some(frame);
@@ -273,7 +302,11 @@ impl Model {
         if entities.iter().any(|id| self.is_locked(*id)) {
             return Err("Unlock the selected items and their children before clearing color");
         }
-        for face in entities.into_iter().filter(|id| self.faces.contains_key(id)).collect::<Vec<_>>() {
+        for face in entities
+            .into_iter()
+            .filter(|id| self.faces.contains_key(id))
+            .collect::<Vec<_>>()
+        {
             self.set_face_color(face, None);
         }
         Ok(())
@@ -654,6 +687,7 @@ pub struct MovePreview {
     vertices: Vec<(u64, DVec3)>,
     dimensions: Vec<crate::Dimension>,
     texts: Vec<crate::TextAnnotation>,
+    guides: Vec<(u64, crate::ConstructionGuide)>,
     objects: Vec<(u64, crate::InstanceTransform)>,
     edges: Vec<u64>,
     faces: Vec<(u64, bool)>,
@@ -689,8 +723,12 @@ impl MovePreview {
             .filter_map(|id| model.texts.get(id))
             .cloned()
             .collect();
-        if vertices.is_empty() && dimensions.is_empty() && texts.is_empty() {
-            return Err("Select geometry, a dimension, or text first");
+        let guides: Vec<_> = entities
+            .iter()
+            .filter_map(|id| model.guides.get(id).map(|g| (*id, g.clone())))
+            .collect();
+        if vertices.is_empty() && dimensions.is_empty() && texts.is_empty() && guides.is_empty() {
+            return Err("Select geometry, a dimension, text, or a guide first");
         }
         let protected = model
             .edges
@@ -729,6 +767,7 @@ impl MovePreview {
                 .collect(),
             dimensions,
             texts,
+            guides,
             objects,
             edges,
             faces,
@@ -768,6 +807,14 @@ impl MovePreview {
             {
                 text.offset += delta;
             }
+        }
+        for (id, source) in &self.guides {
+            let mut guide = source.clone();
+            guide.origin += delta;
+            if !guide.valid() {
+                return Err(INVALID);
+            }
+            preview.guides.insert(*id, guide);
         }
         for &(id, frame) in &self.objects {
             preview.objects.get_mut(&id).unwrap().transform = Some(frame.translated(delta));

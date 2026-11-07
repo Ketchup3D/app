@@ -8,11 +8,26 @@ pub(super) struct Measurement {
     pub(super) normal: DVec3,
     pub(super) offset: DVec3,
     pub(super) text: String,
-    pub(super) guide_direction: Option<DVec3>,
+    pub(super) reference_direction: Option<DVec3>,
     pub(super) guide_id: Option<u64>,
 }
 
 impl KetchupApp {
+    /// Use the same infinite line for the live preview and the saved guide.
+    pub(super) fn measurement_guide(&self) -> Option<ketchup_core::ConstructionGuide> {
+        self.measurement.as_ref()?;
+        let points = self.measurement_points();
+        let (origin, direction) = match (self.tool, points.as_slice()) {
+            (Tool::TapeMeasure, [start, end]) => (*end, (*end - *start).try_normalize()?),
+            (Tool::Protractor, [center, _, end]) => (*center, (*end - *center).try_normalize()?),
+            _ => return None,
+        };
+        Some(ketchup_core::ConstructionGuide {
+            origin,
+            direction: Some(direction),
+        })
+    }
+
     pub(super) fn measurement_precision_available(&self) -> bool {
         matches!(self.tool, Tool::TapeMeasure | Tool::Protractor)
             && self.measurement.as_ref().is_some_and(|m| {
@@ -25,13 +40,14 @@ impl KetchupApp {
         let Some(mut m) = self.measurement.clone().filter(|m| m.complete) else {
             return;
         };
-        let (origin, direction) = if self.tool == Tool::Protractor {
-            (m.points[0], Some(m.points[2] - m.points[0]))
-        } else {
-            (m.points[1], m.guide_direction)
+        let Some(guide) = self.measurement_guide() else {
+            return;
         };
+        if let Some(normal) = self.plane_lock() {
+            m.normal = normal.vector();
+        }
         let before = self.doc.model.clone();
-        match self.doc.model.add_guide(origin, direction) {
+        match self.doc.model.add_guide(guide.origin, guide.direction) {
             Ok(id) => {
                 let adjusting = m.guide_id.is_some();
                 if let Some(previous) = m.guide_id {
@@ -104,13 +120,7 @@ impl KetchupApp {
                 .copied()
                 .or(self.snap.map(|s| s.point))
                 .ok_or("Move the pointer to choose a direction first")?;
-            let mut delta = endpoint - origin;
-            if self.create_guides
-                && let Some(direction) = m.guide_direction
-            {
-                delta -= direction * delta.dot(direction);
-            }
-            let direction = delta
+            let direction = (endpoint - origin)
                 .try_normalize()
                 .ok_or("Move the pointer to choose a direction first")?;
             Ok(origin + direction * length)
@@ -133,7 +143,7 @@ impl KetchupApp {
         ((self.tool == Tool::Protractor && m.points.len() == 2)
             || (self.tool == Tool::TapeMeasure
                 && self.create_guides
-                && m.guide_direction.is_some()
+                && m.reference_direction.is_some()
                 && !m.complete))
             .then(|| (m.points[0], m.normal))
     }
@@ -226,15 +236,6 @@ impl KetchupApp {
         }
         self.update_drawing_inference(pos);
         self.apply_grid_snap();
-        if self.tool == Tool::TapeMeasure
-            && self.create_guides
-            && let Some(m) = self.measurement.as_ref().filter(|m| !m.complete)
-            && let Some(direction) = m.guide_direction
-            && let Some(origin) = m.points.first()
-            && let Some(snap) = self.snap.as_mut()
-        {
-            snap.point -= direction * (snap.point - *origin).dot(direction);
-        }
     }
 
     pub(super) fn measurement_click(&mut self, pos: Pos2, ctx: &egui::Context) {
@@ -294,11 +295,11 @@ impl KetchupApp {
             })
             .map(|p| p.normal)
             .unwrap_or(DVec3::Z);
-        let guide_direction = (self.tool == Tool::TapeMeasure)
+        let reference_direction = (self.tool == Tool::TapeMeasure)
             .then(|| self.tape_reference_direction(snap))
             .flatten();
         let normal = if let Some(direction) =
-            guide_direction.filter(|d| d.dot(surface_normal).abs() > 1e-6)
+            reference_direction.filter(|d| d.dot(surface_normal).abs() > 1e-6)
         {
             let view = self.doc.camera.eye() - snap.point;
             (view - direction * view.dot(direction))
@@ -309,7 +310,7 @@ impl KetchupApp {
         };
         let m = self.measurement.get_or_insert_with(|| Measurement {
             normal,
-            guide_direction,
+            reference_direction,
             ..Default::default()
         });
         if m.points

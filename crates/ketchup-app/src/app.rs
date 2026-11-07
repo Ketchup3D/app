@@ -1287,6 +1287,15 @@ impl KetchupApp {
             .then_some(face)
     }
     fn selection_anchor_snap(&mut self, pos: Pos2) -> Option<Snap> {
+        if self.doc.display.guides
+            && let Some(id) = selection::pick_guide(&self.doc.model, &self.doc.camera, dv(self.viewport.size()), dv(pos - self.viewport.min), 8.)
+            && self.selected.contains(&id)
+            && let Some(guide) = self.doc.model.guides.get(&id)
+        {
+            let ray = self.doc.camera.ray(dv(pos - self.viewport.min), dv(self.viewport.size()));
+            let point = guide.direction.and_then(|direction| ray.axis(guide.origin, direction)).unwrap_or(guide.origin);
+            return Some(Snap { point, kind: if guide.direction.is_some() { Inference::OnGuide } else { Inference::GuidePoint } });
+        }
         self.prepare_picking();
         let snap = self.infer_snap(pos, None, None, self.doc.snap_to_axes)?;
         Some(if self.snap_to_grid {
@@ -1544,6 +1553,9 @@ impl KetchupApp {
                         .any(|id| vertices.contains(id))
                 }).map(|face| face.id),
             );
+        }
+        if face.is_none() {
+            excluded.extend(model.expand_entities(&self.selected).into_iter().filter(|id| model.guides.contains_key(id)));
         }
         excluded
     }
@@ -2179,7 +2191,10 @@ impl KetchupApp {
                         match key {
                             Key::Z => self.undo(ctx, modifiers.shift),
                             Key::Y => self.undo(ctx, true),
-                            Key::A => self.selected = self.doc.model.selectable_entities(),
+                            Key::A => {
+                                self.selected = self.doc.model.selectable_entities();
+                                if !self.doc.display.guides { self.selected.retain(|id| !self.doc.model.guides.contains_key(id)); }
+                            },
                             Key::C if !copy_event => self.context_action(ctx, ContextAction::Copy),
                             Key::X if !cut_event => self.context_action(ctx, ContextAction::Cut),
                             Key::V if !paste_event => {
@@ -3317,6 +3332,7 @@ impl KetchupApp {
                 .iter()
                 .filter(|id| self.doc.model.texts.contains_key(id))
                 .count();
+            let guides = entities.iter().filter(|id| self.doc.model.guides.contains_key(id)).count();
             let noun =
                 |n: usize, single: &str| format!("{n} {single}{}", if n == 1 { "" } else { "s" });
             let objects = self
@@ -3334,7 +3350,7 @@ impl KetchupApp {
                 format!("{kind}: {}", object.name)
             } else if !objects.is_empty() {
                 noun(self.selected.len(), "entity")
-            } else if dimensions > 0 || texts > 0 {
+            } else if dimensions > 0 || texts > 0 || guides > 0 {
                 let mut parts = vec![];
                 if edges > 0 {
                     parts.push(noun(edges, "edge"));
@@ -3348,6 +3364,7 @@ impl KetchupApp {
                 if texts > 0 {
                     parts.push(noun(texts, "text label"));
                 }
+                if guides > 0 { parts.push(noun(guides, "guide")); }
                 parts.join(" · ")
             } else if faces == 0 {
                 noun(edges, "edge")
@@ -3581,6 +3598,17 @@ impl KetchupApp {
                     .flatten()
             })
             .collect();
+        if self.doc.display.guides {
+            ids.extend(self.doc.model.guides.iter().filter_map(|(id, guide)| {
+                if self.doc.model.is_hidden(*id) || self.doc.model.is_locked(*id) { return None; }
+                let hit = if guide.direction.is_some() {
+                    guide.screen_segment(&self.doc.camera, size).is_some_and(|(c, d)| selection::segment_distance(a, b, c, d) < 9.)
+                } else {
+                    self.doc.camera.project(guide.origin, size).is_some_and(|p| selection::distance_to_segment(p, a, b) < 9.)
+                };
+                hit.then(|| self.doc.model.entity_in_context(*id)).flatten()
+            }));
+        }
         // Boundary crossings are handled by the edge sweep. Pick interiors
         // explicitly so clicks and strokes contained within a face work too.
         if let Some(id) = self.erase_target(from) {
@@ -3651,6 +3679,12 @@ impl KetchupApp {
         }
     }
     fn pick_at(&mut self, pixel: DVec2, size: DVec2, include_faces: bool) -> Option<u64> {
+        if self.doc.display.guides
+            && matches!(self.tool, Tool::Select | Tool::Move | Tool::Rotate | Tool::Scale | Tool::Erase)
+            && let Some(id) = selection::pick_guide(&self.doc.model, &self.doc.camera, size, pixel, 8.)
+        {
+            return Some(id);
+        }
         // Select and move the visible machined boards, retaining their source
         // object IDs. The cache restores stock geometry in the active edit scope.
         if matches!(self.tool,Tool::Select|Tool::Move|Tool::Rotate|Tool::Scale)
@@ -4228,13 +4262,14 @@ impl KetchupApp {
                             GestureKind::Navigate { .. } | GestureKind::DrawingNavigate => {}
                             GestureKind::Select { additive } => {
                                 let dragged = gesture.start.distance(pos) > 4.;
-                                let hits = if dragged {
-                                    selection::box_select(
+                                let mut hits = if dragged {
+                                    selection::box_select_with_guides(
                                         &self.doc.model,
                                         &self.doc.camera,
                                         dv(self.viewport.size()),
                                         dv(gesture.start - self.viewport.min),
                                         dv(pos - self.viewport.min),
+                                        self.doc.display.guides,
                                     )
                                 } else {
                                     self.pick_at(
@@ -4245,6 +4280,9 @@ impl KetchupApp {
                                     .into_iter()
                                     .collect()
                                 };
+                                if !self.doc.display.guides {
+                                    hits.retain(|id| !self.doc.model.guides.contains_key(id));
+                                }
                                 if !dragged
                                     && !additive
                                     && !modifiers.shift

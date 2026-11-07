@@ -240,6 +240,7 @@ impl Model {
         let ids = self.erasable_entities(ids);
         self.dimensions.retain(|id, _| !ids.contains(id));
         self.texts.retain(|id, _| !ids.contains(id));
+        self.guides.retain(|id, _| !ids.contains(id));
         let removed: BTreeSet<_> = self
             .edges
             .values()
@@ -295,11 +296,17 @@ impl Model {
                 .filter(|d| !hidden.contains(&d.id))
                 .flat_map(|d| d.layout(self)),
         );
-        let mut vertices = vertices.chain(
+        let vertices = vertices.chain(
             self.texts
                 .values()
                 .filter(|t| !hidden.contains(&t.id))
                 .flat_map(|t| t.layout(self)),
+        );
+        let mut vertices = vertices.chain(
+            self.guides
+                .iter()
+                .filter(|(id, _)| !hidden.contains(id))
+                .map(|(_, guide)| guide.origin),
         );
         let first = vertices.next()?;
         Some(vertices.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p))))
@@ -411,6 +418,7 @@ impl Model {
             || self.objects.contains_key(id)
             || self.dimensions.contains_key(id)
             || self.texts.contains_key(id)
+            || self.guides.contains_key(id)
     }
 }
 

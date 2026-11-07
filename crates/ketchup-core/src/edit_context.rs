@@ -1,7 +1,7 @@
 //! Scoped editing and propagation of component definitions between instances.
 use crate::{DVec3, Model, ObjectKind, Ray};
-use serde::{Deserialize, Serialize};
 use glam::DMat3;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
@@ -147,6 +147,7 @@ impl Model {
         self.sync_dimensions();
         self.dimensions.retain(|id, _| !ids.contains(id));
         self.texts.retain(|id, _| !ids.contains(id));
+        self.guides.retain(|id, _| !ids.contains(id));
         self.edges.retain(|id, _| !ids.contains(id));
         self.faces.retain(|id, _| !ids.contains(id));
         self.objects.retain(|id, _| !ids.contains(id));
@@ -156,13 +157,18 @@ impl Model {
         self.objects.get_mut(&id).unwrap().entities.clear();
         Ok(())
     }
-    pub(crate) fn replace_contents(&mut self, id: u64, contents: &Self) -> Result<(), &'static str> {
+    pub(crate) fn replace_contents(
+        &mut self,
+        id: u64,
+        contents: &Self,
+    ) -> Result<(), &'static str> {
         self.remove_contents(id)?;
         self.vertices.extend(contents.vertices.clone());
         self.edges.extend(contents.edges.clone());
         self.faces.extend(contents.faces.clone());
         self.dimensions.extend(contents.dimensions.clone());
         self.texts.extend(contents.texts.clone());
+        self.guides.extend(contents.guides.clone());
         self.face_colors.extend(contents.face_colors.clone());
         self.objects.extend(contents.objects.clone());
         self.tags.extend(contents.tags.clone());
@@ -212,6 +218,10 @@ impl Model {
         for text in self.texts.values_mut() {
             text.anchor.point = linear * text.anchor.point + translation;
             text.offset = linear * text.offset;
+        }
+        for guide in self.guides.values_mut() {
+            guide.origin = linear * guide.origin + translation;
+            guide.direction = guide.direction.map(|d| (linear * d).normalize());
         }
         for vertex in self.vertices.values_mut() {
             vertex.position = linear * vertex.position + translation;
@@ -491,8 +501,8 @@ impl Model {
                         let (c, d) = self.points(other);
                         let reference_frame = reference.transform.unwrap_or_default();
                         let scale = a.distance(b) / c.distance(d) * reference_frame.scale;
-                        let canonical_start = reference_frame.linear().inverse()
-                            * (c - reference_frame.translation);
+                        let canonical_start =
+                            reference_frame.linear().inverse() * (c - reference_frame.translation);
                         frame = InstanceTransform {
                             scale,
                             translation: a - canonical_start * scale,

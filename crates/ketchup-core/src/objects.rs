@@ -151,6 +151,7 @@ impl Model {
             .chain(self.objects.keys())
             .chain(self.dimensions.keys())
             .chain(self.texts.keys())
+            .chain(self.guides.keys())
             .copied()
             .filter(|id| !children.contains(id))
             .collect()
@@ -300,6 +301,7 @@ impl Model {
             .chain(self.objects.keys())
             .chain(self.dimensions.keys())
             .chain(self.texts.keys())
+            .chain(self.guides.keys())
             .copied()
             .collect();
         self.entity_tags.retain(|id, _| entities.contains(id));
@@ -328,6 +330,7 @@ impl Model {
             objects: subset(&self.objects, &ids),
             dimensions: subset(&self.dimensions, &ids),
             texts: subset(&self.texts, &ids),
+            guides: subset(&self.guides, &ids),
             face_colors: subset(&self.face_colors, &ids),
             entity_tags: subset(&self.entity_tags, &ids),
             hidden: self.hidden.intersection(&ids).copied().collect(),
@@ -386,6 +389,7 @@ impl Model {
                 .values()
                 .flat_map(|d| d.layout(source))
                 .chain(source.texts.values().flat_map(|t| t.layout(source)))
+                .chain(source.guides.values().map(|g| g.origin))
                 .any(|p| !(p + offset).is_finite() || (p + offset).abs().max_element() > 1e10)
             || source.vertices.values().any(|v| {
                 !(v.position + offset).is_finite()
@@ -403,6 +407,7 @@ impl Model {
             .chain(source.objects.keys())
             .chain(source.dimensions.keys())
             .chain(source.texts.keys())
+            .chain(source.guides.keys())
             .map(|old| (*old, self.id()))
             .collect();
         let roots = source.root_entities().iter().map(|id| ids[id]).collect();
@@ -461,6 +466,11 @@ impl Model {
                 text.anchor.weights.clear();
             }
             self.texts.insert(text.id, text);
+        }
+        for (id, guide) in &source.guides {
+            let mut guide = guide.clone();
+            guide.origin += offset;
+            self.guides.insert(ids[id], guide);
         }
         for (id, color) in &source.face_colors {
             self.face_colors.insert(ids[id], *color);
@@ -568,7 +578,7 @@ impl Model {
         let mut copy = self.copy_entities(selected);
         // Regrouping remaps existing relations rather than duplicating them.
         copy.connections.clear();
-        if copy.edges.is_empty() && copy.dimensions.is_empty() && copy.texts.is_empty() {
+        if copy.edges.is_empty() && copy.dimensions.is_empty() && copy.texts.is_empty() && copy.guides.is_empty() {
             return None;
         }
         // Keep a duplicate of any boundary still needed by an unselected face.
@@ -588,6 +598,7 @@ impl Model {
         self.faces.retain(|id, _| !ids.contains(id));
         self.dimensions.retain(|id, _| !ids.contains(id));
         self.texts.retain(|id, _| !ids.contains(id));
+        self.guides.retain(|id, _| !ids.contains(id));
         self.face_colors.retain(|id, _| self.faces.contains_key(id));
         self.edges
             .retain(|id, _| !ids.contains(id) || outside_edges.contains(id));
@@ -694,6 +705,7 @@ impl Model {
             .chain(self.objects.keys())
             .chain(self.dimensions.keys())
             .chain(self.texts.keys())
+            .chain(self.guides.keys())
             .any(|id| !all_ids.insert(*id))
         {
             return Err("Duplicate entity ID");

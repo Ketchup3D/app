@@ -1,6 +1,8 @@
 use super::*;
 use ketchup_core::ConstructionGuide;
 
+const GUIDE_COLOR: Color32 = Color32::from_rgb(0, 174, 214);
+
 impl KetchupApp {
     pub(super) fn guide_modifier(
         &mut self,
@@ -56,7 +58,13 @@ impl KetchupApp {
                 .map_or(AxisConstraint::Axis(axis), AxisConstraint::Plane)
         });
         let mut nearby = vec![];
-        for guide in self.doc.model.guides.values() {
+        for (_, guide) in self.doc.model.guides.iter().filter(|(id, _)| {
+            !self.doc.model.is_hidden(**id)
+                && self
+                    .modeling
+                    .as_ref()
+                    .is_none_or(|edit| !edit.snap_excluded.contains(id))
+        }) {
             let point = match guide.direction {
                 None => guide.origin,
                 Some(direction) => match start.zip(constraint) {
@@ -156,10 +164,16 @@ impl KetchupApp {
 
     pub(super) fn tape_reference_direction(&self, snap: Snap) -> Option<DVec3> {
         if snap.kind == Inference::OnGuide {
-            return self.doc.model.guides.values().find_map(|g| {
-                let direction = g.direction?;
-                ((snap.point - g.origin).cross(direction).length() < 1e-6).then_some(direction)
-            });
+            return self
+                .doc
+                .model
+                .guides
+                .iter()
+                .filter(|(id, _)| !self.doc.model.is_hidden(**id))
+                .find_map(|(_, g)| {
+                    let direction = g.direction?;
+                    ((snap.point - g.origin).cross(direction).length() < 1e-6).then_some(direction)
+                });
         }
         if !matches!(
             snap.kind,
@@ -185,7 +199,7 @@ impl KetchupApp {
 
     pub(super) fn delete_construction_guides(&mut self, ctx: &egui::Context) {
         let before = self.doc.model.clone();
-        self.doc.model.guides.clear();
+        self.doc.model.clear_guides();
         self.finish_edit("Delete guides", before, ctx);
     }
 
@@ -193,35 +207,49 @@ impl KetchupApp {
         if !self.doc.display.guides {
             return;
         }
-        let color = Palette::for_painter(p).muted;
-        let model = self.history_preview.as_ref().unwrap_or(&self.doc.model);
-        for guide in model.guides.values() {
-            self.paint_construction_guide(p, rect, guide, color);
+        let model = self
+            .history_preview
+            .as_ref()
+            .or_else(|| {
+                self.modeling
+                    .as_ref()
+                    .and_then(|edit| edit.preview.as_ref())
+            })
+            .unwrap_or(&self.doc.model);
+        let selected = model.expand_entities(&self.selected);
+        let colors = Palette::for_painter(p);
+        for (id, guide) in model.guides.iter().filter(|(id, _)| !model.is_hidden(**id)) {
+            let hovered = self.hover.is_some() && self.hover == model.entity_in_context(*id);
+            let (color, width) = if selected.contains(id) {
+                (colors.accent, 2.5)
+            } else if hovered {
+                (colors.green, 2.)
+            } else {
+                (GUIDE_COLOR, 1.5)
+            };
+            self.paint_construction_guide(p, rect, guide, color, width);
+        }
+        if let Some(preview) = &self.paste_preview {
+            let offset = preview.point - preview.clipboard.anchor;
+            for (id, guide) in &preview.clipboard.model.guides {
+                if preview.clipboard.model.is_hidden(*id) {
+                    continue;
+                }
+                let mut guide = guide.clone();
+                guide.origin += offset;
+                self.paint_construction_guide(p, rect, &guide, GUIDE_COLOR, 1.5);
+            }
         }
         if self.history_preview.is_none()
             && self.create_guides
             && matches!(self.tool, Tool::TapeMeasure | Tool::Protractor)
-            && let Some(m) = self.measurement.as_ref()
+            && self
+                .measurement
+                .as_ref()
+                .is_some_and(|m| !m.complete || !self.length_input.is_empty())
+            && let Some(guide) = self.measurement_guide()
         {
-            let points = self.measurement_points();
-            let preview = if self.tool == Tool::TapeMeasure && points.len() == 2 {
-                Some(ConstructionGuide {
-                    origin: points[1],
-                    direction: m.guide_direction,
-                })
-            } else if self.tool == Tool::Protractor && points.len() == 3 {
-                (points[2] - points[0])
-                    .try_normalize()
-                    .map(|direction| ConstructionGuide {
-                        origin: points[0],
-                        direction: Some(direction),
-                    })
-            } else {
-                None
-            };
-            if let Some(guide) = preview {
-                self.paint_construction_guide(p, rect, &guide, Palette::for_painter(p).green);
-            }
+            self.paint_construction_guide(p, rect, &guide, GUIDE_COLOR, 1.5);
         }
     }
 
@@ -231,21 +259,15 @@ impl KetchupApp {
         rect: Rect,
         guide: &ConstructionGuide,
         color: Color32,
+        width: f32,
     ) {
         let camera = &self.doc.camera;
         let size = dv(rect.size());
-        if let Some(direction) = guide.direction {
-            // Center the drawn span near the view, so distant guide origins do not clip it.
-            let center = guide.origin + direction * (camera.target - guide.origin).dot(direction);
-            let extent = camera.distance.max(1.) * 100.;
-            if let Some((a, b)) = camera.segment(
-                center - direction * extent,
-                center + direction * extent,
-                size,
-            ) {
+        if guide.direction.is_some() {
+            if let Some((a, b)) = guide.screen_segment(camera, size) {
                 p.extend(egui::Shape::dashed_line(
                     &[rect.min + pv(a), rect.min + pv(b)],
-                    Stroke::new(1., color),
+                    Stroke::new(width, color),
                     6.,
                     4.,
                 ));
@@ -253,7 +275,7 @@ impl KetchupApp {
         } else if let Some(point) = camera.project(guide.origin, size) {
             let point = rect.min + pv(point);
             for delta in [egui::vec2(4., 4.), egui::vec2(4., -4.)] {
-                p.line_segment([point - delta, point + delta], Stroke::new(1.5, color));
+                p.line_segment([point - delta, point + delta], Stroke::new(width, color));
             }
         }
     }
