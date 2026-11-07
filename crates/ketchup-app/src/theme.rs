@@ -9,6 +9,11 @@ pub const CANVAS: Color32 = Color32::from_rgb(240, 242, 234);
 pub const GREEN: Color32 = Color32::from_rgb(78, 120, 91);
 
 const PREFERENCE_KEY: &str = "ketchup.theme.v1";
+const PROJECT_TITLE_FONT: &str = "ketchup.project-title.extra-bold";
+
+pub fn project_title_font() -> FontFamily {
+    FontFamily::Name(PROJECT_TITLE_FONT.into())
+}
 
 // UI colors are independent of the colors used for model geometry and inference.
 #[derive(Clone, Copy)]
@@ -150,6 +155,18 @@ impl FacePalette {
 }
 
 pub fn apply(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        PROJECT_TITLE_FONT.into(),
+        egui::FontData::from_static(include_bytes!(
+            "../../../assets/fonts/NotoSansDisplay-ExtraBold.ttf"
+        ))
+        .into(),
+    );
+    let mut title_fonts = fonts.families[&FontFamily::Proportional].clone();
+    title_fonts.insert(0, PROJECT_TITLE_FONT.into());
+    fonts.families.insert(project_title_font(), title_fonts);
+    ctx.set_fonts(fonts);
     ctx.set_style_of(egui::Theme::Light, style(false));
     ctx.set_style_of(egui::Theme::Dark, style(true));
     ctx.options_mut(|options| options.fallback_theme = egui::Theme::Light);

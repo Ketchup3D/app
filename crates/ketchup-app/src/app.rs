@@ -2696,7 +2696,7 @@ impl KetchupApp {
                             separator.y_range(),
                             Stroke::new(1., if dark { colors.border } else { colors.muted.gamma_multiply(0.8) }),
                         );
-                        ui.add(crate::natural_text::Label::new(RichText::new(&self.doc.name).color(foreground)).truncate())
+                        ui.add(crate::natural_text::Label::new(RichText::new(&self.doc.name).size(18.).family(project_title_font()).color(foreground)).truncate())
                             .on_hover_text(&self.doc.name);
                     });
                 });
