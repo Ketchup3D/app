@@ -45,6 +45,8 @@ mod context_menu;
 mod currency;
 #[path = "display_scene.rs"]
 mod display_scene;
+#[path = "construction_guides.rs"]
+mod construction_guides;
 #[path = "drawing_inference.rs"]
 mod drawing_inference;
 #[path = "entity_gizmo.rs"]
@@ -349,6 +351,9 @@ pub struct KetchupApp {
     move_modifier_down: bool,
     last_move_copy: Option<MoveCopy>,
     measurement: Option<measurement_tools::Measurement>,
+    create_guides: bool,
+    guide_modifier_down: bool,
+    guide_toggle_pending: bool,
     text_editor: Option<text_tools::TextEditor>,
     paint_color: [u8; 3],
     paint_target: PaintTarget,
@@ -516,6 +521,9 @@ impl KetchupApp {
             move_modifier_down: false,
             last_move_copy: None,
             measurement: None,
+            create_guides: true,
+            guide_modifier_down: false,
+            guide_toggle_pending: false,
             text_editor: None,
             paint_color: [195, 96, 67],
             paint_target: PaintTarget::default(),
@@ -1638,6 +1646,9 @@ impl KetchupApp {
         let offset_snap = (self.tool == Tool::Offset && self.length_input.trim().is_empty())
             .then(|| self.offset_snap(pos))
             .flatten();
+        let guide_snap = self.modeling.as_ref()
+            .filter(|_| matches!(self.tool, Tool::Move | Tool::Scale))
+            .and_then(|edit| self.construction_snap(pos, Some(edit.anchor), self.lock));
         let Some(edit) = self.modeling.as_mut() else {
             return;
         };
@@ -1667,7 +1678,7 @@ impl KetchupApp {
                 edit.scale_constraint = constraint;
                 edit.guides.clear();
                 edit.snap = None;
-                if let Some(inference) = edit.move_snap.as_mut().unwrap().infer_with_constraint(
+                if let Some(mut inference) = edit.move_snap.as_mut().unwrap().infer_with_constraint(
                     &self.doc.camera,
                     size,
                     dv(pos - self.viewport.min),
@@ -1681,6 +1692,11 @@ impl KetchupApp {
                         face_centers: self.snap_to_face_center,
                     },
                 ) {
+                    if let Some(guide) = guide_snap.filter(|_| !matches!(inference.snap.kind,
+                        Inference::Endpoint | Inference::Midpoint | Inference::FaceCenter | Inference::Origin | Inference::OnEdge)) {
+                        inference.snap = guide;
+                        inference.guides.clear();
+                    }
                     let snap = if self.tool == Tool::Scale {
                         Self::scale_snap(
                             edit,
@@ -1933,6 +1949,10 @@ impl KetchupApp {
     }
 
     fn keyboard(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() || self.project.blocked() || self.screenshot.open || self.settings_open || self.help || self.about || self.release_notes.open || self.object_creation.is_some() || self.object_rename.is_some() || self.text_editor.is_some() {
+            self.guide_modifier_down = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command || i.modifiers.mac_cmd);
+            self.guide_toggle_pending = false;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if self.updates.open {
             return;
@@ -2117,7 +2137,8 @@ impl KetchupApp {
         for event in events {
             match event {
                 egui::Event::ModifiersChanged(modifiers) => {
-                    self.move_modifier(ctx, modifiers, shortcuts)
+                    self.move_modifier(ctx, modifiers, shortcuts);
+                    self.guide_modifier(ctx, modifiers, shortcuts);
                 }
                 egui::Event::Copy => self.context_action(ctx, ContextAction::Copy),
                 egui::Event::Cut => self.context_action(ctx, ContextAction::Cut),
@@ -2197,6 +2218,7 @@ impl KetchupApp {
                                 self.erase_selected(ctx);
                             }
                         }
+                        Key::Enter if self.measurement_precision_available() => self.commit_measurement_value(ctx),
                         Key::Enter if self.tool == Tool::Line => self.commit_line(ctx, true),
                         Key::Enter if self.drawing.is_some() => self.commit_drawing(ctx),
                         Key::Enter if self.modeling.is_some() => self.commit_modeling(ctx),
@@ -2585,6 +2607,11 @@ impl KetchupApp {
                             ui.separator();
                             self.context_position = None;
                             self.entity_menu(ui, |_, _| {});
+                            ui.separator();
+                            if ui.add_enabled(!self.doc.model.guides.is_empty() && !self.project.blocked(), Self::menu_item_button(ui, "Delete Guides", None)).clicked() {
+                                self.delete_construction_guides(&ctx);
+                                ui.close();
+                            }
                         });
                         Self::app_bar_menu(ui, "View", |ui| {
                             ui.visuals_mut().override_text_color = Some(colors.ink);
@@ -2767,7 +2794,7 @@ impl KetchupApp {
                     // Reserve the precision controls before fitting the status message.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.tool == Tool::Text { return; }
-                        if self.tool.is_measuring() {
+                        if self.tool.is_measuring() && !self.measurement_precision_available() {
                             ui.text_label(
                                 RichText::new(
                                     self.measurement_value().unwrap_or_else(|| "—".into()),
@@ -2790,7 +2817,9 @@ impl KetchupApp {
                             ui.text_label(RichText::new("×").color(colors.muted));
                         }
                         let available = self.precision_available();
-                        let hint = if let Some(edit) = &self.modeling {
+                        let hint = if self.measurement_precision_available() {
+                            self.measurement_value().unwrap_or_default()
+                        } else if let Some(edit) = &self.modeling {
                             if self.tool == Tool::Scale { format!("{:.3}", edit.value) } else if self.tool == Tool::Rotate { self.doc.display.units.format_angle(edit.value) } else { self.doc.display.units.format_length(edit.value) }
                         } else if self.last_move_copy.is_some() {
                             "/3 or 3x".into()
@@ -2811,7 +2840,7 @@ impl KetchupApp {
                                 .hint_text(hint)
                                 .char_limit(precision::MAX_INPUT_LEN)
                                 .margin(egui::vec2(9., 6.)),
-                        ).on_hover_text(if self.tool == Tool::Rotate {
+                        ).on_hover_text(if matches!(self.tool, Tool::Rotate | Tool::Protractor) {
                             format!("Enter an angle or formula, such as 90 or (45 + 45) / 2. Plain numbers use {}. Add deg, °, rad, or gon after the formula to override the unit.", self.doc.display.units.angle.label())
                         } else {
                             format!("Use lengths or formulas: 60cm - 89mm, (1m + 20cm) / 2. Operators: + - * / and parentheses. Plain numbers default to {}; multipliers are unitless. Units: mm, cm, m, km, in, ft, yd. Rectangles accept one formula per dimension, separated by a comma. Scale uses numbers without units.", self.doc.display.units.length.label())
@@ -2819,7 +2848,9 @@ impl KetchupApp {
                         if (field.has_focus() || field.lost_focus())
                             && ctx.input(|i| i.key_pressed(Key::Enter))
                         {
-                            if self.modeling.is_some() {
+                            if self.measurement_precision_available() {
+                                self.commit_measurement_value(&ctx);
+                            } else if self.modeling.is_some() {
                                 self.commit_modeling(&ctx);
                             } else if self.last_move_copy.is_some() {
                                 self.commit_move_array(&ctx);
@@ -2833,7 +2864,7 @@ impl KetchupApp {
                         ui.text_label(
                             RichText::new(match self.tool {
                                 Tool::Scale => "Factor",
-                                Tool::Rotate => "Angle",
+                                Tool::Rotate | Tool::Protractor => "Angle",
                                 Tool::PushPull => "Distance",
                                 Tool::Offset => "Offset",
                                 Tool::Move if self.last_move_copy.is_some() => "Copies",
@@ -3587,7 +3618,7 @@ impl KetchupApp {
         lock: Option<Axis>,
         axes: bool,
     ) -> Option<Snap> {
-        ketchup_core::inference::infer_with_constraint(
+        let base = ketchup_core::inference::infer_with_constraint(
             &self.doc.model,
             &self.doc.camera,
             dv(self.viewport.size()),
@@ -3605,7 +3636,12 @@ impl KetchupApp {
                     .excluding(self.modeling.as_ref().map(|edit| &edit.snap_excluded)),
             ),
             self.snap_targets(),
-        )
+        );
+        if base.is_some_and(|snap| matches!(snap.kind, Inference::Endpoint | Inference::Midpoint | Inference::FaceCenter | Inference::Origin | Inference::OnEdge)) {
+            base
+        } else {
+            self.construction_snap(pos, start, lock).or(base)
+        }
     }
     fn pick_at(&mut self, pixel: DVec2, size: DVec2, include_faces: bool) -> Option<u64> {
         // Select and move the visible machined boards, retaining their source
@@ -5362,6 +5398,7 @@ impl KetchupApp {
             }
         }
         self.paint_solid_tools(&p, rect);
+        self.paint_construction_guides(&p, rect);
         self.paint_measurements(&p, rect);
         if let Some((notice, until)) = &self.notice {
             if ui.input(|i| i.time) < *until {

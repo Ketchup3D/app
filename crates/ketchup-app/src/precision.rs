@@ -293,7 +293,8 @@ impl KetchupApp {
     }
 
     pub(super) fn precision_available(&self) -> bool {
-        (self.tool == Tool::Line && self.line_start.is_some())
+        self.measurement_precision_available()
+            || (self.tool == Tool::Line && self.line_start.is_some())
             || self.drawing.is_some()
             || self.modeling.as_ref().is_some_and(|edit| {
                 self.tool != Tool::Rotate

@@ -74,6 +74,7 @@ impl KetchupApp {
         let Some(base) = self.snap else {
             return;
         };
+        if matches!(base.kind, Inference::OnGuide | Inference::GuidePoint) { return; }
         if self.tool == Tool::Line
             && let Some(start) = self.line_start
         {

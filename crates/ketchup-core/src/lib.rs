@@ -9,6 +9,7 @@ pub mod document;
 pub mod edit_context;
 pub mod faces;
 mod history;
+pub mod guides;
 pub mod inference;
 pub mod measurements;
 pub mod modeling;
@@ -21,6 +22,7 @@ pub mod tags;
 pub mod units;
 
 pub use annotations::TextAnnotation;
+pub use guides::ConstructionGuide;
 pub use camera::{Camera, CameraView, Projection, Ray, StandardView};
 pub use display::{DisplaySettings, FaceStyle};
 pub use document::{Document, Edge, Face, History, Model, Vertex};
@@ -260,9 +262,9 @@ impl Tool {
             Self::Paint => {
                 "Choose a color and Face or Group in the inspector · Click a face to paint"
             }
-            Self::TapeMeasure => "Click two points to measure their distance · Esc to clear",
+            Self::TapeMeasure => "Click a reference edge or point · Ctrl/Command toggles Create Guides / Measure · Esc to clear",
             Self::Protractor => {
-                "Click a center, a baseline point, then an angle point · Esc to clear"
+                "Click a center, a baseline, then an angle · Ctrl/Command toggles Create Guides / Measure"
             }
             Self::Dimensions => {
                 "Click two endpoints, then click to place the dimension · Esc to cancel"

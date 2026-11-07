@@ -66,6 +66,7 @@ fn completed_measurements_reset_locks_only_when_enabled() {
             let mut h = Harness::new();
             h.app.general_settings.reset_axis_locks_on_action = enabled;
             h.app.set_tool(tool);
+            h.app.create_guides = false;
             h.app.doc.snap_to_geometry = false;
             h.app.doc.snap_to_axes = false;
             h.key(Key::ArrowRight);

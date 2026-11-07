@@ -113,8 +113,50 @@ struct ToolPreferences {
     solid: Tool,
     polygon_sides: usize,
     move_copy: bool,
+    create_guides: bool,
     axis_lock: Option<Axis>,
     second_axis_lock: Option<Axis>,
+}
+
+#[cfg(test)]
+mod guide_preference_tests {
+    use super::*;
+    #[derive(Default)]
+    struct Storage {
+        values: std::collections::BTreeMap<String, String>,
+        flushed: bool,
+    }
+    impl eframe::Storage for Storage {
+        fn get_string(&self, key: &str) -> Option<String> { self.values.get(key).cloned() }
+        fn set_string(&mut self, key: &str, value: String) { self.values.insert(key.into(), value); }
+        fn remove_string(&mut self, key: &str) { self.values.remove(key); }
+        fn flush(&mut self) { self.flushed = true; }
+    }
+
+    #[test]
+    fn guide_mode_defaults_and_saves_immediately_without_a_model_edit() {
+        let older: ToolPreferences = serde_json::from_str(r#"{"measurement":"tape_measure"}"#).unwrap();
+        assert!(older.create_guides);
+        let ctx = egui::Context::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        let mut storage = Storage::default();
+        for mode in [false, true] {
+            app.create_guides = mode;
+            app.set_tool(Tool::TapeMeasure);
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.create_guides, mode);
+            assert_eq!(restored.tool, Tool::TapeMeasure);
+            restored.replace_project(Document::default(), None, &egui::Context::default());
+            assert_eq!(restored.create_guides, mode);
+            assert!(restored.doc.model.guides.is_empty());
+        }
+    }
 }
 
 impl Default for ToolPreferences {
@@ -126,6 +168,7 @@ impl Default for ToolPreferences {
             solid: Tool::Union,
             polygon_sides: 6,
             move_copy: false,
+            create_guides: true,
             axis_lock: None,
             second_axis_lock: None,
         }
@@ -141,6 +184,7 @@ impl ToolPreferences {
             solid: app.solid_tool,
             polygon_sides: app.polygon_sides,
             move_copy: app.move_copy,
+            create_guides: app.create_guides,
             axis_lock: app.lock,
             second_axis_lock: app.second_lock,
         }
@@ -168,6 +212,7 @@ impl ToolPreferences {
         // can otherwise act immediately on selected geometry).
         app.set_tool(self.active);
         app.move_copy = self.move_copy;
+        app.create_guides = self.create_guides;
         app.lock = self.axis_lock;
         app.second_lock = self.second_axis_lock
             .filter(|axis| self.axis_lock.is_some_and(|first| first != *axis));

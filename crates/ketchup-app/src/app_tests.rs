@@ -2,6 +2,8 @@ use super::*;
 use crate::test_ui::ContextExt as _;
 use eframe::App;
 
+#[path = "construction_guide_tests.rs"]
+mod construction_guides;
 #[path = "axis_lock_tests.rs"]
 mod axis_locks;
 #[path = "rotate_tool_tests.rs"]

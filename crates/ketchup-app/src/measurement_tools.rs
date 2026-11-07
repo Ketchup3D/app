@@ -1,19 +1,127 @@
 use super::*;
 use ketchup_core::{Dimension, DimensionAnchor, angle_arc, angle_degrees};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Measurement {
     pub(super) points: Vec<DVec3>,
     pub(super) complete: bool,
     pub(super) normal: DVec3,
     pub(super) offset: DVec3,
     pub(super) text: String,
+    pub(super) guide_direction: Option<DVec3>,
+    pub(super) guide_id: Option<u64>,
 }
 
 impl KetchupApp {
+    pub(super) fn measurement_precision_available(&self) -> bool {
+        matches!(self.tool, Tool::TapeMeasure | Tool::Protractor)
+            && self.measurement.as_ref().is_some_and(|m| {
+                (!m.complete || m.guide_id.is_some())
+                    && m.points.len() >= if self.tool == Tool::Protractor { 2 } else { 1 }
+            })
+    }
+
+    fn place_measurement_guide(&mut self, ctx: &egui::Context) {
+        let Some(mut m) = self.measurement.clone().filter(|m| m.complete) else {
+            return;
+        };
+        let (origin, direction) = if self.tool == Tool::Protractor {
+            (m.points[0], Some(m.points[2] - m.points[0]))
+        } else {
+            (m.points[1], m.guide_direction)
+        };
+        let before = self.doc.model.clone();
+        match self.doc.model.add_guide(origin, direction) {
+            Ok(id) => {
+                let adjusting = m.guide_id.is_some();
+                if let Some(previous) = m.guide_id {
+                    self.doc.model.guides.remove(&previous);
+                }
+                m.guide_id = Some(id);
+                self.finish_edit(
+                    if adjusting {
+                        "Adjust guide"
+                    } else {
+                        "Add guide"
+                    },
+                    before,
+                    ctx,
+                );
+                if self.doc.model.guides.contains_key(&id) {
+                    self.doc.display.guides = true;
+                    self.measurement = Some(m);
+                }
+            }
+            Err(message) => self.say(ctx, message),
+        }
+    }
+
+    pub(super) fn commit_measurement_value(&mut self, ctx: &egui::Context) {
+        let result = self.precise_measurement_endpoint();
+        let point = match result {
+            Ok(point) => point,
+            Err(message) => {
+                self.say(ctx, message);
+                return;
+            }
+        };
+        let m = self.measurement.as_mut().unwrap();
+        let count = if self.tool == Tool::Protractor { 3 } else { 2 };
+        m.points.truncate(count - 1);
+        m.points.push(point);
+        m.complete = true;
+        if self.create_guides {
+            self.place_measurement_guide(ctx);
+        }
+        self.reset_axis_locks_after_action();
+        self.length_input.clear();
+    }
+
+    fn precise_measurement_endpoint(&self) -> Result<DVec3, &'static str> {
+        let m = self
+            .measurement
+            .as_ref()
+            .ok_or("Choose a starting point first")?;
+        let origin = m.points[0];
+        if self.tool == Tool::Protractor {
+            let angle =
+                precision::angle(&self.length_input, self.doc.display.units.angle)?.to_radians();
+            let baseline = m.points[1] - origin;
+            let normal = self.plane_lock().map(Axis::vector).unwrap_or(m.normal);
+            let pointer = m.points.get(2).copied().or(self.snap.map(|s| s.point));
+            let sign = if pointer.is_some_and(|p| baseline.cross(p - origin).dot(normal) < 0.) {
+                -1.
+            } else {
+                1.
+            };
+            Ok(origin + glam::DQuat::from_axis_angle(normal, angle * sign) * baseline)
+        } else {
+            let length =
+                precision::positive_length(&self.length_input, self.doc.display.units.length)?;
+            let endpoint = m
+                .points
+                .get(1)
+                .copied()
+                .or(self.snap.map(|s| s.point))
+                .ok_or("Move the pointer to choose a direction first")?;
+            let mut delta = endpoint - origin;
+            if self.create_guides
+                && let Some(direction) = m.guide_direction
+            {
+                delta -= direction * delta.dot(direction);
+            }
+            let direction = delta
+                .try_normalize()
+                .ok_or("Move the pointer to choose a direction first")?;
+            Ok(origin + direction * length)
+        }
+    }
+
     pub(super) fn measurement_plane(&self) -> Option<(DVec3, DVec3)> {
         let m = self.measurement.as_ref()?;
-        if self.tool != Tool::Dimensions && let Some(normal) = self.plane_lock() {
+        if self.tool != Tool::Dimensions
+            && let Some(normal) = self.plane_lock()
+        {
             return m.points.first().map(|point| (*point, normal.vector()));
         }
         if self.tool == Tool::Text && !m.points.is_empty() && self.single_axis_lock().is_none() {
@@ -22,7 +130,12 @@ impl KetchupApp {
                 (self.doc.camera.target - self.doc.camera.eye()).normalize(),
             ));
         }
-        (self.tool == Tool::Protractor && m.points.len() == 2).then(|| (m.points[0], m.normal))
+        ((self.tool == Tool::Protractor && m.points.len() == 2)
+            || (self.tool == Tool::TapeMeasure
+                && self.create_guides
+                && m.guide_direction.is_some()
+                && !m.complete))
+            .then(|| (m.points[0], m.normal))
     }
 
     pub(super) fn update_measurement(&mut self, pos: Pos2) {
@@ -97,8 +210,31 @@ impl KetchupApp {
                     delta - direction * delta.dot(direction);
             }
         }
+        if let Some((origin, normal)) = self.measurement_plane()
+            && self.tool == Tool::TapeMeasure
+            && self.single_axis_lock().is_none()
+            && let Some(snap) = self.snap.as_mut().filter(|s| s.kind == Inference::Plane)
+        {
+            let ray = self.doc.camera.ray(cursor, size);
+            let denominator = ray.direction.dot(normal);
+            if denominator.abs() > 1e-8 {
+                let t = (origin - ray.origin).dot(normal) / denominator;
+                if t > 0. {
+                    snap.point = ray.origin + ray.direction * t;
+                }
+            }
+        }
         self.update_drawing_inference(pos);
         self.apply_grid_snap();
+        if self.tool == Tool::TapeMeasure
+            && self.create_guides
+            && let Some(m) = self.measurement.as_ref().filter(|m| !m.complete)
+            && let Some(direction) = m.guide_direction
+            && let Some(origin) = m.points.first()
+            && let Some(snap) = self.snap.as_mut()
+        {
+            snap.point -= direction * (snap.point - *origin).dot(direction);
+        }
     }
 
     pub(super) fn measurement_click(&mut self, pos: Pos2, ctx: &egui::Context) {
@@ -106,7 +242,12 @@ impl KetchupApp {
             self.text_click(pos, ctx);
             return;
         }
+        if self.measurement_precision_available() && !self.length_input.trim().is_empty() {
+            self.commit_measurement_value(ctx);
+            return;
+        }
         if self.measurement.as_ref().is_some_and(|m| m.complete) {
+            self.length_input.clear();
             self.measurement = None;
             self.snap = None;
         }
@@ -153,8 +294,22 @@ impl KetchupApp {
             })
             .map(|p| p.normal)
             .unwrap_or(DVec3::Z);
+        let guide_direction = (self.tool == Tool::TapeMeasure)
+            .then(|| self.tape_reference_direction(snap))
+            .flatten();
+        let normal = if let Some(direction) =
+            guide_direction.filter(|d| d.dot(surface_normal).abs() > 1e-6)
+        {
+            let view = self.doc.camera.eye() - snap.point;
+            (view - direction * view.dot(direction))
+                .try_normalize()
+                .unwrap_or(DVec3::Z)
+        } else {
+            surface_normal
+        };
         let m = self.measurement.get_or_insert_with(|| Measurement {
-            normal: surface_normal,
+            normal,
+            guide_direction,
             ..Default::default()
         });
         if m.points
@@ -179,11 +334,16 @@ impl KetchupApp {
         m.complete = (self.tool == Tool::TapeMeasure && m.points.len() == 2)
             || (self.tool == Tool::Protractor && m.points.len() == 3);
         if m.complete {
-            self.reset_axis_locks_after_action();
+            if self.create_guides {
+                self.place_measurement_guide(ctx);
+            } else {
+                self.reset_axis_locks_after_action();
+            }
+            self.length_input.clear();
         }
     }
 
-    fn measurement_points(&self) -> Vec<DVec3> {
+    pub(super) fn measurement_points(&self) -> Vec<DVec3> {
         let Some(m) = &self.measurement else {
             return vec![];
         };
@@ -192,6 +352,14 @@ impl KetchupApp {
             if let Some(snap) = self.snap {
                 points.push(snap.point);
             }
+        }
+        if self.measurement_precision_available()
+            && !self.length_input.trim().is_empty()
+            && let Ok(endpoint) = self.precise_measurement_endpoint()
+        {
+            let count = if self.tool == Tool::Protractor { 3 } else { 2 };
+            points.truncate(count - 1);
+            points.push(endpoint);
         }
         points
     }
@@ -240,6 +408,33 @@ impl KetchupApp {
         }
     }
     pub(super) fn measurement_status(&self) -> &'static str {
+        if matches!(self.tool, Tool::TapeMeasure | Tool::Protractor) {
+            return match (
+                self.create_guides,
+                self.measurement
+                    .as_ref()
+                    .map(|m| (m.complete, m.points.len())),
+            ) {
+                (true, Some((true, _))) => {
+                    "Guide created · Type a value + Enter to adjust · Click to start another · Ctrl/Command toggles Measure"
+                }
+                (false, Some((true, _))) => {
+                    "Measurement complete · Click to start another · Ctrl/Command toggles Create Guides"
+                }
+                (true, Some((false, 1))) if self.tool == Tool::TapeMeasure => {
+                    "Create guide · Click to place or type distance + Enter · Arrow keys lock axes · Ctrl/Command toggles Measure"
+                }
+                (true, Some((false, 2))) if self.tool == Tool::Protractor => {
+                    "Create guide · Click the angle point or type angle + Enter · Ctrl/Command toggles Measure"
+                }
+                (true, _) => {
+                    "Create Guides · Click a reference edge or point · Ctrl/Command toggles Measure · Esc to cancel"
+                }
+                (false, _) => {
+                    "Measure only · Click measurement points · Ctrl/Command toggles Create Guides · Esc to cancel"
+                }
+            };
+        }
         let Some(m) = &self.measurement else {
             return self.tool.instructions();
         };

@@ -66,6 +66,8 @@ pub struct Face {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Model {
+    #[serde(default, deserialize_with = "deserialize_map_or_empty_sequence")]
+    pub guides: BTreeMap<u64, crate::ConstructionGuide>,
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_map_or_empty_sequence")]
     pub connections: BTreeMap<u64, crate::connections::Connection>,
@@ -310,6 +312,7 @@ impl Model {
             || self.objects.len() > 1_000_000
             || self.dimensions.len() > 1_000_000
             || self.texts.len() > 1_000_000
+            || self.guides.len() > 1_000_000
         {
             return Err("Model is too large");
         }
@@ -328,6 +331,7 @@ impl Model {
             .chain(self.dimensions.keys())
             .chain(self.texts.keys())
             .chain(self.connections.keys())
+            .chain(self.guides.keys())
             .max()
             .copied()
             .unwrap_or(0);
@@ -338,6 +342,9 @@ impl Model {
             if *id != v.id || !v.position.is_finite() || v.position.abs().max_element() > 1e10 {
                 return Err("Invalid vertex");
             }
+        }
+        if self.guides.values().any(|guide| !guide.valid()) {
+            return Err("Invalid construction guide");
         }
         let mut pairs = BTreeSet::new();
         for (id, e) in &self.edges {

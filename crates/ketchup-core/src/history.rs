@@ -121,6 +121,8 @@ pub(crate) struct ModelChange {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     texts: Changes<u64, crate::TextAnnotation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    guides: Changes<u64, crate::ConstructionGuide>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     objects: Changes<u64, crate::Object>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     stock_materials: Changes<crate::MaterialId, crate::StockMaterial>,
@@ -147,6 +149,7 @@ impl ModelChange {
             face_colors: difference(&before.face_colors, &after.face_colors),
             dimensions: difference(&before.dimensions, &after.dimensions),
             texts: difference(&before.texts, &after.texts),
+            guides: difference(&before.guides, &after.guides),
             objects: difference(&before.objects, &after.objects),
             stock_materials: difference(&before.stock_materials, &after.stock_materials),
             tags: difference(&before.tags, &after.tags),
@@ -166,6 +169,7 @@ impl ModelChange {
             && self.face_colors.is_empty()
             && self.dimensions.is_empty()
             && self.texts.is_empty()
+            && self.guides.is_empty()
             && self.objects.is_empty()
             && self.stock_materials.is_empty()
             && self.tags.is_empty()
@@ -183,6 +187,7 @@ impl ModelChange {
             && matches(&self.face_colors, &model.face_colors, forward)
             && matches(&self.dimensions, &model.dimensions, forward)
             && matches(&self.texts, &model.texts, forward)
+            && matches(&self.guides, &model.guides, forward)
             && matches(&self.objects, &model.objects, forward)
             && matches(&self.stock_materials, &model.stock_materials, forward)
             && matches(&self.tags, &model.tags, forward)
@@ -202,6 +207,7 @@ impl ModelChange {
         apply(&self.face_colors, &mut model.face_colors, forward);
         apply(&self.dimensions, &mut model.dimensions, forward);
         apply(&self.texts, &mut model.texts, forward);
+        apply(&self.guides, &mut model.guides, forward);
         apply(&self.objects, &mut model.objects, forward);
         apply(&self.stock_materials, &mut model.stock_materials, forward);
         apply(&self.tags, &mut model.tags, forward);
