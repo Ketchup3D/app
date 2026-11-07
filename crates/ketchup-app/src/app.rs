@@ -2631,12 +2631,19 @@ impl KetchupApp {
                                 ui.close();
                             }
                             ui.separator();
+                            if ui.add_enabled(!self.project.blocked(), Self::menu_item_button(ui, "Generate Time & Cost Estimates…", Some("export_pdf")))
+                                .on_hover_text("Export time and cost estimates as PDF")
+                                .clicked() {
+                                self.export_time_estimates(&ctx);
+                                ui.close();
+                            }
                             if ui.add_enabled(!self.project.blocked(), Self::menu_item_button(ui, "Prepare cutting plan…", Some("dimension")))
                                 .on_hover_text("Summarize matching parts and export finished cutting dimensions for the selection or whole project.")
                                 .clicked() {
                                 self.prepare_cutting_plan();
                                 ui.close();
                             }
+                            ui.separator();
                             if ui.add_enabled(!self.project.blocked(), Self::menu_item_button(ui, "Screenshot", Some("screenshot"))).clicked() {
                                 self.screenshot.open = true;
                                 ui.close();
