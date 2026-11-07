@@ -1764,6 +1764,53 @@ mod preference_tests {
     }
 
     #[test]
+    fn axis_lock_reset_preference_saves_without_model_edits_and_defaults_on() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        assert!(app.general_settings.reset_axis_locks_on_action);
+        for enabled in [false, true] {
+            app.general_settings.reset_axis_locks_on_action = enabled;
+            app.general_settings.section = settings::Section::Tools;
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(storage.flushed);
+            assert!(!app.project.modified);
+            assert!(app.dirty_since.is_none());
+            let mut restored = KetchupApp::with_document(Document::default(), None, true);
+            restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+            assert_eq!(restored.general_settings.reset_axis_locks_on_action, enabled);
+            assert_eq!(restored.general_settings.section, settings::Section::Tools);
+            storage.flushed = false;
+            app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+            assert!(!storage.flushed);
+        }
+        for json in ["{}", r#"{"general":{}}"#] {
+            let old: InspectorPreferences = serde_json::from_str(json).unwrap();
+            assert!(old.general.reset_axis_locks_on_action);
+        }
+    }
+
+    #[test]
+    fn cancelled_action_persists_cleared_locks_without_a_model_edit() {
+        let ctx = egui::Context::default();
+        let mut storage = SavedPreferences::default();
+        let mut app = KetchupApp::with_document(Document::default(), None, true);
+        app.set_tool(Tool::Line);
+        app.toggle_axis_lock(Axis::X, &ctx);
+        app.toggle_axis_lock(Axis::Y, &ctx);
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        app.stop_drawing();
+        storage.flushed = false;
+        app.persist_inspector_changes(&ctx, Some(&mut storage), false);
+        assert!(storage.flushed);
+        assert!(!app.project.modified);
+        let mut restored = KetchupApp::with_document(Document::default(), None, true);
+        restored.restore_inspector_preferences(&egui::Context::default(), Some(&storage));
+        assert_eq!((restored.lock, restored.second_lock), (None, None));
+    }
+
+    #[test]
     fn two_axis_locks_save_without_model_edits_and_restore_older_preferences() {
         let ctx = egui::Context::default();
         let mut storage = SavedPreferences::default();

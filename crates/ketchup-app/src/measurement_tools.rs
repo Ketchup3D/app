@@ -178,6 +178,9 @@ impl KetchupApp {
         }
         m.complete = (self.tool == Tool::TapeMeasure && m.points.len() == 2)
             || (self.tool == Tool::Protractor && m.points.len() == 3);
+        if m.complete {
+            self.reset_axis_locks_after_action();
+        }
     }
 
     fn measurement_points(&self) -> Vec<DVec3> {

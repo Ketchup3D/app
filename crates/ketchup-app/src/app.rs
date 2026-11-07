@@ -618,8 +618,7 @@ impl KetchupApp {
         self.line_start = None;
         self.line_group = None;
         self.snap = None;
-        self.lock = None;
-        self.second_lock = None;
+        self.reset_axis_locks_after_action();
         self.length_input.clear();
         self.gesture = None;
         self.paste_preview = None;
@@ -672,6 +671,7 @@ impl KetchupApp {
             self.last_move_copy = None;
             self.measurement = None;
             self.modeling = None;
+            self.reset_axis_locks_after_action();
             let author = self.current_history_author();
             self.doc.history.record_attributed(label, before, &self.doc.model, Some(author), Some(sharing::now_timestamp()));
             self.selected.retain(|id| {
@@ -915,9 +915,14 @@ impl KetchupApp {
         self.line_start = None;
         self.line_group = None;
         self.snap = None;
-        self.lock = None;
-        self.second_lock = None;
+        self.reset_axis_locks_after_action();
         self.length_input.clear();
+    }
+    fn reset_axis_locks_after_action(&mut self) {
+        if self.general_settings.reset_axis_locks_on_action {
+            self.lock = None;
+            self.second_lock = None;
+        }
     }
     fn commit_line(&mut self, ctx: &egui::Context, precise: bool) {
         self.refresh_snap(ctx);

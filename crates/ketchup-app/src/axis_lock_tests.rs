@@ -7,6 +7,112 @@ const PAIRS: [(Axis, Key, Axis, Key, Axis); 3] = [
 ];
 
 #[test]
+fn completed_line_actions_reset_locks_only_when_enabled() {
+    for enabled in [true, false] {
+        let mut h = Harness::new();
+        h.app.general_settings.reset_axis_locks_on_action = enabled;
+        h.app.set_tool(Tool::Line);
+        h.app.doc.snap_to_geometry = false;
+        h.app.doc.snap_to_axes = false;
+        h.click(h.at(DVec3::ZERO));
+        h.key(Key::ArrowRight);
+        h.key(Key::ArrowLeft);
+        h.frame(
+            vec![egui::Event::PointerMoved(h.at(DVec3::new(2., 1., 0.)))],
+            egui::Modifiers::NONE,
+        );
+        let locks = (Some(Axis::X), Some(Axis::Y));
+        assert_eq!((h.app.lock, h.app.second_lock), locks);
+        // Invalid input leaves the operation and its constraints in progress.
+        h.app.length_input = "invalid".into();
+        h.key(Key::Enter);
+        assert!(h.app.doc.model.edges.is_empty());
+        assert_eq!((h.app.lock, h.app.second_lock), locks);
+        h.app.length_input = "2m".into();
+        h.key(Key::Enter);
+        assert_eq!(h.app.doc.model.edges.len(), 1);
+        assert!(h.app.line_start.is_some());
+        assert_eq!(
+            (h.app.lock, h.app.second_lock),
+            if enabled { (None, None) } else { locks },
+        );
+    }
+}
+
+#[test]
+fn completed_shapes_respect_the_axis_lock_reset_preference() {
+    for enabled in [true, false] {
+        let mut h = Harness::new();
+        h.app.general_settings.reset_axis_locks_on_action = enabled;
+        h.app.set_tool(Tool::Rectangle);
+        h.key(Key::ArrowRight);
+        h.key(Key::ArrowLeft);
+        h.click(h.at(DVec3::ZERO));
+        assert_eq!(h.app.plane_lock(), Some(Axis::Z));
+        h.click(h.at(DVec3::new(2., 1., 0.)));
+        assert_eq!(h.app.doc.model.faces.len(), 1);
+        assert!(h.app.drawing.is_none());
+        assert_eq!(
+            h.app.plane_lock(),
+            if enabled { None } else { Some(Axis::Z) },
+        );
+    }
+}
+
+#[test]
+fn completed_measurements_reset_locks_only_when_enabled() {
+    for enabled in [true, false] {
+        for tool in [Tool::TapeMeasure, Tool::Protractor] {
+            let mut h = Harness::new();
+            h.app.general_settings.reset_axis_locks_on_action = enabled;
+            h.app.set_tool(tool);
+            h.app.doc.snap_to_geometry = false;
+            h.app.doc.snap_to_axes = false;
+            h.key(Key::ArrowRight);
+            h.key(Key::ArrowLeft);
+            h.click(h.at(DVec3::ZERO));
+            assert_eq!(h.app.plane_lock(), Some(Axis::Z));
+            h.click(h.at(DVec3::X));
+            if tool == Tool::Protractor {
+                assert_eq!(h.app.plane_lock(), Some(Axis::Z));
+                h.click(h.at(DVec3::Y));
+            }
+            assert!(h.app.measurement.as_ref().unwrap().complete);
+            assert_eq!(
+                h.app.plane_lock(),
+                if enabled { None } else { Some(Axis::Z) },
+            );
+            assert!(!h.app.project.modified);
+        }
+    }
+}
+
+#[test]
+fn tool_switches_and_cancellation_respect_the_axis_lock_reset_preference() {
+    for enabled in [true, false] {
+        let mut h = Harness::new();
+        h.app.general_settings.reset_axis_locks_on_action = enabled;
+        h.app.set_tool(Tool::Line);
+        h.key(Key::ArrowRight);
+        h.key(Key::ArrowLeft);
+        h.app.set_tool(Tool::Move);
+        assert_eq!(
+            h.app.plane_lock(),
+            if enabled { None } else { Some(Axis::Z) },
+        );
+        h.app.lock = Some(Axis::X);
+        h.app.second_lock = Some(Axis::Y);
+        h.key(Key::Escape);
+        assert_eq!(
+            h.app.plane_lock(),
+            if enabled { None } else { Some(Axis::Z) },
+        );
+        h.key(Key::ArrowDown);
+        assert_eq!((h.app.lock, h.app.second_lock), (None, None));
+    }
+}
+
+#[test]
 fn axis_locks_toggle_independently_and_never_allow_three() {
     for (first, first_key, second, second_key, normal) in PAIRS {
         let mut h = Harness::new();
@@ -140,6 +246,7 @@ fn two_axis_locks_constrain_move_previews_and_commits() {
         let (moved, _) = h.app.doc.model.points(&h.app.doc.model.edges[&edge]);
         assert!((moved - start).dot(normal.vector()).abs() < 1e-7);
         assert!((moved.distance(start) - 2.).abs() < 1e-6);
+        assert_eq!((h.app.lock, h.app.second_lock), (None, None));
     }
 }
 
@@ -159,6 +266,7 @@ fn two_axis_locks_project_dimensions_without_moving_their_endpoints() {
     assert_eq!(dimension.points(&h.app.doc.model), (a, b));
     assert_eq!(dimension.plane, Some(Axis::Z));
     assert!((dimension.length(&h.app.doc.model) - 5.).abs() < 1e-7);
+    assert_eq!((h.app.lock, h.app.second_lock), (None, None));
     let saved = serde_json::to_string(&h.app.doc).unwrap();
     let restored: Document = serde_json::from_str(&saved).unwrap();
     assert_eq!(restored.model.dimensions, h.app.doc.model.dimensions);

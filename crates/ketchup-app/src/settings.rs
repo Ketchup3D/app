@@ -17,12 +17,13 @@ pub(super) enum Section {
     SurfaceTreatment,
     Diagnostics,
     Rendering,
+    Tools,
 }
 
 impl Section {
     const GROUPS: [(&'static str, &'static [Self]); 4] = [
         ("Workspace", &[Self::Units, Self::Grid, Self::Colors]),
-        ("Controls", &[Self::Navigation, Self::Shortcuts]),
+        ("Controls", &[Self::Navigation, Self::Shortcuts, Self::Tools]),
         (
             "Materials & estimates",
             &[Self::StockPricing, Self::SurfaceTreatment],
@@ -30,7 +31,7 @@ impl Section {
         ("System", &[Self::Diagnostics, Self::Rendering]),
     ];
     #[cfg(test)]
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Units,
         Self::Navigation,
         Self::Shortcuts,
@@ -40,6 +41,7 @@ impl Section {
         Self::SurfaceTreatment,
         Self::Diagnostics,
         Self::Rendering,
+        Self::Tools,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -52,6 +54,7 @@ impl Section {
             Self::SurfaceTreatment => "Sanding & Finishing",
             Self::Diagnostics => "Diagnostics",
             Self::Rendering => "Rendering",
+            Self::Tools => "Tools",
         }
     }
 
@@ -66,6 +69,7 @@ impl Section {
             Self::SurfaceTreatment => "time_estimates_sanding",
             Self::Diagnostics => "diagnostics",
             Self::Rendering => "settings_colors",
+            Self::Tools => "settings_shortcuts",
         }
     }
 
@@ -138,6 +142,7 @@ pub(super) struct GeneralSettings {
     pub pan_speed: f64,
     pub zoom_speed: f64,
     pub reverse_zoom: bool,
+    pub reset_axis_locks_on_action: bool,
     pub show_fps: bool,
     pub default_units: ketchup_core::UnitSettings,
     pub tool_keys: Vec<String>,
@@ -152,6 +157,7 @@ impl Default for GeneralSettings {
             pan_speed: 1.,
             zoom_speed: 1.,
             reverse_zoom: false,
+            reset_axis_locks_on_action: true,
             show_fps: false,
             default_units: Default::default(),
             stock: Default::default(),
@@ -300,6 +306,7 @@ impl KetchupApp {
                                     Section::SurfaceTreatment => "settings/treatment",
                                     Section::Diagnostics => "settings/diagnostics",
                                     Section::Rendering => "settings/rendering",
+                                    Section::Tools => "settings/tools",
                                 };
                                 let scroll = sidebar::restored_scroll_area(
                                     ui,
@@ -353,6 +360,13 @@ impl KetchupApp {
 
     fn settings_contents(&mut self, ui: &mut egui::Ui) {
         match self.general_settings.section {
+            Section::Tools => {
+                ui.checkbox(
+                    &mut self.general_settings.reset_axis_locks_on_action,
+                    "Reset axis locks on each action",
+                )
+                .on_hover_text("Clear both axis locks after completing an edit or measurement, cancelling, or switching tools. Disable to keep locks until you clear them manually.");
+            }
             Section::Rendering => {
                 ui.checkbox(&mut self.doc.display.shadow_antialiasing, "Shadow antialiasing")
                     .on_hover_text("Smooth shadow boundaries with 4× multisampling. Only shadows are affected. Changes apply immediately.");
