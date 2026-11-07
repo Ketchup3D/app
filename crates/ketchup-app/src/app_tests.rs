@@ -25,6 +25,8 @@ mod feature_audit;
 mod feature_suggestion;
 #[path = "grid_tests.rs"]
 mod grid_snapping;
+#[path = "fit_selection_tests.rs"]
+mod fit_selection;
 #[path = "outliner_drag_tests.rs"]
 mod outliner_drag;
 #[path = "precision_tests.rs"]
@@ -5304,14 +5306,14 @@ fn view_sidebar_buttons_set_projection_and_all_standard_views_without_resizing()
 }
 
 #[test]
-fn generate_menu_opens_cutting_plan_scope_dialog_directly() {
+fn tools_menu_opens_cutting_plan_scope_dialog_directly() {
     let mut h = Harness::new();
     let output = h.frame(vec![], egui::Modifiers::NONE);
     let edit = text_position(&output, "Edit");
-    let generate = text_position(&output, "Generate");
+    let tools = text_position(&output, "Tools");
     let help = text_position(&output, "Help");
-    assert!(edit.x < generate.x && generate.x < help.x);
-    h.click(generate);
+    assert!(edit.x < tools.x && tools.x < help.x);
+    h.click(tools);
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&output, "Prepare cutting plan…"));
     assert_eq!(h.app.project.cutting_plan_selection, Some(false));
@@ -5326,11 +5328,11 @@ fn generate_menu_opens_cutting_plan_scope_dialog_directly() {
 }
 
 #[test]
-fn generate_screenshot_dialog_supports_multiple_views_and_cancels_without_editing() {
+fn tools_screenshot_dialog_supports_multiple_views_and_cancels_without_editing() {
     let mut h = Harness::new();
     let before = h.app.doc.clone();
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(text_position(&output, "Generate"));
+    h.click(text_position(&output, "Tools"));
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&output, "Screenshot"));
     assert!(h.app.screenshot.open);

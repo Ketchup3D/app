@@ -18,6 +18,10 @@ impl Model {
     }
 
     pub fn selection_center(&self, selected: &BTreeSet<u64>) -> Option<DVec3> {
+        self.selection_bounds(selected).map(|(lo, hi)| (lo + hi) * 0.5)
+    }
+
+    pub fn selection_bounds(&self, selected: &BTreeSet<u64>) -> Option<(DVec3, DVec3)> {
         let ids = self.selection_vertices(selected);
         let entities = self.expand_entities(selected);
         let points = ids.iter().map(|id| self.vertices[id].position).chain(
@@ -33,8 +37,7 @@ impl Model {
                 .flat_map(|t| t.layout(self)),
         );
         let first = points.next()?;
-        let (lo, hi) = points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p)));
-        Some((lo + hi) * 0.5)
+        Some(points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p))))
     }
 
     fn transform_selection(

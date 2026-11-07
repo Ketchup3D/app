@@ -729,7 +729,7 @@ impl KetchupApp {
             sidebar::inspector_section(ui, "Wood Joinery", "connections/wood_joinery", true, |ui| {
         ui.text_weak("Create a dynamic relation. Moving either board updates the joint automatically.");
                     let Some(members)=self.joinery_dialog.members else {
-                        ui.text_weak("Select exactly two boards and reopen Wood Joinery from the Edit menu.");return;
+                        ui.text_weak("Select exactly two boards and reopen Wood Joinery from the Tools menu.");return;
                     };
                     self.joint_connections(ui,members);
                     if !self.doc.model.has_joinery_between(members) {

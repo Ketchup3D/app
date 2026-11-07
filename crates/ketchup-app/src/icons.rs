@@ -17,6 +17,7 @@ struct ToolPalette {
     face: Color32,
     metal: Color32,
     warm_face: Color32,
+    paint_fill: Option<Color32>,
 }
 
 impl ToolPalette {
@@ -33,6 +34,7 @@ impl ToolPalette {
                 face: Color32::from_rgb(65, 82, 95),
                 metal: Color32::from_rgb(90, 106, 113),
                 warm_face: Color32::from_rgb(98, 76, 44),
+                paint_fill: None,
             }
         } else {
             Self {
@@ -46,6 +48,7 @@ impl ToolPalette {
                 face: Color32::from_rgb(211, 225, 238),
                 metal: Color32::from_rgb(226, 231, 233),
                 warm_face: Color32::from_rgb(249, 219, 166),
+                paint_fill: None,
             }
         }
     }
@@ -116,9 +119,9 @@ struct IconMeshCache {
 #[derive(Clone, PartialEq)]
 enum IconKind {
     Tool(Tool),
+    PaintBucket(Color32),
     Line(String, Color32),
     Logo,
-    Group(Color32, Color32),
     Face(Color32, Color32),
     Axis(Axis, bool, Color32, Color32),
 }
@@ -139,6 +142,14 @@ pub(crate) fn tool_vectors(p: &egui::Painter, rect: Rect, tool: Tool) {
 pub fn ui_tool(p: &egui::Painter, rect: Rect, tool: Tool) {
     cached_icon(p, rect, IconKind::Tool(tool), |p, rect| {
         tool_vectors(p, rect, tool);
+    });
+}
+
+pub fn paint_bucket(p: &egui::Painter, rect: Rect, color: Color32) {
+    cached_icon(p, rect, IconKind::PaintBucket(color), |p, rect| {
+        let mut colors = ToolPalette::for_painter(p);
+        colors.paint_fill = Some(color);
+        paint_tool(p, rect, Tool::Paint, colors);
     });
 }
 
@@ -215,6 +226,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, colors: ToolPalette) {
         face,
         metal,
         warm_face,
+        paint_fill,
     } = colors;
     let c = rect.center();
     let r = rect.width().min(rect.height()) * 0.36;
@@ -443,7 +455,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, colors: ToolPalette) {
                     bucket(0.48, 0.65),
                     bucket(-0.48, 0.65),
                 ],
-                metal,
+                paint_fill.unwrap_or(metal),
                 stroke,
             ));
             p.add(egui::Shape::convex_polygon(
@@ -453,7 +465,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, colors: ToolPalette) {
                         bucket(0.64 * angle.cos(), -0.48 + 0.16 * angle.sin())
                     })
                     .collect(),
-                blue,
+                paint_fill.unwrap_or(blue),
                 Stroke::new(1.1, blue),
             ));
             p.add(egui::Shape::line(
@@ -471,7 +483,7 @@ fn paint_tool(p: &egui::Painter, rect: Rect, tool: Tool, colors: ToolPalette) {
                     xy(0.78, 0.79),
                     xy(0.84, 0.63),
                 ],
-                blue,
+                paint_fill.unwrap_or(blue),
                 Stroke::NONE,
             ));
         }
@@ -632,56 +644,6 @@ fn paint_axis_lock(
     p.circle_filled(at(8., -1.), 0.8, color);
 }
 
-pub fn group_emphasis(p: &egui::Painter, c: Pos2, solid: Color32, wireframe: Color32) {
-    cached_icon(
-        p,
-        Rect::from_center_size(c, egui::Vec2::splat(32.)),
-        IconKind::Group(solid, wireframe),
-        |p, rect| paint_group_emphasis(p, rect.center(), solid, wireframe),
-    );
-}
-
-fn paint_group_emphasis(p: &egui::Painter, c: Pos2, solid: Color32, wireframe: Color32) {
-    // Keep the surrounding cubes hollow; only the edited object has shaded faces.
-    let cube = |center: Pos2, radius: f32, filled: bool| {
-        let at = |x: f32, y: f32| center + egui::vec2(x, y) * radius;
-        let color = if filled { solid } else { wireframe };
-        let stroke = Stroke::new(if filled { 1.4 } else { 1.1 }, color);
-        if filled {
-            for (face, shade) in [
-                ([(0., -1.), (1., -0.5), (0., 0.), (-1., -0.5)], 0.25),
-                ([(-1., -0.5), (0., 0.), (0., 1.), (-1., 0.5)], 0.5),
-                ([(0., 0.), (1., -0.5), (1., 0.5), (0., 1.)], 0.8),
-            ] {
-                p.add(egui::Shape::convex_polygon(
-                    face.map(|(x, y)| at(x, y)).to_vec(),
-                    solid.gamma_multiply(shade),
-                    Stroke::NONE,
-                ));
-            }
-        }
-        p.add(egui::Shape::closed_line(
-            [
-                (0., -1.),
-                (1., -0.5),
-                (1., 0.5),
-                (0., 1.),
-                (-1., 0.5),
-                (-1., -0.5),
-            ]
-            .map(|(x, y)| at(x, y))
-            .to_vec(),
-            stroke,
-        ));
-        for (x, y) in [(-1., -0.5), (1., -0.5), (0., 1.)] {
-            p.line_segment([center, at(x, y)], stroke);
-        }
-    };
-    cube(c + egui::vec2(-7., -5.), 3.5, false);
-    cube(c + egui::vec2(7., -5.), 3.5, false);
-    cube(c + egui::vec2(0., 4.), 5.5, true);
-}
-
 pub fn face_icon(p: &egui::Painter, c: Pos2, fill: Color32, outline: Color32) {
     cached_icon(
         p,
@@ -715,12 +677,43 @@ pub(super) fn section_icon(id: &str) -> &str {
 }
 
 pub fn line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
+    sized_line_icon(p, c, kind, color, 32.);
+}
+
+/// Compact, action-colored icons shared by the main menu and context menus.
+pub fn menu_icon(p: &egui::Painter, c: Pos2, kind: &str) {
+    let colors = ToolPalette::for_painter(p);
+    let color = match kind {
+        "cut" | "delete" | "close" => colors.red,
+        "new" | "save" | "paste" | "import" | "unlock" | "clean_aligned" => {
+            crate::theme::Palette::for_painter(p).green
+        }
+        "open" | "group" | "lock" | "dimension" | "connections/wood_joinery" => colors.gold,
+        "component" | "share" | "sections" => colors.pink_edge,
+        "rename" | "text" | "connections/fasteners" => colors.outline,
+        _ => colors.blue,
+    };
+    sized_line_icon(p, c, kind, color, 26.);
+}
+
+fn sized_line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32, size: f32) {
     let kind = section_icon(kind);
     cached_icon(
         p,
-        Rect::from_center_size(c, egui::Vec2::splat(32.)),
+        Rect::from_center_size(c, egui::Vec2::splat(size)),
         IconKind::Line(kind.to_owned(), color),
-        |p, rect| paint_line_icon(p, rect.center(), kind, color),
+        |p, rect| {
+            paint_line_icon(p, rect.center(), kind, color);
+            if size != 32. {
+                // The cache gives each icon its own vector layer. Scale before
+                // tessellation to keep the geometry and strokes crisp together.
+                let scale = size / 32.;
+                p.ctx().transform_layer_shapes(
+                    p.layer_id(),
+                    egui::emath::TSTransform::new(rect.center().to_vec2() * (1. - scale), scale),
+                );
+            }
+        },
     );
 }
 
@@ -731,7 +724,131 @@ pub(crate) fn line_icon_vectors(p: &egui::Painter, c: Pos2, kind: &str, color: C
 
 fn paint_line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
     let s = Stroke::new(1.5, color);
+    let at = |x: f32, y: f32| c + egui::vec2(x, y);
     match kind {
+        "clean_aligned" => {
+            // Aligned endpoints, a redundant middle vertex, and a cleanup sparkle.
+            for (start, end) in [(-5., -2.), (2., 5.)] {
+                p.line_segment([at(start, 5.), at(end, 5.)], s);
+            }
+            for x in [-7., 7.] {
+                p.circle_filled(at(x, 5.), 2., color);
+            }
+            p.circle_stroke(at(0., 5.), 2., s);
+            p.add(egui::Shape::closed_line(
+                vec![
+                    at(2., -8.), at(3., -5.), at(6., -4.), at(3., -3.),
+                    at(2., 0.), at(1., -3.), at(-2., -4.), at(1., -5.),
+                ],
+                s,
+            ));
+        }
+        "new" => {
+            p.add(egui::Shape::closed_line(
+                vec![at(-6., -8.), at(2., -8.), at(6., -4.), at(6., 8.), at(-6., 8.)],
+                s,
+            ));
+            p.add(egui::Shape::line(vec![at(2., -8.), at(2., -4.), at(6., -4.)], s));
+            p.line_segment([at(-3., 2.), at(3., 2.)], s);
+            p.line_segment([at(0., -1.), at(0., 5.)], s);
+        }
+        "open" => {
+            p.add(egui::Shape::line(
+                vec![at(-8., 6.), at(-8., -6.), at(-2., -6.), at(0., -3.), at(7., -3.), at(7., 0.)],
+                s,
+            ));
+            p.add(egui::Shape::closed_line(
+                vec![at(-8., 6.), at(-5., -1.), at(9., -1.), at(6., 6.)],
+                s,
+            ));
+        }
+        "save" => {
+            p.add(egui::Shape::closed_line(
+                vec![at(-7., -8.), at(4., -8.), at(8., -4.), at(8., 8.), at(-7., 8.)],
+                s,
+            ));
+            for (min, max) in [(at(-4., -8.), at(3., -2.)), (at(-4., 2.), at(5., 8.))] {
+                p.rect_stroke(Rect::from_min_max(min, max), 0, s, egui::StrokeKind::Middle);
+            }
+        }
+        "import" | "export" => {
+            p.add(egui::Shape::line(
+                vec![at(-8., 2.), at(-8., 7.), at(8., 7.), at(8., 2.)],
+                s,
+            ));
+            let (tail, tip) = if kind == "import" { (-8., 2.) } else { (2., -8.) };
+            let wing = if kind == "import" { tip - 4. } else { tip + 4. };
+            p.line_segment([at(0., tail), at(0., tip)], s);
+            p.add(egui::Shape::line(vec![at(-4., wing), at(0., tip), at(4., wing)], s));
+        }
+        "cut" => {
+            for x in [-4.5, 4.5] {
+                p.circle_stroke(at(x, 5.), 2.8, s);
+            }
+            p.line_segment([at(-3., 2.5), at(6., -8.)], s);
+            p.line_segment([at(3., 2.5), at(-6., -8.)], s);
+        }
+        "copy" => {
+            p.add(egui::Shape::line(
+                vec![at(-4., 4.), at(-8., 4.), at(-8., -8.), at(3., -8.), at(3., -5.)],
+                s,
+            ));
+            p.rect_stroke(Rect::from_min_max(at(-4., -4.), at(7., 8.)), 1, s, egui::StrokeKind::Middle);
+        }
+        "paste" => {
+            p.add(egui::Shape::line(
+                vec![at(-3., -6.), at(-7., -6.), at(-7., 8.), at(7., 8.), at(7., -6.), at(3., -6.)],
+                s,
+            ));
+            p.rect_stroke(Rect::from_min_max(at(-3., -8.), at(3., -4.)), 1, s, egui::StrokeKind::Middle);
+            for y in [0., 4.] {
+                p.line_segment([at(-3., y), at(3., y)], s);
+            }
+        }
+        "delete" => {
+            p.line_segment([at(-8., -5.), at(8., -5.)], s);
+            p.add(egui::Shape::line(vec![at(-3., -5.), at(-3., -8.), at(3., -8.), at(3., -5.)], s));
+            p.add(egui::Shape::line(vec![at(-6., -5.), at(-5., 8.), at(5., 8.), at(6., -5.)], s));
+            for x in [-2., 2.] {
+                p.line_segment([at(x, -2.), at(x, 5.)], s);
+            }
+        }
+        "rename" => {
+            p.add(egui::Shape::closed_line(
+                vec![at(-7., 7.), at(-6., 2.), at(4., -8.), at(8., -4.), at(-2., 6.)],
+                s,
+            ));
+            p.line_segment([at(1., -5.), at(5., -1.)], s);
+        }
+        "lock" | "unlock" => {
+            p.rect_stroke(Rect::from_min_max(at(-6., -1.), at(6., 8.)), 1, s, egui::StrokeKind::Middle);
+            let right_y = if kind == "unlock" { -4. } else { -1. };
+            p.add(egui::Shape::line(
+                vec![at(-4., -1.), at(-4., -5.), at(-2., -8.), at(2., -8.), at(4., -5.), at(4., right_y)],
+                s,
+            ));
+            p.circle_filled(at(0., 3.), 1.3, color);
+            p.line_segment([at(0., 3.), at(0., 5.)], s);
+        }
+        "screenshot" => {
+            p.add(egui::Shape::closed_line(
+                vec![at(-8., -4.), at(-4., -4.), at(-2., -7.), at(3., -7.), at(5., -4.), at(8., -4.), at(8., 7.), at(-8., 7.)],
+                s,
+            ));
+            p.circle_stroke(at(0., 1.), 3.5, s);
+        }
+        "share" => {
+            for y in [-6., 6.] {
+                p.line_segment([at(-4., 0.), at(4., y)], s);
+                p.circle_stroke(at(6., y), 2.5, s);
+            }
+            p.circle_stroke(at(-6., 0.), 2.5, s);
+        }
+        "info" => {
+            p.circle_stroke(c, 8., s);
+            p.circle_filled(at(0., -4.), 1., color);
+            p.line_segment([at(0., -1.), at(0., 4.)], s);
+        }
         "connections/fasteners" => {
             // Screw head, shaft and thread marks.
             p.line_segment([c + egui::vec2(-6., -7.), c + egui::vec2(6., -7.)], s);
@@ -1275,7 +1392,7 @@ fn paint_line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
             }
             p.circle_filled(c, 2., color);
         }
-        "fit" => {
+        "fit" | "fit_selection" => {
             // Frame a 3D model so this reads as zoom extents, not fullscreen.
             for (x, y) in [(-1., -1.), (1., -1.), (-1., 1.), (1., 1.)] {
                 let corner = c + egui::vec2(x * 8., y * 8.);
@@ -1283,6 +1400,16 @@ fn paint_line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
                 p.line_segment([corner, corner - egui::vec2(0., y * 4.)], s);
             }
             let at = |x: f32, y: f32| c + egui::vec2(x, y);
+            if kind == "fit_selection" {
+                // A simple pointer stays readable inside the framing corners.
+                p.add(egui::Shape::convex_polygon(
+                    vec![at(-3.5, -4.5), at(-3.5, 3.), at(4., 0.)],
+                    color,
+                    Stroke::NONE,
+                ));
+                p.line_segment([at(-1., 0.), at(2., 4.)], Stroke::new(2., color));
+                return;
+            }
             p.add(egui::Shape::closed_line(
                 vec![
                     at(0., -4.5),
@@ -1307,6 +1434,8 @@ fn paint_line_icon(p: &egui::Painter, c: Pos2, kind: &str, color: Color32) {
             }
         }
         "moon" => {
+            // The arcs span -7..0 horizontally; center their visible bounds.
+            let c = c + egui::vec2(3.5, 0.);
             // Separate open arcs avoid long miter spikes at the crescent's tips.
             for width in [7., 4.] {
                 let points = (0..=24)
@@ -1424,7 +1553,6 @@ mod tool_mesh_tests {
         for center in [egui::pos2(20., 20.), egui::pos2(200., 300.)] {
             line_icon(&p, center, "undo", Color32::WHITE);
             logo(&p, Rect::from_center_size(center, egui::Vec2::splat(32.)));
-            group_emphasis(&p, center, Color32::RED, Color32::WHITE);
             face_icon(&p, center, Color32::BLUE, Color32::WHITE);
             axis_lock(&p, center, Axis::X, true, Color32::RED, Color32::GRAY);
         }
@@ -1433,7 +1561,7 @@ mod tool_mesh_tests {
             let cache = data.get_temp_mut_or_default::<IconMeshCache>(egui::Id::unique(
                 "static_icon_mesh_cache",
             ));
-            assert_eq!(cache.entries.len(), 6);
+            assert_eq!(cache.entries.len(), 5);
             assert!(cache.entries.iter().all(|(_, meshes)| !meshes.is_empty()));
         });
     }

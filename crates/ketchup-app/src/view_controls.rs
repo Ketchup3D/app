@@ -52,6 +52,19 @@ impl KetchupApp {
                         dv(self.viewport.size().max(Vec2::splat(1.))),
                     );
                 }
+                ui.add_enabled_ui(!self.selected.is_empty(), |ui| {
+                    if ui
+                        .add_sized(
+                            [button_width, ui.spacing().interact_size.y],
+                            egui::Button::new("Fit selection"),
+                        )
+                        .clicked()
+                    {
+                        self.fit_selection(ui.ctx());
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
                 if ui
                     .add_sized(
                         [button_width, ui.spacing().interact_size.y],
@@ -245,21 +258,16 @@ impl KetchupApp {
             self.paint_color[2],
         );
         let icon = egui::Atom::paint(egui::vec2(18., 18.), |ui, args| {
-            icons::ui_tool(ui.painter(), args.rect, Tool::Paint);
-            ui.painter()
-                .circle_filled(args.rect.right_bottom() - egui::vec2(3., 3.), 4., color);
+            icons::paint_bucket(ui.painter(), args.rect, color);
         });
         let response = ui
             .add(
-                egui::Button::new((
-                    icon,
-                    "Color",
-                    icons::dropdown_atom(colors.muted),
-                ))
+                egui::Button::new((icon, icons::dropdown_atom(colors.muted)))
                 .min_size(egui::vec2(0., 32.))
                 .selected(self.tool == Tool::Paint),
             )
             .on_hover_text("Choose how to paint and a paint color");
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Color"));
         egui::Popup::menu(&response)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
@@ -370,24 +378,15 @@ impl KetchupApp {
 
     pub(in crate::app) fn sections_menu(&mut self, ui: &mut egui::Ui) {
         let before = self.doc.display.clone();
-        let colors = Palette::for_ui(ui);
-        let icon = egui::Atom::paint(egui::vec2(18., 18.), |ui, args| {
-            icons::line_icon(ui.painter(), args.rect.center(), "sections", colors.accent);
-        });
-        let response = ui
-            .add(
-                egui::Button::new((
-                    icon,
-                    "Sections",
-                    icons::dropdown_atom(colors.muted),
-                ))
-                .min_size(egui::vec2(0., 32.))
-                .selected(self.doc.display.section_planes || self.doc.display.section_cuts),
+        let button = egui::Button::new((Self::menu_item_icon(ui, Some("sections")), "Sections"))
+            .gap(ui.spacing().icon_spacing)
+            .right_text(egui::menu::SubMenuButton::arrow_atom(None));
+        egui::menu::SubMenuButton::from_button(button)
+            .config(
+                egui::menu::MenuConfig::new()
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
             )
-            .on_hover_text("Configure section planes, cuts, fill, and axis positions");
-        egui::Popup::menu(&response)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
+            .ui(ui, |ui| {
                 Self::menu_style(ui.style_mut());
                 ui.set_width(208.);
                 let d = &mut self.doc.display;
@@ -435,7 +434,9 @@ impl KetchupApp {
                             });
                         }
                     });
-            });
+            })
+            .0
+            .on_hover_text("Configure section planes, cuts, fill, and axis positions");
         if self.doc.display != before {
             self.changed(ui.ctx());
         }

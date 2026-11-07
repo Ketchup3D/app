@@ -901,6 +901,16 @@ impl KetchupApp {
         );
         self.changed(ctx);
     }
+    fn fit_selection(&mut self, ctx: &egui::Context) {
+        let Some(bounds) = self.doc.model.selection_bounds(&self.selected) else {
+            return;
+        };
+        self.doc.camera.fit(
+            Some(bounds),
+            dv(self.viewport.size().max(Vec2::splat(1.))),
+        );
+        self.changed(ctx);
+    }
     fn fit_origin(&mut self, ctx: &egui::Context) {
         self.doc.camera.target = DVec3::ZERO;
         self.changed(ctx);
@@ -2426,7 +2436,21 @@ impl KetchupApp {
                     {
                         crate::system_info::request_issue(&ctx);
                     }
-                    // This row flows right to left, placing the divider left of the button.
+                    ui.scope(|ui| {
+                        // Match the undo/redo buttons despite the AppBar's flat menu style.
+                        ui.visuals_mut().widgets.inactive = ctx.global_style().visuals.widgets.inactive;
+                        let tooltip = if dark { "Switch to light mode" } else { "Switch to dark mode" };
+                        let response = ui.add(
+                            egui::Button::new("").min_size(egui::vec2(32., 32.)).stroke(Stroke::new(1., foreground.gamma_multiply(0.65))),
+                        );
+                        icons::line_icon(ui.painter(), response.rect.center(), if dark { "sun" } else { "moon" }, foreground);
+                        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tooltip));
+                        if response.on_hover_text(tooltip).clicked() {
+                            ctx.set_theme(if dark { egui::Theme::Light } else { egui::Theme::Dark });
+                            ctx.request_repaint();
+                        }
+                    });
+                    // This row flows right to left, placing the divider left of the theme toggle.
                     ui.add(egui::Separator::default().vertical().spacing(16.));
                     let (text, color) = if self.save_error.is_some() {
                         ("Unsaved", Color32::from_rgb(243, 177, 145))
@@ -2481,14 +2505,14 @@ impl KetchupApp {
                         ui.add_space(18.);
                         Self::app_bar_menu(ui, "File", |ui| {
                             ui.visuals_mut().override_text_color = Some(colors.ink);
-                            for (label, modifiers, key, action) in [
-                                ("New project", egui::Modifiers::COMMAND, Key::N, 0),
-                                ("Open…", egui::Modifiers::COMMAND, Key::O, 1),
-                                ("Save", egui::Modifiers::COMMAND, Key::S, 2),
-                                ("Save As…", egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::S, 3),
+                            for (label, icon, modifiers, key, action) in [
+                                ("New project", "new", egui::Modifiers::COMMAND, Key::N, 0),
+                                ("Open…", "open", egui::Modifiers::COMMAND, Key::O, 1),
+                                ("Save", "save", egui::Modifiers::COMMAND, Key::S, 2),
+                                ("Save As…", "save", egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::S, 3),
                             ] {
                                 let shortcut = ctx.format_shortcut(&egui::KeyboardShortcut::new(modifiers, key));
-                                if ui.add(egui::Button::new(label).shortcut_text(shortcut)).clicked() {
+                                if ui.add(Self::menu_item_button(ui, label, Some(icon)).shortcut_text(shortcut)).clicked() {
                                     match action {
                                         0 => self.request_project(projects::Action::New, &ctx),
                                         1 => self.request_project(projects::Action::Open, &ctx),
@@ -2501,28 +2525,28 @@ impl KetchupApp {
                                     self.recent_projects_menu(ui, &ctx);
                                 }
                             }
-                            if self.account.sharing_available() && ui.button(self.share_menu_label()).clicked() { self.start_sharing(&ctx); ui.close(); }
+                            if self.account.sharing_available() && ui.add(Self::menu_item_button(ui, self.share_menu_label(), Some("share"))).clicked() { self.start_sharing(&ctx); ui.close(); }
                             ui.separator();
-                            ui.menu_button("Import", |ui| {
+                            Self::menu_submenu(ui, "Import", None, |ui| {
                                 for (extension, label, help) in [
                                     ("skp", "SketchUp (.skp)…", "Editable groups, holes and solid colors. No textures or annotations."),
                                     ("stl", "STL (.stl; millimetres)…", "ASCII or binary. Geometry only; coordinates interpreted as millimetres, Z up."),
                                     ("obj", "Wavefront OBJ (.obj; metres)…", "Faces and lines, including negative vertex indices. Metres, Z up. No materials, textures or group hierarchy."),
                                     ("dxf", "DXF 2D (.dxf)…", "Text DXF: LINE, straight LWPOLYLINE, ARC and CIRCLE in XY. Curves approximated with up to 96 segments per circle. No blocks, bulges or widths. Declared units; unitless files use millimetres."),
                                 ] {
-                                    if ui.button(label).on_hover_text(help).clicked() && !self.project.blocked() {
+                                    if ui.add(Self::menu_item_button(ui, label, None)).on_hover_text(help).clicked() && !self.project.blocked() {
                                         self.project.import_format = extension.into();
                                         self.import_model(&ctx);
                                         ui.close();
                                     }
                                 }
                             });
-                            ui.menu_button("Export", |ui| {
+                            Self::menu_submenu(ui, "Export", None, |ui| {
                                 for (stl, label, help) in [
                                     (false, "Wavefront OBJ (.obj)…", "Visible edges and triangulated faces in metres, Z up. Geometry only."),
                                     (true, "STL (.stl; millimetres)…", "Binary STL of visible faces in millimetres, Z up. No edges or materials. Ensure solids are closed before printing; no automatic repair."),
                                 ] {
-                                    if ui.button(label).on_hover_text(help).clicked() && !self.project.blocked() {
+                                    if ui.add(Self::menu_item_button(ui, label, None)).on_hover_text(help).clicked() && !self.project.blocked() {
                                         self.project.export_stl = stl;
                                         self.export_model(&ctx);
                                         ui.close();
@@ -2530,14 +2554,14 @@ impl KetchupApp {
                                 }
                             });
                             ui.separator();
-                            if ui.button("Settings…").clicked() {
+                            if ui.add(Self::menu_item_button(ui, "Settings…", Some("settings"))).clicked() {
                                 self.settings_open = true;
                                 ui.close();
                             }
                             #[cfg(not(target_arch = "wasm32"))]
                             {
                                 ui.separator();
-                                if ui.button("Quit").clicked() {
+                                if ui.add(Self::menu_item_button(ui, "Quit", Some("close"))).clicked() {
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                                     ui.close();
                                 }
@@ -2553,7 +2577,7 @@ impl KetchupApp {
                                 let enabled = label.is_some();
                                 let label = label.map(|label| format!("{action} {label}")).unwrap_or_else(|| action.to_owned());
                                 let shortcut = ctx.format_shortcut(&egui::KeyboardShortcut::new(modifiers, Key::Z));
-                                if ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut)).clicked() {
+                                if ui.add_enabled(enabled, Self::menu_item_button(ui, label, Some(if redo { "redo" } else { "undo" })).shortcut_text(shortcut)).clicked() {
                                     self.undo(&ctx, redo);
                                     ui.close();
                                 }
@@ -2566,55 +2590,67 @@ impl KetchupApp {
                             ui.visuals_mut().override_text_color = Some(colors.ink);
                             self.view_menu(ui);
                         });
-                        Self::app_bar_menu(ui, "Generate", |ui| {
+                        Self::app_bar_menu(ui, "Tools", |ui| {
                             ui.visuals_mut().override_text_color = Some(colors.ink);
-                            if ui.add_enabled(!self.project.blocked(), egui::Button::new("Prepare cutting plan…"))
+                            if ui.add_enabled(self.selected_fastener_pair(&ctx).is_some(), Self::menu_item_button(ui, "Wood Joinery", Some("connections/wood_joinery"))).clicked() {
+                                self.context_action(&ctx, context_menu::ContextAction::WoodJoinery);
+                                ui.close();
+                            }
+                            ui.separator();
+                            let editable = !self.selected.is_empty()
+                                && !self.doc.model.selection_protected(&self.selected);
+                            if ui.add_enabled(editable, Self::menu_item_button(ui, "Clean aligned vertices", Some("clean_aligned"))).clicked() {
+                                self.context_action(&ctx, ContextAction::CleanAligned);
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.add_enabled(!self.project.blocked(), Self::menu_item_button(ui, "Prepare cutting plan…", Some("dimension")))
                                 .on_hover_text("Summarize matching parts and export finished cutting dimensions for the selection or whole project.")
                                 .clicked() {
                                 self.prepare_cutting_plan();
                                 ui.close();
                             }
-                            if ui.add_enabled(!self.project.blocked(), egui::Button::new("Screenshot")).clicked() {
+                            if ui.add_enabled(!self.project.blocked(), Self::menu_item_button(ui, "Screenshot", Some("screenshot"))).clicked() {
                                 self.screenshot.open = true;
                                 ui.close();
                             }
                         });
                         Self::app_bar_menu(ui, "Help", |ui| {
                             ui.visuals_mut().override_text_color = Some(colors.ink);
-                            if ui.button("Keyboard shortcuts").clicked() {
+                            if ui.add(Self::menu_item_button(ui, "Keyboard shortcuts", Some("settings_shortcuts"))).clicked() {
                                 self.help = true;
                                 ui.close();
                             }
                             ui.separator();
-                            if ui.button("Report a bug").clicked() {
+                            if ui.add(Self::menu_item_button(ui, "Report a bug", None)).clicked() {
                                 crate::system_info::request_issue(&ctx);
                                 ui.close();
                             }
-                            if ui.button("GitHub").clicked() {
+                            if ui.add(Self::menu_item_button(ui, "GitHub", None)).clicked() {
                                 ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Ketchup3D/app"));
                                 ui.close();
                             }
                             ui.separator();
-                            if ui.button("Download desktop app").clicked() {
+                            if ui.add(Self::menu_item_button(ui, "Download desktop app", Some("import"))).clicked() {
                                 ctx.open_url(egui::OpenUrl::new_tab("https://ketchup3d.github.io/app/"));
                                 ui.close();
                             }
-                            if ui.button("Release notes").clicked() {
+                            if ui.add(Self::menu_item_button(ui, "Release notes", None)).clicked() {
                                 self.release_notes.open();
                                 ui.close();
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            if ui.button("Check for updates…").clicked() {
+                            if ui.add(Self::menu_item_button(ui, "Check for updates…", Some("import"))).clicked() {
                                 self.updates.open = true;
                                 self.updates.check(&ctx, false);
                                 ui.close();
                             }
                             ui.separator();
-                            if ui.button("System information").clicked() {
+                            if ui.add(Self::menu_item_button(ui, "System information", Some("diagnostics"))).clicked() {
                                 crate::system_info::open(&ctx);
                                 ui.close();
                             }
-                            if ui.button("About KetchUp").clicked() {
+                            if ui.add(Self::menu_item_button(ui, "About KetchUp", Some("info"))).clicked() {
                                 self.about = true;
                                 ui.close();
                             }
@@ -5472,36 +5508,6 @@ impl KetchupApp {
                 }
             });
     }
-    fn group_emphasis_button(&mut self, ui: &mut egui::Ui) {
-        let colors = Palette::for_ui(ui);
-        let response = ui.add(
-            egui::Button::new("")
-                .min_size(egui::vec2(32., 32.))
-                .selected(self.doc.display.group_emphasis),
-        );
-        response.widget_info(|| {
-            egui::WidgetInfo::selected(
-                egui::Role::Button,
-                ui.is_enabled(),
-                self.doc.display.group_emphasis,
-                "Emphasize group",
-            )
-        });
-        icons::group_emphasis(
-            ui.painter(),
-            response.rect.center(),
-            if self.doc.display.group_emphasis {
-                colors.accent
-            } else {
-                colors.muted
-            },
-            colors.muted,
-        );
-        if response.on_hover_text("Emphasize group: emphasize the group/component currently being edited and show everything else in muted wireframe. Has no visual effect outside a group/component.").clicked() {
-            self.doc.display.group_emphasis = !self.doc.display.group_emphasis;
-            ui.ctx().request_repaint();
-        }
-    }
     fn compass_center(rect: Rect) -> Option<Pos2> {
         (rect.width() >= 90. * COMPASS_SCALE && rect.height() >= 90. * COMPASS_SCALE)
             .then(|| rect.right_bottom() - egui::vec2(26. + COMPASS_RADIUS, 23. + COMPASS_RADIUS))
@@ -5645,25 +5651,7 @@ impl KetchupApp {
                                     ) {
                                         self.inspector = !self.inspector;
                                     }
-                                    let dark = ctx.theme() == egui::Theme::Dark;
-                                    if Self::icon_button(
-                                        ui,
-                                        if dark { "sun" } else { "moon" },
-                                        if dark {
-                                            "Switch to light mode"
-                                        } else {
-                                            "Switch to dark mode"
-                                        },
-                                        true,
-                                        colors.muted,
-                                    ) {
-                                        ctx.set_theme(if dark {
-                                            egui::Theme::Light
-                                        } else {
-                                            egui::Theme::Dark
-                                        });
-                                        ctx.request_repaint();
-                                    }
+                                    ui.separator();
                                     if Self::icon_button(
                                         ui,
                                         "fit",
@@ -5672,6 +5660,15 @@ impl KetchupApp {
                                         colors.muted,
                                     ) {
                                         self.fit(&ctx);
+                                    }
+                                    if Self::icon_button(
+                                        ui,
+                                        "fit_selection",
+                                        "Fit selection to view",
+                                        !self.selected.is_empty(),
+                                        colors.muted,
+                                    ) {
+                                        self.fit_selection(&ctx);
                                     }
                                     if Self::icon_button(
                                         ui,
@@ -5686,10 +5683,6 @@ impl KetchupApp {
                                     self.drawing_lock_buttons(ui);
                                     ui.separator();
                                     self.snapping_menu(ui);
-                                    self.group_emphasis_button(ui);
-                                    // This row flows right to left: Sections sits left of this separator.
-                                    ui.separator();
-                                    self.sections_menu(ui);
                                     self.paint_menu(ui);
                                     ui.allocate_ui_with_layout(
                                         ui.available_size(),
@@ -5826,12 +5819,12 @@ impl eframe::App for KetchupApp {
             ui.disable();
             ui.set_opacity(opacity);
         }
+        let theme_before = ctx.options(|options| options.theme_preference);
         self.top_bar(ui);
         self.status_bar(ui);
         self.tool_rail(ui);
         let inspector_order_before = self.inspector_order;
         self.inspector_panel(ui);
-        let theme_before = ctx.options(|options| options.theme_preference);
         self.viewport_panel(ui);
         if theme_before != ctx.options(|options| options.theme_preference)
             && let Some(storage) = frame.storage_mut()

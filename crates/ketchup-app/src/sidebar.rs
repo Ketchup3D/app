@@ -4601,6 +4601,15 @@ impl KetchupApp {
         if before != self.doc.display {
             self.changed(ui.ctx());
         }
+        // Group emphasis is an application preference and does not modify the project.
+        if Self::menu_checkbox(ui, &mut self.doc.display.group_emphasis, "Emphasize group")
+            .on_hover_text("Emphasize the group/component currently being edited and show everything else in muted wireframe. Has no visual effect outside a group/component.")
+            .changed()
+        {
+            ui.ctx().request_repaint();
+        }
+        ui.separator();
+        self.sections_menu(ui);
     }
 
     fn display_contents(&mut self, ui: &mut egui::Ui) {

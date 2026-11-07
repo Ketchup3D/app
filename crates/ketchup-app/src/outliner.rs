@@ -1604,7 +1604,7 @@ impl KetchupApp {
                 ui.separator();
                 for (label, open) in [("Expand Children", true), ("Collapse Children", false)] {
                     if ui
-                        .add_enabled(has_children, egui::Button::new(label))
+                        .add_enabled(has_children, Self::menu_item_button(ui, label, None))
                         .clicked()
                     {
                         app.set_outliner_children_open(ui.ctx(), open);

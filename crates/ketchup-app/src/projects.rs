@@ -116,7 +116,7 @@ impl KetchupApp {
     }
 
     pub(super) fn recent_projects_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.menu_button("Recent Projects", |ui| {
+        Self::menu_submenu(ui, "Recent Projects", None, |ui| {
             if self.project.recent.is_empty() { ui.label("No recent projects"); }
             let mut chosen = None;
             let mut remove = None;
@@ -134,7 +134,7 @@ impl KetchupApp {
                     ..Default::default()
                 });
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new(label).wrap()).on_hover_text(detail).clicked() {
+                    if ui.add(Self::menu_item_button(ui, label, None).wrap()).on_hover_text(detail).clicked() {
                         chosen = Some(index);
                     }
                     if ui.small_button("Remove")

@@ -50,7 +50,7 @@
 | Pan | **Hold Shift while orbiting**, including middle-drag |
 | Zoom | Mouse wheel; anchors at the pointer on the camera target plane |
 | Fit all geometry | Fit view button |
-| Emphasize current group/component | Enabled by default. Emphasize group checkbox before the Snap options toggles the group/component currently being edited solid and everything else in muted wireframe, regardless of selection. Has no visual effect outside a group/component |
+| Emphasize current group/component | Enabled by default. View → Emphasize group toggles the group/component currently being edited solid and everything else in muted wireframe, regardless of selection. Has no visual effect outside a group/component |
 | Toggle right sidebar | Tab, or the model inspector button |
 | Ground, sky, and horizon colors | Model inspector → Display → Environment; color pickers, Sky/Ground toggles, and reset colors |
 | Undo | Ctrl/Command Z |

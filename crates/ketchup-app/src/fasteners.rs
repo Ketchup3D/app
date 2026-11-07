@@ -257,7 +257,7 @@ impl KetchupApp {
             "Simpson Strong-Tie technical guides",
             "https://www.strongtie.com/resources/literature/fastening-systems-technical-supplement",
         );
-        ui.text_weak("For cut joints, choose Wood Joinery from the Edit menu. Fasteners do not modify geometry.");
+        ui.text_weak("For cut joints, choose Wood Joinery from the Tools menu. Fasteners do not modify geometry.");
         let connections: Vec<_> = self
             .doc
             .model

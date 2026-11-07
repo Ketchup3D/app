@@ -324,7 +324,9 @@ fn check_option(key: &str, label: &str) {
             let output = h.frame(vec![], egui::Modifiers::NONE);
             menu_text_position(&output, label)
         } else if key.starts_with("section_") {
-            h.click(text_position(&output, "Sections"));
+            h.click(text_position(&output, "View"));
+            let output = h.frame(vec![], egui::Modifiers::NONE);
+            h.click(menu_text_position(&output, "Sections"));
             let output = h.frame(vec![], egui::Modifiers::NONE);
             text_position(&output, label)
         } else {
@@ -382,7 +384,9 @@ fn section_axes_control_plane_visibility() {
     }
     let mut h = options_workspace();
     let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(text_position(&output, "Sections"));
+    h.click(text_position(&output, "View"));
+    let output = h.frame(vec![], egui::Modifiers::NONE);
+    h.click(menu_text_position(&output, "Sections"));
     for (label, axes) in [
         ("Z · horizontal", [false, false, false]),
         ("X · vertical", [true, false, false]),
@@ -637,7 +641,8 @@ fn all_keyboard_tool_shortcuts_select_the_expected_tool() {
     assert!(!h.app.help);
 }
 
-fn tag_control_position(h: &mut Harness, label: &str) -> Pos2 {
+fn accessible_control_position(h: &mut Harness, label: &str) -> Pos2 {
+    h.ctx.enable_accesskit();
     let mut nodes = std::collections::BTreeMap::new();
     for _ in 0..2 {
         let output = h.frame(vec![], egui::Modifiers::NONE);
@@ -648,7 +653,7 @@ fn tag_control_position(h: &mut Harness, label: &str) -> Pos2 {
     let bounds = nodes
         .values()
         .find(|node| node.label() == Some(label))
-        .unwrap_or_else(|| panic!("Missing tag control: {label}"))
+        .unwrap_or_else(|| panic!("Missing accessible control: {label}"))
         .bounds()
         .unwrap();
     Pos2::new(
@@ -918,15 +923,25 @@ color!(color_ground_picker, "ground_color");
 color!(color_horizon_picker, "horizon_color");
 
 #[test]
-fn appearance_is_visible_for_selection_without_paint_and_paint_menu_precedes_sections() {
+fn appearance_is_visible_for_selection_and_icon_only_paint_menu_precedes_snapping() {
     let mut h = Harness::new();
     let face = modeling_rectangle(&mut h);
     h.app.selected.insert(face);
     let output = h.frame(vec![], egui::Modifiers::NONE);
     assert_ne!(h.app.tool, Tool::Paint);
     sidebar_position(&h, &output, "Appearance");
-    assert!(text_position(&output, "Color").x < text_position(&output, "Sections").x);
-    h.click(text_position(&output, "Color"));
+    let color = accessible_control_position(&mut h, "Color");
+    let snapping = accessible_control_position(&mut h, "Snapping");
+    assert!(color.x < snapping.x);
+    fn has_color_label(shape: &egui::Shape) -> bool {
+        match shape {
+            egui::Shape::Text(text) => text.galley.job.text == "Color",
+            egui::Shape::Vec(shapes) => shapes.iter().any(has_color_label),
+            _ => false,
+        }
+    }
+    assert!(!output.shapes.iter().any(|shape| has_color_label(&shape.shape)));
+    h.click(color);
     let output = h.frame(vec![], egui::Modifiers::NONE);
     text_position(&output, "Face");
     text_position(&output, "Group");
@@ -970,8 +985,8 @@ fn paint_target_buttons_apply_to_a_face_or_whole_group_with_one_undo_step() {
     h.click(at);
     assert_eq!(h.app.doc.model.face_colors.len(), 1);
     h.app.undo(&h.ctx, false);
-    let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(text_position(&output, "Color"));
+    let color_menu = accessible_control_position(&mut h, "Color");
+    h.click(color_menu);
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&output, "Group"));
     h.key(Key::Escape);
@@ -994,8 +1009,8 @@ fn paint_target_buttons_apply_to_a_face_or_whole_group_with_one_undo_step() {
     assert!(h.app.doc.model.face_colors.is_empty());
     h.app.undo(&h.ctx, true);
     assert_eq!(h.app.doc.model, painted);
-    let output = h.frame(vec![], egui::Modifiers::NONE);
-    h.click(text_position(&output, "Color"));
+    let color_menu = accessible_control_position(&mut h, "Color");
+    h.click(color_menu);
     let output = h.frame(vec![], egui::Modifiers::NONE);
     h.click(text_position(&output, "Face"));
     h.key(Key::Escape);
@@ -1033,8 +1048,8 @@ fn all_paint_swatches_apply_the_selected_color_to_a_face() {
         [148, 101, 65],
         [78, 84, 81],
     ] {
-        let output = h.frame(vec![], egui::Modifiers::NONE);
-        h.click(text_position(&output, "Color"));
+        let color_menu = accessible_control_position(&mut h, "Color");
+        h.click(color_menu);
         let output = h.frame(vec![], egui::Modifiers::NONE);
         let below = menu_text_position(&output, "Choose color").y + 10.;
         h.click(color_button_position(&h, &output, rgb, below));
@@ -1096,7 +1111,7 @@ fn tag_assignment_and_removal_work_through_the_membership_checkbox() {
     let edge = h.app.doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
     let tag = h.app.doc.model.add_tag("Structure").unwrap();
     h.app.selected.insert(edge);
-    let position = tag_control_position(&mut h, "Assign: Structure");
+    let position = accessible_control_position(&mut h, "Assign: Structure");
     h.click(position);
     assert_eq!(h.app.doc.model.entity_tags[&edge], tag);
     assert!(h.app.doc.model.tags[&tag].visible);

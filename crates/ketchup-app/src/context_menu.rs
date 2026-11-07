@@ -191,6 +191,38 @@ impl KetchupApp {
         style.spacing.item_spacing.y = 2.;
         style.spacing.interact_size.y = 24.;
         style.spacing.button_padding = egui::vec2(8., 3.);
+        style.spacing.icon_width = 18.;
+        style.spacing.icon_spacing = 10.;
+    }
+
+    pub(super) fn menu_item_icon(ui: &egui::Ui, icon: Option<&'static str>) -> egui::Atom<'static> {
+        egui::Atom::paint(egui::Vec2::splat(ui.spacing().icon_width), move |ui, args| {
+            if let Some(icon) = icon {
+                icons::menu_icon(ui.painter(), args.rect.center(), icon);
+            }
+        })
+    }
+
+    pub(super) fn menu_item_button(
+        ui: &egui::Ui,
+        label: impl Into<egui::WidgetText>,
+        icon: Option<&'static str>,
+    ) -> egui::Button<'static> {
+        egui::Button::new((Self::menu_item_icon(ui, icon), label.into()))
+            .gap(ui.spacing().icon_spacing)
+    }
+
+    pub(super) fn menu_submenu(
+        ui: &mut egui::Ui,
+        label: &str,
+        icon: Option<&'static str>,
+        content: impl FnOnce(&mut egui::Ui),
+    ) {
+        egui::menu::SubMenuButton::from_button(
+            Self::menu_item_button(ui, label, icon)
+                .right_text(egui::menu::SubMenuButton::arrow_atom(None)),
+        )
+        .ui(ui, content);
     }
 
     pub(super) fn menu_checkbox(
@@ -268,7 +300,26 @@ impl KetchupApp {
                 ContextAction::Delete => Some((egui::Modifiers::NONE, Key::Delete)),
                 _ => None,
             };
-            let mut button = egui::Button::new(label);
+            let icon = match command {
+                ContextAction::Rename => None,
+                ContextAction::EditObject => (!groups).then_some("rename"),
+                ContextAction::EditText => Some("text"),
+                ContextAction::CloseContext => Some("close"),
+                ContextAction::Group => Some("group"),
+                ContextAction::Component => Some("component"),
+                ContextAction::AutomaticFasteners => Some("connections/fasteners"),
+                ContextAction::WoodJoinery => Some("connections/wood_joinery"),
+                ContextAction::Cut => Some("cut"),
+                ContextAction::Copy | ContextAction::Duplicate => Some("copy"),
+                ContextAction::Paste | ContextAction::PasteInPlace => Some("paste"),
+                ContextAction::Delete => Some("delete"),
+                ContextAction::Hide => Some("eye_closed"),
+                ContextAction::Unhide => Some("eye"),
+                ContextAction::Lock => Some("lock"),
+                ContextAction::Unlock => Some("unlock"),
+                ContextAction::Ungroup | ContextAction::Explode | ContextAction::CleanAligned => None,
+            };
+            let mut button = Self::menu_item_button(ui, label, icon);
             if let Some((modifiers, key)) = shortcut {
                 button = button.shortcut_text(
                     ui.ctx()
@@ -323,17 +374,14 @@ impl KetchupApp {
         item(ui, "Ungroup", editable && groups, ContextAction::Ungroup);
         item(ui, "Explode", editable && objects, ContextAction::Explode);
         ui.separator();
-        // Shared assembly actions appear together in Edit, viewport and Outliner menus.
-        let pair_editable = self.selected_fastener_pair(ui.ctx()).is_some();
-        item(ui, "Wood Joinery", pair_editable, ContextAction::WoodJoinery);
         if fasteners::AVAILABLE {
+            let pair_editable = self.selected_fastener_pair(ui.ctx()).is_some();
             item(ui, "Automatic Fasteners", pair_editable, ContextAction::AutomaticFasteners);
+            ui.separator();
         }
-        ui.separator();
         item(ui, "Cut", editable, ContextAction::Cut);
         item(ui, "Copy", selected, ContextAction::Copy);
         item(ui, "Duplicate", editable, ContextAction::Duplicate);
-        item(ui, "Clean aligned vertices", editable, ContextAction::CleanAligned);
         item(ui, "Paste", self.clipboard.is_some(), ContextAction::Paste);
         item(
             ui,

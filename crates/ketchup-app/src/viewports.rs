@@ -553,12 +553,12 @@ impl KetchupApp {
                         if response.drag_started() { self.viewports.dragging = Some(*tab); }
                         response.context_menu(|ui| {
                             Self::menu_style(ui.style_mut());
-                            if ui.add_enabled(self.gesture.is_none(), egui::Button::new("Rename…")).clicked() {
+                            if ui.add_enabled(self.gesture.is_none(), Self::menu_item_button(ui, "Rename…", None)).clicked() {
                                 self.viewports.renaming = Some((*tab, self.viewports.name(*tab)));
                                 Self::request_name_input_focus(ui.ctx(), egui::Id::unique("rename_viewport_name"));
                                 ui.close();
                             }
-                            if ui.add_enabled(tabs.len() > 1 && self.gesture.is_none(), egui::Button::new("Close")).clicked() {
+                            if ui.add_enabled(tabs.len() > 1 && self.gesture.is_none(), Self::menu_item_button(ui, "Close", Some("close"))).clicked() {
                                 close = Some(*tab);
                                 ui.close();
                             }
