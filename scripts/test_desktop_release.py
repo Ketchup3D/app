@@ -97,7 +97,7 @@ class DesktopReleaseTests(unittest.TestCase):
             check=True, capture_output=True, text=True,
         )
         self.assertEqual(result.stdout, release.format_notes(catalog[0]))
-        self.assertIn(f"# KetchUp {self.current}", result.stdout)
+        self.assertIn(f"# KetchUp3D {self.current}", result.stdout)
         for section in catalog[0]["sections"]:
             self.assertIn(f"## {section['title']}", result.stdout)
             for change in section["changes"]:

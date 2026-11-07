@@ -1,4 +1,4 @@
-# KetchUp documentation
+# KetchUp3D documentation
 
 Guides for using the desktop and browser editor.
 

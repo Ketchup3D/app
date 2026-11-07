@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Register a built KetchUp executable and its icons with the current Linux desktop."""
+"""Register a built KetchUp3D executable and its icons with the current Linux desktop."""
 import argparse
 import os
 from pathlib import Path
@@ -30,7 +30,7 @@ def main():
         parser.error("desktop integration is only supported on Linux")
     executable = args.executable.expanduser().resolve()
     if not executable.is_file() or not os.access(executable, os.X_OK):
-        parser.error(f"not an executable: {executable}; compile KetchUp first")
+        parser.error(f"not an executable: {executable}; compile KetchUp3D first")
     if any(char in str(executable) for char in '\n\r\t'):
         parser.error("executable paths cannot contain newlines or tabs")
     if '%' in str(executable):
@@ -70,7 +70,7 @@ def main():
             subprocess.run([program, *arguments], check=True)
     print(f"Installed launcher: {desktop}")
     print(f"Executable: {executable}")
-    print("Restart KetchUp after compiling the application-ID change.")
+    print("Restart KetchUp3D after compiling the application-ID change.")
 
 
 if __name__ == "__main__":

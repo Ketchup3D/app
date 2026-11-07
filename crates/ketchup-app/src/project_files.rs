@@ -18,8 +18,26 @@ pub enum Outcome {
 }
 pub type Pending = mpsc::Receiver<Result<Outcome, String>>;
 
+const DEFAULT_PROJECT_EXTENSION: &str = "k3d";
+const PROJECT_EXTENSIONS: &[&str] = &[DEFAULT_PROJECT_EXTENSION, "ketchup"];
+
 pub fn file_name(name: &str) -> String {
-    exchange_name(name, "ketchup")
+    let name = portable_name(name);
+    if has_project_extension(std::path::Path::new(&name)) {
+        name
+    } else {
+        format!("{name}.{DEFAULT_PROJECT_EXTENSION}")
+    }
+}
+
+fn has_project_extension(path: &std::path::Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        PROJECT_EXTENSIONS.iter().any(|supported| {
+            extension
+                .as_encoded_bytes()
+                .eq_ignore_ascii_case(supported.as_bytes())
+        })
+    })
 }
 
 pub fn set_document_name(doc: &mut Document, path: &std::path::Path) {
@@ -31,7 +49,7 @@ pub fn set_document_name(doc: &mut Document, path: &std::path::Path) {
     }
 }
 
-fn exchange_name(name: &str, extension: &str) -> String {
+fn portable_name(name: &str) -> String {
     let name: String = name
         .trim()
         .chars()
@@ -44,16 +62,21 @@ fn exchange_name(name: &str, extension: &str) -> String {
         })
         .collect();
     let name = name.trim_matches([' ', '.']);
-    let name = if name.is_empty() {
+    if name.is_empty() {
         "Untitled model"
     } else {
         name
-    };
+    }
+    .to_owned()
+}
+
+fn exchange_name(name: &str, extension: &str) -> String {
+    let name = portable_name(name);
     if name
         .to_ascii_lowercase()
         .ends_with(&format!(".{extension}"))
     {
-        name.to_owned()
+        name
     } else {
         format!("{name}.{extension}")
     }
@@ -82,8 +105,8 @@ fn run(
 pub fn open(ctx: &eframe::egui::Context) -> Pending {
     run(ctx, || {
         let Some(path) = rfd::FileDialog::new()
-            .set_title("Open KetchUp project")
-            .add_filter("KetchUp project", &["ketchup"])
+            .set_title("Open KetchUp3D project")
+            .add_filter("KetchUp3D project", PROJECT_EXTENSIONS)
             .pick_file()
         else {
             return Ok(Outcome::Cancelled);
@@ -141,14 +164,14 @@ pub fn save(
             path
         } else {
             let Some(path) = rfd::FileDialog::new()
-                .set_title("Save KetchUp project as")
-                .add_filter("KetchUp project", &["ketchup"])
+                .set_title("Save KetchUp3D project as")
+                .add_filter("KetchUp3D project", PROJECT_EXTENSIONS)
                 .set_file_name(file_name(&name))
                 .save_file()
             else {
                 return Ok(Outcome::Cancelled);
             };
-            ketchup_path(path)?
+            project_path(path)?
         };
         write(&path, contents.as_bytes())?;
         Ok(Outcome::Saved(Some(path)))
@@ -156,8 +179,12 @@ pub fn save(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn ketchup_path(path: PathBuf) -> Result<PathBuf, String> {
-    extension_path(path, "ketchup")
+fn project_path(path: PathBuf) -> Result<PathBuf, String> {
+    if has_project_extension(&path) {
+        Ok(path)
+    } else {
+        extension_path(path, DEFAULT_PROJECT_EXTENSION)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -187,7 +214,7 @@ pub fn open(ctx: &eframe::egui::Context) -> Pending {
     let ctx = ctx.clone();
     wasm_bindgen_futures::spawn_local(async move {
         let result = if let Some(file) = rfd::AsyncFileDialog::new()
-            .add_filter("KetchUp project", &["ketchup"])
+            .add_filter("KetchUp3D project", PROJECT_EXTENSIONS)
             .pick_file()
             .await
         {
@@ -213,12 +240,17 @@ pub fn open(ctx: &eframe::egui::Context) -> Pending {
 #[cfg(target_arch = "wasm32")]
 pub fn save(
     ctx: &eframe::egui::Context,
-    _path: Option<PathBuf>,
+    path: Option<PathBuf>,
     name: String,
     contents: String,
 ) -> Pending {
     let (sender, receiver) = mpsc::channel();
-    let name = file_name(&name);
+    let name = file_name(
+        path.as_deref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or(&name),
+    );
     let launch = js_sys::Function::new_with_args("name, contents", include_str!("project_save.js"));
     // Open the picker before spawning the async task, while the save action
     // still has the browser's user activation.
@@ -340,7 +372,7 @@ fn open_pdf(contents: &[u8]) -> Result<(), eframe::wasm_bindgen::JsValue> {
             match result {
                 Err(error) => Err(error),
                 _ => Err(JsValue::from_str(
-                    "Allow pop-ups for KetchUp, then generate the PDF again.",
+                    "Allow pop-ups for KetchUp3D, then generate the PDF again.",
                 )),
             }
         }

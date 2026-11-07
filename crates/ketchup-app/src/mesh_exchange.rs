@@ -405,7 +405,7 @@ fn dxf(text: &str) -> Result<Mesh, String> {
 /// STL has no unit metadata: write millimetres, matching our import convention.
 pub fn export_stl(model: &Model) -> Result<Vec<u8>, String> {
     let mut out = vec![0u8; 84];
-    let header = b"KetchUp STL; units: millimetres";
+    let header = b"KetchUp3D STL; units: millimetres";
     out[..header.len()].copy_from_slice(header);
     let mut count = 0u32;
     for face in model.faces.values().filter(|f| !model.is_hidden(f.id)) {

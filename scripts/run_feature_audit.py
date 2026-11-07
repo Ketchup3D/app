@@ -157,7 +157,7 @@ def main():
               "tool_cpu": tool_times, "display_cpu_ms": display_times,
               "gpu_comparisons": comparisons, "limitations": limitations}
     (OUT / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-    lines = ["KetchUp feature audit", report["timestamp_utc"], report["platform"],
+    lines = ["KetchUp3D feature audit", report["timestamp_utc"], report["platform"],
              f"Automated checks: {'PASS' if passed else 'FAIL / INCOMPLETE'}",
              f"Rust tests: {sum(s == 'ok' for s in results.values())} passed / {len(results)} recorded",
              f"Worker tests: {len(worker_results)} passed", "", "Feature evidence:"]

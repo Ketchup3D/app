@@ -54,7 +54,7 @@ fn issue_url(report: &str) -> String {
 
 fn collect(ctx: &egui::Context, frame: &eframe::Frame) -> String {
     let mut text = format!(
-        "KetchUp {}\nBuild: {}\n",
+        "KetchUp3D {}\nBuild: {}\n",
         env!("CARGO_PKG_VERSION"),
         if cfg!(debug_assertions) {
             "Debug"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate KetchUp's vector mark, platform icons, and egui geometry.
+"""Regenerate KetchUp3D's vector mark, platform icons, and egui geometry.
 
 Requires Pillow: python3 -m pip install Pillow
 Run from any directory: python3 scripts/generate_branding.py
@@ -67,7 +67,7 @@ def svg(square=True):
                          ' '.join(f'{x},{y}' for x, y in points) + '"/>'
                          for color, points in paths)
     return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">\n'
-            '  <title id="title">KetchUp</title>\n' + background + polygons + '\n</svg>\n')
+            '  <title id="title">KetchUp3D</title>\n' + background + polygons + '\n</svg>\n')
 
 
 def raster(size, rounded=True, padding=0):

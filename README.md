@@ -1,8 +1,8 @@
-# KetchUp
+# KetchUp3D
 
-![KetchUp editor screenshot](assets/screenshots/ketchup.jpg?v=0.6.5-r2)
+![KetchUp3D editor screenshot](assets/screenshots/ketchup.jpg?v=0.6.5-r2)
 
-[![Try KetchUp in your browser](https://img.shields.io/badge/Try_KetchUp_in_your_browser-d63b32?style=for-the-badge)](https://ketchup3d.github.io/app/play/)
+[![Try KetchUp3D in your browser](https://img.shields.io/badge/Try_KetchUp3D_in_your_browser-d63b32?style=for-the-badge)](https://ketchup3d.github.io/app/play/)
 
 ## Download for desktop
 
@@ -13,12 +13,12 @@
 
 A small 3D edge and face editor written in Rust. The same editor runs as a native Windows, macOS, or Linux application and in a desktop browser through WebAssembly.
 
-The workspace includes Select, Line, Rectangle, Circle, Polygon, Freehand, Push/Pull, Scale, Offset, Move, Rotate, Paint, Tape Measure, Protractor, Dimensions, a Union flyout, Erase, and Orbit, automatic geometry snapping, filled planar faces, measured lines, full-enclosure box selection, groups and components, a right-click object menu, geometry clipboard, undo/redo, local autosave, and portable `.ketchup` project files. It starts with an empty model. File → Import/Export adds SketchUp `.skp` import and Wavefront `.obj` export. Mobile and cloud storage are outside this version.
+The workspace includes Select, Line, Rectangle, Circle, Polygon, Freehand, Push/Pull, Scale, Offset, Move, Rotate, Paint, Tape Measure, Protractor, Dimensions, a Union flyout, Erase, and Orbit, automatic geometry snapping, filled planar faces, measured lines, full-enclosure box selection, groups and components, a right-click object menu, geometry clipboard, undo/redo, local autosave, and portable `.k3d` project files, with support for legacy `.ketchup` projects. It starts with an empty model. File → Import/Export adds SketchUp `.skp` import and Wavefront `.obj` export. Mobile and cloud storage are outside this version.
 
 ## Documentation
 
 This README covers developer installation, building, verification, and deployment.
-For instructions on using KetchUp, see the [user documentation](docs/README.md).
+For instructions on using KetchUp3D, see the [user documentation](docs/README.md).
 
 ## Prerequisites
 
@@ -41,7 +41,7 @@ On Linux, register the application launcher and icons once after compiling:
 python3 scripts/install_linux_desktop.py
 ```
 
-This installs into your user data directory (`$XDG_DATA_HOME`, or `~/.local/share`) without root access. GNOME on Wayland uses the application's ID and matching desktop entry to find its icon. Restart KetchUp after installing. The launcher points to `target/debug/ketchup-app`, so later development compilations update the same executable. For a release installation, pass its path: `python3 scripts/install_linux_desktop.py target/release/ketchup-app`. Keep that executable in place, or rerun the installer with its new path if you move it.
+This installs into your user data directory (`$XDG_DATA_HOME`, or `~/.local/share`) without root access. GNOME on Wayland uses the application's ID and matching desktop entry to find its icon. Restart KetchUp3D after installing. The launcher points to `target/debug/ketchup-app`, so later development compilations update the same executable. For a release installation, pass its path: `python3 scripts/install_linux_desktop.py target/release/ketchup-app`. Keep that executable in place, or rerun the installer with its new path if you move it.
 
 ## Run in a browser
 
@@ -196,7 +196,7 @@ To enable publishing for `Ketchup3D/app`:
 
 All local page and editor asset links are relative, so the same package supports
 the repository path or a custom domain. GitHub Pages supplies HTTPS. The editor
-uses browser-local autosave; visitors should download `.ketchup` projects they
+uses browser-local autosave; visitors should download `.k3d` projects they
 want to keep. GitHub Pages is not cloud model storage.
 
 The landing page includes a canonical URL, Open Graph image metadata, and a
@@ -289,7 +289,7 @@ The viewport uses depth-tested filled triangles and antialiased triangle strips 
 
 ### Account server
 
-Google login and account sessions are provided by the separate Ketchup Server
+Google login and account sessions are provided by the separate KetchUp3D Server
 repository at `/home/dcoulombe/dev/ketchup-server`. See its `README.md` for OAuth
 configuration and startup instructions.
 

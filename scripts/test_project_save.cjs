@@ -15,11 +15,11 @@ test('save prompts immediately and reports the chosen name only after committing
     const window = {
         showSaveFilePicker(options) {
             events.push('picker');
-            assert.equal(options.suggestedName, 'House.ketchup');
+            assert.equal(options.suggestedName, 'House.k3d');
             assert.equal(options.id, 'ketchup-project-save');
-            assert.deepEqual(options.types[0].accept, {'application/json': ['.ketchup']});
+            assert.deepEqual(options.types[0].accept, {'application/json': ['.k3d', '.ketchup']});
             return Promise.resolve({
-                name: 'New house.ketchup',
+                name: 'New house.k3d',
                 async createWritable() {
                     events.push('create');
                     return {
@@ -34,7 +34,7 @@ test('save prompts immediately and reports the chosen name only after committing
             });
         },
     };
-    const pending = save(window, 'House.ketchup', '{"name":"House"}');
+    const pending = save(window, 'House.k3d', '{"name":"House"}');
     assert.deepEqual(events, ['picker'], 'Open within the user action, before yielding');
     let completed = false;
     pending.then(() => { completed = true; });
@@ -42,17 +42,17 @@ test('save prompts immediately and reports the chosen name only after committing
     assert.deepEqual(events, ['picker', 'create', 'write', 'close']);
     assert.equal(completed, false, 'Do not mark saved before close finishes');
     finishClose();
-    assert.equal(await pending, 'New house.ketchup');
+    assert.equal(await pending, 'New house.k3d');
 });
 
 test('unsupported browsers request the existing download fallback synchronously', () => {
-    assert.equal(save({}, 'House.ketchup', '{}'), null);
+    assert.equal(save({}, 'House.k3d', '{}'), null);
 });
 
 test('cancelling the picker completes as cancellation instead of requesting a download', async () => {
     const pending = save({
         async showSaveFilePicker() { throw {name: 'AbortError'}; },
-    }, 'House.ketchup', '{}');
+    }, 'House.k3d', '{}');
     assert(pending instanceof Promise, 'An opened picker owns completion; never fall back');
     assert.equal(await pending, null);
 });
@@ -65,7 +65,7 @@ test('picker and permission failures propagate instead of requesting a download'
                 if (synchronous) throw error;
                 return Promise.reject(error);
             },
-        }, 'House.ketchup', '{}');
+        }, 'House.k3d', '{}');
         await assert.rejects(pending, candidate => candidate === error);
     }
     const error = new Error('File is read-only');
@@ -73,7 +73,7 @@ test('picker and permission failures propagate instead of requesting a download'
         async showSaveFilePicker() {
             return {async createWritable() { throw error; }};
         },
-    }, 'House.ketchup', '{}'), candidate => candidate === error);
+    }, 'House.k3d', '{}'), candidate => candidate === error);
 });
 
 test('write and commit failures abort the stream and never report success', async () => {
@@ -84,7 +84,7 @@ test('write and commit failures abort the stream and never report success', asyn
         const pending = save({
             async showSaveFilePicker() {
                 return {
-                    name: 'House.ketchup',
+                    name: 'House.k3d',
                     async createWritable() {
                         return Object.fromEntries(['write', 'close', 'abort'].map(action => [
                             action, async () => {
@@ -96,8 +96,33 @@ test('write and commit failures abort the stream and never report success', asyn
                     },
                 };
             },
-        }, 'House.ketchup', '{}');
+        }, 'House.k3d', '{}');
         await assert.rejects(pending, candidate => candidate === error);
         assert.deepEqual(events, failure === 'write' ? ['write', 'abort'] : ['write', 'close', 'abort']);
+    }
+});
+
+test('saving to either supported extension reports the chosen name unchanged', async () => {
+    for (const chosenName of ['House.k3d', 'House.K3D', 'House.ketchup', 'House.KETCHUP']) {
+        const events = [];
+        const result = await save({
+            async showSaveFilePicker(options) {
+                assert.equal(options.suggestedName, 'House.k3d');
+                assert.deepEqual(options.types[0].accept, {'application/json': ['.k3d', '.ketchup']});
+                assert.equal(options.id, 'ketchup-project-save');
+                return {
+                    name: chosenName,
+                    async createWritable() {
+                        return {
+                            async write(contents) { events.push(contents); },
+                            async close() { events.push('committed'); },
+                            async abort() { assert.fail('Successful save must commit'); },
+                        };
+                    },
+                };
+            },
+        }, 'House.k3d', '{"name":"House"}');
+        assert.equal(result, chosenName);
+        assert.deepEqual(events, ['{"name":"House"}', 'committed']);
     }
 });

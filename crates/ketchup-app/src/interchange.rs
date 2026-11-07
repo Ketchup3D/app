@@ -101,11 +101,11 @@ fn js_error(error: eframe::wasm_bindgen::JsValue) -> String {
         .unwrap_or_else(|| "SketchUp reader failed".into())
 }
 
-/// OBJ uses metre coordinates with KetchUp's Z-up convention. Triangulating
+/// OBJ uses metre coordinates with KetchUp3D's Z-up convention. Triangulating
 /// faces keeps holes intact even in readers without polygon-hole support.
 pub fn export_obj(model: &Model) -> Result<String, String> {
     use std::{collections::BTreeMap, fmt::Write};
-    let mut out = String::from("# KetchUp OBJ export\n# Units: metres; Z up\n");
+    let mut out = String::from("# KetchUp3D OBJ export\n# Units: metres; Z up\n");
     let visible_vertices: std::collections::BTreeSet<_> = model
         .edges
         .values()

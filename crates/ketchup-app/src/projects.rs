@@ -534,7 +534,7 @@ impl KetchupApp {
                 });
                 modal.body(|ui| {
                     ui.text_label(format!(
-                        "Save changes to “{}” as a .ketchup file before continuing?",
+                        "Save changes to “{}” as a project file before continuing?",
                         self.doc.name
                     ));
                 });

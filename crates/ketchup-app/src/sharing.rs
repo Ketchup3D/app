@@ -893,7 +893,7 @@ impl KetchupApp {
                         }
                     }
                 } else {
-                    ui.label("Share uploads this project to your configured Ketchup Server. Visitors must request access.");
+                    ui.label("Share uploads this project to your configured KetchUp3D Server. Visitors must request access.");
                     if ui.button("Create invitation link").clicked() { action = Some(("create".into(), String::new())); }
                 }
                 ui.separator();

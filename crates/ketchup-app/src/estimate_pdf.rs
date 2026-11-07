@@ -239,7 +239,7 @@ impl<'a> Pdf<'a> {
                 LEFT,
                 29.,
                 8.,
-                "KetchUp - Planning estimate, verify before purchasing",
+                "KetchUp3D - Planning estimate, verify before purchasing",
             );
             self.text(480., 29., 8., &format!("{} / {count}", index + 1));
             self.pages[index].push_str(&self.page);

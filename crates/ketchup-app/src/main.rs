@@ -13,11 +13,14 @@ fn main() -> eframe::Result {
             eframe::icon_data::from_png_bytes(include_bytes!(
                 "../../../assets/branding/icon-256.png"
             ))
-            .expect("The bundled KetchUp icon must be a valid PNG"),
+            .expect("The bundled KetchUp3D icon must be a valid PNG"),
         );
     // GNOME/Wayland resolves the icon through the matching .desktop file.
     #[cfg(target_os = "linux")]
     let viewport = viewport.with_app_id("io.github.Ketchup3D.Ketchup");
+    // eframe also uses the app ID for preferences; preserve the former default.
+    #[cfg(not(target_os = "linux"))]
+    let viewport = viewport.with_app_id("KetchUp — 3D workspace");
 
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
@@ -33,7 +36,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "KetchUp — 3D workspace",
+        "KetchUp3D — 3D workspace",
         options,
         Box::new(|cc| Ok(Box::new(ketchup_app::KetchupApp::new(cc)))),
     )
@@ -65,7 +68,7 @@ fn main() {
         if let Some(loading) = document.get_element_by_id("loading") {
             match result {
                 Ok(())=>loading.remove(),
-                Err(_)=>loading.set_text_content(Some("KetchUp could not start its GPU renderer. Enable hardware acceleration or try a browser with WebGPU or WebGL2 support.")),
+                Err(_)=>loading.set_text_content(Some("KetchUp3D could not start its GPU renderer. Enable hardware acceleration or try a browser with WebGPU or WebGL2 support.")),
             }
         }
     });

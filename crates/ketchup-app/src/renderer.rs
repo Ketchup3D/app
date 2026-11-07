@@ -2872,7 +2872,7 @@ pub(crate) fn install_resources(
     renderer: &mut egui_wgpu::Renderer,
 ) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("KetchUp edges"),
+        label: Some("KetchUp3D edges"),
         source: wgpu::ShaderSource::Wgsl(include_str!("edges.wgsl").into()),
     });
     let face_pipeline = create_pipeline(device, &shader, format, PipelinePass::Faces);
@@ -2930,12 +2930,12 @@ fn create_pipeline_with_samples(
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(match pass {
-            PipelinePass::Faces => "KetchUp filled faces",
-            PipelinePass::EdgeDepth => "KetchUp opaque edge depth",
-            PipelinePass::Edges => "KetchUp antialiased edges",
-            PipelinePass::MaskBase => "KetchUp shadow receiver depth",
-            PipelinePass::MaskShadow => "KetchUp shadow coverage",
-            PipelinePass::ShadowFaces => "KetchUp faces with antialiased shadows",
+            PipelinePass::Faces => "KetchUp3D filled faces",
+            PipelinePass::EdgeDepth => "KetchUp3D opaque edge depth",
+            PipelinePass::Edges => "KetchUp3D antialiased edges",
+            PipelinePass::MaskBase => "KetchUp3D shadow receiver depth",
+            PipelinePass::MaskShadow => "KetchUp3D shadow coverage",
+            PipelinePass::ShadowFaces => "KetchUp3D faces with antialiased shadows",
         }),
         layout: None,
         vertex: wgpu::VertexState {
@@ -3095,7 +3095,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                         create(
                             vertex_bytes,
                             wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                            "KetchUp vertices",
+                            "KetchUp3D vertices",
                         )
                     }),
                 indices: indices
@@ -3104,7 +3104,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                         create(
                             index_bytes,
                             wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                            "KetchUp indices",
+                            "KetchUp3D indices",
                         )
                     }),
             };
@@ -3130,7 +3130,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                 let texture = |format, sample_count, usage| {
                     device
                         .create_texture(&wgpu::TextureDescriptor {
-                            label: Some("KetchUp antialiased shadow mask"),
+                            label: Some("KetchUp3D antialiased shadow mask"),
                             size,
                             mip_level_count: 1,
                             sample_count,
@@ -3158,7 +3158,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                 );
                 {
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("KetchUp 4x antialiasing"),
+                        label: Some("KetchUp3D 4x antialiasing"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &color,
                             depth_slice: None,
@@ -3190,7 +3190,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                 }
                 let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
                 let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("KetchUp resolved viewport"),
+                    label: Some("KetchUp3D resolved viewport"),
                     layout: &r.shadow_faces.get_bind_group_layout(0),
                     entries: &[
                         wgpu::BindGroupEntry {

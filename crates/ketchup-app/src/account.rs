@@ -418,7 +418,7 @@ impl Account {
                 ui.text_heading(if self.user.is_some() {
                     "Account"
                 } else {
-                    "Log in to KetchUp"
+                    "Log in to KetchUp3D"
                 });
             });
             modal.body(|ui| {
@@ -431,7 +431,7 @@ impl Account {
                     ui.spinner();
                 }
                 if self.waiting {
-                    ui.text_label("Complete login and authorize KetchUp in your browser…");
+                    ui.text_label("Complete login and authorize KetchUp3D in your browser…");
                 }
                 if let Some(error) = &self.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);

@@ -1,4 +1,4 @@
-// Convert OpenSKP's raw, inch/Z-up topology into an isolated KetchUp model.
+// Convert OpenSKP's raw, inch/Z-up topology into an isolated KetchUp3D model.
 // Every placed definition gets its own vertices and editable group.
 function ketchupImport(bytes) {
     const source = ketchupModules.openskp.parseSkp(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));

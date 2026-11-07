@@ -366,7 +366,7 @@
           "Find entities in the Outliner and commands in searchable keyboard shortcut help.",
           "Switch to a dark theme with matching tool icons, clearer cursors, and improved face previews and shadows.",
           "Opened projects use their file names, with clearer autosave recovery messages.",
-          "Try the browser editor from the new KetchUp website."
+          "Try the browser editor from the new KetchUp3D website."
         ]
       }
     ]
@@ -374,7 +374,7 @@
   {
     "version": "0.1.0",
     "date": "2026-10-23",
-    "title": "The first KetchUp release",
+    "title": "The first KetchUp3D release",
     "sections": [
       {
         "title": "Create and organize",

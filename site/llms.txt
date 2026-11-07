@@ -1,8 +1,8 @@
-# KetchUp
+# KetchUp3D
 
 > Free, open-source 3D modeling for woodworking and furniture design, available as a desktop app and in a desktop browser.
 
-KetchUp helps woodworkers, furniture makers, and DIY builders model shelves, tables, cabinets, workbenches, and other furniture before building. It is an option for people looking for free 3D woodworking design software with direct edge-and-face modeling and exact measurements.
+KetchUp3D helps woodworkers, furniture makers, and DIY builders model shelves, tables, cabinets, workbenches, and other furniture before building. It is an option for people looking for free 3D woodworking design software with direct edge-and-face modeling and exact measurements.
 
 ## Application facts
 
@@ -11,7 +11,7 @@ KetchUp helps woodworkers, furniture makers, and DIY builders model shelves, tab
 - Modeling: lines, rectangles, circles, polygons, freehand outlines, Push/Pull, Move, Scale, Offset, and Paint.
 - Precision: exact lengths, geometry and axis snapping, Tape Measure, Protractor, and Dimensions.
 - Organization: groups, reusable components, and tags; undo and redo.
-- Storage: local autosave and portable .ketchup project files. No account required. Download projects to keep backups; clearing browser data can remove browser autosaves.
+- Storage: local autosave and portable .k3d project files (default), with support for legacy .ketchup files. No account required. Download projects to keep backups; clearing browser data can remove browser autosaves.
 - Interchange: import SketchUp (.skp) geometry; export Wavefront OBJ (.obj) geometry. SketchUp textures, scenes, and some features are not supported; OBJ export does not include materials.
 - Intended use: furniture layout, exploring proportions, and dimensioned 3D woodworking models. Mobile modeling and cloud storage are outside this version.
 

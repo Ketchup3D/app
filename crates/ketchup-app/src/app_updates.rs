@@ -9,7 +9,7 @@ impl KetchupApp {
         let response = Modal::new("software_updates", 480.).show(ctx, |modal| {
             modal.header(|ui| {
                 ui.text_heading("Software updates");
-                ui.text_weak(format!("KetchUp {}", env!("CARGO_PKG_VERSION")));
+                ui.text_weak(format!("KetchUp3D {}", env!("CARGO_PKG_VERSION")));
             });
             modal.body(|ui| {
                 ui.text_label(self.updates.status());
@@ -72,7 +72,7 @@ impl KetchupApp {
         self.persist();
         if let Some(error) = &self.save_error {
             return Err(format!(
-                "Your model could not be saved. KetchUp will stay open: {error}"
+                "Your model could not be saved. KetchUp3D will stay open: {error}"
             ));
         }
         crate::updates::Resume::save(&self.doc, self.project.path.clone(), self.project.modified)

@@ -2513,7 +2513,7 @@ impl KetchupApp {
                             saved.on_hover_text(error);
                         } else {
                             saved.on_hover_text(if self.project.modified {
-                                "Autosaved on this device. Use File → Save to update your .ketchup file."
+                                "Autosaved on this device. Use File → Save to update your project file."
                             } else {
                                 "Your model stays on this device"
                             });
@@ -2537,7 +2537,7 @@ impl KetchupApp {
                         icons::logo(ui.painter(), logo);
                         ui.add_space(4.);
                         if !compact {
-                            ui.text_label(RichText::new("KetchUp").size(23.).strong().color(foreground));
+                            ui.text_label(RichText::new("KetchUp3D").size(23.).strong().color(foreground));
                         }
                         ui.add_space(18.);
                         Self::app_bar_menu(ui, "File", |ui| {
@@ -2699,7 +2699,7 @@ impl KetchupApp {
                                 crate::system_info::open(&ctx);
                                 ui.close();
                             }
-                            if ui.add(Self::menu_item_button(ui, "About KetchUp", Some("info"))).clicked() {
+                            if ui.add(Self::menu_item_button(ui, "About KetchUp3D", Some("info"))).clicked() {
                                 self.about = true;
                                 ui.close();
                             }
@@ -5789,7 +5789,7 @@ impl KetchupApp {
                     icons::logo(ui.painter(), logo);
                     ui.add_space(8.);
                     ui.vertical(|ui| {
-                        ui.text_heading("About KetchUp");
+                        ui.text_heading("About KetchUp3D");
                         ui.text_label(
                             RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
                                 .color(colors.muted),
@@ -5799,10 +5799,10 @@ impl KetchupApp {
             });
             modal.body(|ui| {
                 let colors = Palette::for_ui(ui);
-                ui.text_label("KetchUp is a 3D modeling app for turning ideas into shapes. Draw precise geometry, shape surfaces, and organize your model with groups and components.");
+                ui.text_label("KetchUp3D is a 3D modeling app for turning ideas into shapes. Draw precise geometry, shape surfaces, and organize your model with groups and components.");
                 ui.add_space(8.);
                 ui.text_label(
-                    RichText::new("Your work is saved automatically on this device. Save a .ketchup project to keep a portable copy.")
+                    RichText::new("Your work is saved automatically on this device. Save a .k3d project to keep a portable copy. Legacy .ketchup files are also supported.")
                         .small()
                         .color(colors.muted),
                 );
@@ -5947,7 +5947,7 @@ impl eframe::App for KetchupApp {
         );
         #[cfg(target_arch = "wasm32")]
         if let Some(document) = web_sys::window().and_then(|window| window.document()) {
-            let title = format!("{} - KetchUp", self.doc.name);
+            let title = format!("{} - KetchUp3D", self.doc.name);
             if document.title() != title {
                 document.set_title(&title);
             }

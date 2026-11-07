@@ -4,28 +4,30 @@ use ketchup_core::DVec3;
 #[test]
 fn ketchup_files_round_trip_complete_projects_and_replace_existing_files() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("house.ketchup");
-    let mut doc = Document {
-        name: "House".into(),
-        snap_to_axes: false,
-        ..Default::default()
-    };
-    doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
-    doc.camera.yaw += 0.4;
-    let json = serde_json::to_vec(&doc).unwrap();
-    write(&path, &json).unwrap();
-    let restored = decode(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(restored.name, doc.name);
-    assert_eq!(restored.model, doc.model);
-    assert_eq!(restored.snap_to_axes, doc.snap_to_axes);
-    assert_eq!(restored.camera.yaw, doc.camera.yaw);
-    doc.name = "Renamed house".into();
-    write(&path, &serde_json::to_vec(&doc).unwrap()).unwrap();
-    assert_eq!(
-        decode(&std::fs::read(&path).unwrap()).unwrap().name,
-        doc.name
-    );
-    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    for (index, extension) in PROJECT_EXTENSIONS.iter().enumerate() {
+        let path = directory.path().join(format!("house.{extension}"));
+        let mut doc = Document {
+            name: "House".into(),
+            snap_to_axes: false,
+            ..Default::default()
+        };
+        doc.model.add_edge(DVec3::ZERO, DVec3::X).unwrap();
+        doc.camera.yaw += 0.4;
+        let json = serde_json::to_vec(&doc).unwrap();
+        write(&path, &json).unwrap();
+        let restored = decode(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored.name, doc.name);
+        assert_eq!(restored.model, doc.model);
+        assert_eq!(restored.snap_to_axes, doc.snap_to_axes);
+        assert_eq!(restored.camera.yaw, doc.camera.yaw);
+        doc.name = "Renamed house".into();
+        write(&path, &serde_json::to_vec(&doc).unwrap()).unwrap();
+        assert_eq!(
+            decode(&std::fs::read(&path).unwrap()).unwrap().name,
+            doc.name
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), index + 1);
+    }
 }
 
 #[test]
@@ -52,45 +54,80 @@ fn failed_save_keeps_existing_file_intact() {
 #[test]
 fn save_to_opened_path_writes_without_showing_a_picker() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("saved.ketchup");
-    let doc = Document::default();
-    let pending = save(
-        &eframe::egui::Context::default(),
-        Some(path.clone()),
-        doc.name.clone(),
-        serde_json::to_string(&doc).unwrap(),
-    );
-    match pending
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .unwrap()
-        .unwrap()
-    {
-        Outcome::Saved(Some(destination)) => assert_eq!(destination, path),
-        outcome => panic!("Unexpected save result: {outcome:?}"),
+    for extension in PROJECT_EXTENSIONS {
+        let path = directory.path().join(format!("saved.{extension}"));
+        let doc = Document::default();
+        let pending = save(
+            &eframe::egui::Context::default(),
+            Some(path.clone()),
+            doc.name.clone(),
+            serde_json::to_string(&doc).unwrap(),
+        );
+        match pending
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+        {
+            Outcome::Saved(Some(destination)) => assert_eq!(destination, path),
+            outcome => panic!("Unexpected save result: {outcome:?}"),
+        }
+        assert_eq!(
+            decode(&std::fs::read(&path).unwrap()).unwrap().name,
+            doc.name
+        );
     }
-    assert_eq!(
-        decode(&std::fs::read(&path).unwrap()).unwrap().name,
-        doc.name
-    );
 }
 
 #[test]
 fn project_file_names_and_extensions_are_portable() {
-    assert_eq!(file_name(" My house "), "My house.ketchup");
-    assert_eq!(file_name("House.KETCHUP"), "House.KETCHUP");
-    assert_eq!(file_name("../floor:1"), "_floor_1.ketchup");
-    assert_eq!(file_name(" . "), "Untitled model.ketchup");
+    assert_eq!(file_name(" My house "), "My house.k3d");
+    assert_eq!(file_name("House.k3d"), "House.k3d");
+    assert_eq!(file_name("House.K3D"), "House.K3D");
+    assert_eq!(file_name("House.ketchup"), "House.ketchup");
+    assert_eq!(file_name(" House.KETCHUP. "), "House.KETCHUP");
+    assert_eq!(file_name("../floor:1"), "_floor_1.k3d");
+    assert_eq!(file_name(" . "), "Untitled model.k3d");
+    assert_eq!(file_name("House.json"), "House.json.k3d");
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("house");
     assert_eq!(
-        ketchup_path(path.clone()).unwrap(),
-        path.with_extension("ketchup")
+        project_path(path.clone()).unwrap(),
+        path.with_extension("k3d")
     );
-    let explicit = path.with_extension("KETCHUP");
-    assert_eq!(ketchup_path(explicit.clone()).unwrap(), explicit);
-    std::fs::write(path.with_extension("ketchup"), b"original").unwrap();
+    assert_eq!(
+        project_path(path.with_extension("json")).unwrap(),
+        directory.path().join("house.json.k3d")
+    );
+    for extension in ["k3d", "K3D", "ketchup", "KETCHUP"] {
+        let explicit = path.with_extension(extension);
+        // The picker has already confirmed this exact destination.
+        std::fs::write(&explicit, b"original").unwrap();
+        assert_eq!(project_path(explicit.clone()).unwrap(), explicit);
+    }
     assert!(
-        ketchup_path(path).is_err(),
+        project_path(path).is_err(),
         "Appending an extension must not bypass overwrite confirmation"
     );
+    assert_eq!(
+        std::fs::read(directory.path().join("house.k3d")).unwrap(),
+        b"original"
+    );
+}
+
+#[test]
+fn opening_either_extension_uses_the_file_stem_and_defaults_save_as_to_k3d() {
+    let directory = tempfile::tempdir().unwrap();
+    let doc = Document::default();
+    for extension in ["k3d", "K3D", "ketchup", "KETCHUP"] {
+        let path = directory.path().join(format!("My house.{extension}"));
+        write(&path, &serde_json::to_vec(&doc).unwrap()).unwrap();
+        let Outcome::Opened(mut restored, Some(opened_path)) = read_project(path.clone()).unwrap()
+        else {
+            panic!("Expected an opened project");
+        };
+        assert_eq!(opened_path, path);
+        set_document_name(&mut restored, &opened_path);
+        assert_eq!(restored.name, "My house");
+        assert_eq!(file_name(&restored.name), "My house.k3d");
+    }
 }

@@ -27,7 +27,7 @@ pub(crate) fn layout(
             x: 85.,
             y: top,
             size: 17.,
-            value: "KetchUp".into(),
+            value: "KetchUp3D".into(),
         },
         Text {
             x: 85.,
@@ -93,7 +93,7 @@ pub(crate) fn layout(
 /// The same bundled mark used by Time & Cost Estimates, composited on paper.
 pub(crate) fn logo_rgb() -> Vec<u8> {
     let image = image::load_from_memory(include_bytes!("../../../assets/branding/icon-256.png"))
-        .expect("valid bundled KetchUp logo")
+        .expect("valid bundled KetchUp3D logo")
         .to_rgba8();
     image
         .pixels()

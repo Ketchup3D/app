@@ -98,7 +98,7 @@ try {
   await until(async () => {
     const result = await call('Runtime.evaluate', { expression: `!document.getElementById('loading') && document.getElementById('ketchup-canvas')?.width === 1920` });
     return result.result.value;
-  }, 'the loaded KetchUp canvas', 120000);
+  }, 'the loaded KetchUp3D canvas', 120000);
   // Dismiss the first-launch release notes through the application's keyboard handling.
   await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
   await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
@@ -114,15 +114,15 @@ try {
   const image = join(root, 'assets/screenshots/ketchup.jpg');
   const readme = join(root, 'README.md');
   const text = await readFile(readme, 'utf8');
-  const link = '![KetchUp editor screenshot](assets/screenshots/ketchup.jpg)';
-  const updated = /!\[KetchUp editor screenshot\]\([^)]*\)/.test(text)
-    ? text.replace(/!\[KetchUp editor screenshot\]\([^)]*\)/, link)
-    : text.replace(/^(# KetchUp[^\n]*\n)/m, `$1\n${link}\n`);
+  const link = '![KetchUp3D editor screenshot](assets/screenshots/ketchup.jpg)';
+  const updated = /!\[KetchUp3D editor screenshot\]\([^)]*\)/.test(text)
+    ? text.replace(/!\[KetchUp3D editor screenshot\]\([^)]*\)/, link)
+    : text.replace(/^(# KetchUp3D[^\n]*\n)/m, `$1\n${link}\n`);
   if (!updated.includes(link)) throw Error('README title not found; nothing changed.');
   await writeFile(image + '.tmp', Buffer.from(shot, 'base64'));
   await rename(image + '.tmp', image);
   if (updated !== text) await writeFile(readme, updated);
-  console.log(`Captured loaded KetchUp at 1920 × 1080: ${image}\nREADME image link is up to date.`);
+  console.log(`Captured loaded KetchUp3D at 1920 × 1080: ${image}\nREADME image link is up to date.`);
 } finally {
   socket?.close();
   browser.kill();

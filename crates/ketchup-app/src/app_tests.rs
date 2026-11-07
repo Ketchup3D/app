@@ -2143,7 +2143,7 @@ fn render_snapshots(state: eframe::egui_wgpu::RenderState, audit: bool) {
         let device = &state.device;
         let queue = &state.queue;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("KetchUp QA screenshot"),
+            label: Some("KetchUp3D QA screenshot"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -5862,7 +5862,7 @@ fn system_information_opens_from_help_and_copies_the_report() {
             _ => None,
         })
         .expect("copy button sends report to clipboard");
-    assert!(report.contains(concat!("KetchUp ", env!("CARGO_PKG_VERSION"))));
+    assert!(report.contains(concat!("KetchUp3D ", env!("CARGO_PKG_VERSION"))));
     assert!(report.contains("Architecture:"));
     assert!(report.contains("Window:"));
     assert!(
