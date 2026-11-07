@@ -1,5 +1,35 @@
 [
   {
+    "version": "0.6.5",
+    "date": "2026-11-07",
+    "title": "Editable construction guides and angled wood joints",
+    "sections": [
+      {
+        "title": "Construction guides",
+        "changes": [
+          "Create persistent cyan construction guides with Tape Measure and Protractor, with precise distance or angle entry and live previews. Tape Measure guides follow the tape line through both picked points.",
+          "Snap drawing tools to guides and their intersections. Select guides by clicking or box selection, then move, rotate, group, copy, hide, lock, or delete them with undo and redo support.",
+          "Tap Ctrl or Command to switch between Create Guides and Measure only; the choice is remembered across reloads and restarts. Use View → Guides to control visibility and snapping, or Edit → Delete Guides to remove all guides."
+        ]
+      },
+      {
+        "title": "Wood joinery",
+        "changes": [
+          "Create joints between angled boards and preview the resulting geometry while adjusting joint settings.",
+          "Trim excess board material past a joint, choosing the board, trim direction, and end to keep, with live previews."
+        ]
+      },
+      {
+        "title": "Workspace and reports",
+        "changes": [
+          "Choose whether axis locks reset after each action in Settings → Controls → Tools; the preference is saved immediately and remembered across restarts.",
+          "Find modeling commands more easily with updated menu and toolbar icons, clearer selection framing, and a larger project title.",
+          "Export Time & Cost Estimates directly from the Tools menu."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.6.4",
     "date": "2026-11-06",
     "title": "Smoother modeling and fork-aware releases",

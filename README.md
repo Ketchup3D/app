@@ -1,6 +1,6 @@
 # KetchUp
 
-![KetchUp editor screenshot](assets/screenshots/ketchup.jpg)
+![KetchUp editor screenshot](assets/screenshots/ketchup.jpg?v=0.6.5)
 
 [![Try KetchUp in your browser](https://img.shields.io/badge/Try_KetchUp_in_your_browser-d63b32?style=for-the-badge)](https://ketchup3d.github.io/app/play/)
 

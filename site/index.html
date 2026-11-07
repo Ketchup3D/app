@@ -13,8 +13,8 @@
     <meta property="og:url" content="https://ketchup3d.github.io/app/" />
     <meta property="og:site_name" content="KetchUp" />
     <meta property="og:locale" content="en_US" />
-    <meta property="og:image" content="https://ketchup3d.github.io/app/assets/screenshots/ketchup.jpg" />
-    <meta property="og:image:secure_url" content="https://ketchup3d.github.io/app/assets/screenshots/ketchup.jpg" />
+    <meta property="og:image" content="https://ketchup3d.github.io/app/assets/screenshots/ketchup.jpg?v=0.6.5" />
+    <meta property="og:image:secure_url" content="https://ketchup3d.github.io/app/assets/screenshots/ketchup.jpg?v=0.6.5" />
     <meta property="og:image:type" content="image/jpeg" />
     <meta property="og:image:width" content="1920" />
     <meta property="og:image:height" content="1080" />
@@ -22,7 +22,7 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="KetchUp — Free 3D Woodworking &amp; Furniture Design App" />
     <meta name="twitter:description" content="Free, open-source 3D modeling for woodworking and furniture design. Plan shelves, tables, and cabinets with precise dimensions on Windows, macOS, Linux, or in your browser." />
-    <meta name="twitter:image" content="https://ketchup3d.github.io/app/assets/screenshots/ketchup.jpg" />
+    <meta name="twitter:image" content="https://ketchup3d.github.io/app/assets/screenshots/ketchup.jpg?v=0.6.5" />
     <meta name="twitter:image:alt" content="KetchUp 3D editor showing a loft bed model, drawing tools, and model controls." />
     <title>KetchUp — Free 3D Woodworking &amp; Furniture Design App</title>
     <link rel="icon" type="image/svg+xml" href="assets/branding/logo.svg" />
@@ -47,7 +47,12 @@
     "price": "0",
     "priceCurrency": "USD"
   },
-  "screenshot": "https://ketchup3d.github.io/app/assets/screenshots/ketchup.jpg",
+  "screenshot": {
+    "@type": "ImageObject",
+    "url": "https://ketchup3d.github.io/app/assets/screenshots/ketchup.jpg?v=0.6.5",
+    "width": 1920,
+    "height": 1080
+  },
   "downloadUrl": "https://github.com/Ketchup3D/app/releases/latest",
   "sameAs": [
     "https://github.com/Ketchup3D/app"
@@ -85,7 +90,7 @@
           </div>
         </div>
         <figure class="workspace-preview">
-          <img src="assets/screenshots/ketchup.jpg" alt="KetchUp’s 3D editor showing a loft bed model, with drawing tools on the left and model controls on the right." width="1920" height="1080" fetchpriority="high" />
+          <img src="assets/screenshots/ketchup.jpg?v=0.6.5" alt="KetchUp’s 3D editor showing a loft bed model, with drawing tools on the left and model controls on the right." width="1920" height="1080" fetchpriority="high" />
           <figcaption><span>A little sketch. A whole new dimension.</span><span>Actual KetchUp workspace</span></figcaption>
         </figure>
       <div class="downloads" id="downloads" role="group" aria-label="Download the latest desktop release">
