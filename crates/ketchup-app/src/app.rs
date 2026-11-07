@@ -2644,7 +2644,7 @@ impl KetchupApp {
                         });
                         Self::app_bar_menu(ui, "Help", |ui| {
                             ui.visuals_mut().override_text_color = Some(colors.ink);
-                            if ui.add(Self::menu_item_button(ui, "Keyboard shortcuts", Some("settings_shortcuts"))).clicked() {
+                            if ui.add(Self::menu_item_button(ui, "Keyboard shortcuts", None)).clicked() {
                                 self.help = true;
                                 ui.close();
                             }
@@ -2673,7 +2673,7 @@ impl KetchupApp {
                                 ui.close();
                             }
                             ui.separator();
-                            if ui.add(Self::menu_item_button(ui, "System information", Some("diagnostics"))).clicked() {
+                            if ui.add(Self::menu_item_button(ui, "System information", None)).clicked() {
                                 crate::system_info::open(&ctx);
                                 ui.close();
                             }
