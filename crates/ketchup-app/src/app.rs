@@ -2598,7 +2598,7 @@ impl KetchupApp {
                             #[cfg(not(target_arch = "wasm32"))]
                             {
                                 ui.separator();
-                                if ui.add(Self::menu_item_button(ui, "Quit", Some("close"))).clicked() {
+                                if ui.add(Self::menu_item_button(ui, "Quit", None)).clicked() {
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                                     ui.close();
                                 }
