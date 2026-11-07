@@ -26,6 +26,12 @@
           "Find modeling commands more easily with updated menu and toolbar icons, clearer selection framing, and a larger project title.",
           "Export Time & Cost Estimates directly from the Tools menu."
         ]
+      },
+      {
+        "title": "Desktop compatibility",
+        "changes": [
+          "Restore desktop build compatibility while keeping browser-specific project handling on WebAssembly."
+        ]
       }
     ]
   },
