@@ -1,7 +1,7 @@
 use super::*;
 use crate::inspector_table::inspector_field;
 use ketchup_core::connections::{Connection, ConnectionOperation};
-use ketchup_core::joinery::{GeometryEvaluation, JointKind, JointSettings};
+use ketchup_core::joinery::{GeometryEvaluation, JoineryOverlap, JointKind, JointSettings, KeepEnd, TrimBoard};
 use std::collections::BTreeMap;
 
 #[path = "joinery_cards.rs"]
@@ -29,6 +29,13 @@ pub(super) struct Dialog {
     diagnostics: EditorDiagnostics,
     pub members: Option<[u64; 2]>,
     preview: Option<Preview>,
+}
+impl Dialog {
+    /// The caller checks the active preview key before replacing viewport stock.
+    pub(super) fn preview_model(&self) -> Option<&Model> {
+        let (_, geometry) = self.preview.as_ref()?.result.as_ref().ok()?;
+        Some(&geometry.result.as_ref()?.model)
+    }
 }
 /// Keep committed-document diagnostics independent from a transient/history
 /// viewport model. Sharing one source snapshot would invalidate both each frame.
@@ -59,7 +66,7 @@ impl EditorDiagnostics {
 #[derive(Default)]
 struct OrientationCache {
     revision: Option<u64>,
-    entries: std::collections::BTreeMap<[u64; 2], (JointSettings, Vec<(usize, usize)>)>,
+    entries: std::collections::BTreeMap<[u64; 2], (JointSettings, Vec<(usize, usize)>, Option<JoineryOverlap>)>,
     #[cfg(test)]
     builds: usize,
 }
@@ -69,9 +76,9 @@ impl OrientationCache {
             self.revision = Some(revision);
             self.entries.clear();
         }
-        if !self.entries.get(&members).is_some_and(|(saved, _)| saved == settings) {
-            let supported = model.supported_joinery_axes(members, settings);
-            self.entries.insert(members, (settings.clone(), supported));
+        if !self.entries.get(&members).is_some_and(|(saved, _, _)| saved == settings) {
+            let (overlap, supported) = model.joinery_options(members, settings);
+            self.entries.insert(members, (settings.clone(), supported, overlap));
             #[cfg(test)] { self.builds += 1; }
         }
         &self.entries[&members].1
@@ -82,8 +89,7 @@ struct Preview {
     source: Model,
     members: [u64; 2],
     settings: JointSettings,
-    result: Result<Model, String>,
-    region: highlight::Region,
+    result: Result<(u64, GeometryCache), String>,
 }
 /// Cache by source geometry, including transient Move previews. Camera changes
 /// do not repeat boolean operations; every actual board move invalidates it.
@@ -100,7 +106,7 @@ pub(super) struct GeometryCache {
     #[cfg(test)]
     diagnostic_evaluations: usize,
     source: Option<Model>,
-    regions: Vec<highlight::Region>,
+    regions: Vec<(u64, highlight::Region)>,
     pub result: Option<GeometryEvaluation>,
     faces: crate::renderer::FaceCache,
     entities: crate::renderer::EntityCache,
@@ -262,7 +268,7 @@ impl GeometryCache {
                             connection.members, settings, &mut boards),
                     });
                 }
-                self.regions.push(self.region_cache[&id].region.clone());
+                self.regions.push((id, self.region_cache[&id].region.clone()));
             }
             self.result=Some(evaluation);
             self.source = Some(source.clone());
@@ -284,7 +290,7 @@ fn fraction(ui: &mut egui::Ui, id: &str, label: &str, value: &mut f64) {
     }
 }
 fn fields(ui: &mut egui::Ui, settings: &mut JointSettings, model: &Model, members: [u64; 2],
-    orientations: &mut OrientationCache, revision: u64) {
+    orientations: &mut OrientationCache, revision: u64, new_joint: bool) {
     #[cfg(not(target_arch = "wasm32"))]
     let _profile = super::viewport_benchmark::scope("joinery_fields");
     cards::selector(ui, &mut settings.kind);
@@ -293,8 +299,10 @@ fn fields(ui: &mut egui::Ui, settings: &mut JointSettings, model: &Model, member
     if !supported.contains(&selected) {
         if let Some(pair) = supported.first() { selected = *pair; }
     }
+    let stock_frame = model.joinery_frame(members[0]).ok();
+    let axis_prefix = if stock_frame.is_some_and(|frame| !frame.is_project_aligned()) { "Board " } else { "" };
     let label = |(depth, width): (usize, usize)|
-        format!("Depth {} / Width {}", ["X", "Y", "Z"][depth], ["X", "Y", "Z"][width]);
+        format!("Depth {axis_prefix}{} / Width {axis_prefix}{}", ["X", "Y", "Z"][depth], ["X", "Y", "Z"][width]);
     inspector_field(ui, "joint_orientation", "Orientation", |ui| {
         ui.add_enabled_ui(!supported.is_empty(), |ui| {
             egui::ComboBox::from_id_salt("joint_orientation")
@@ -330,19 +338,38 @@ fn fields(ui: &mut egui::Ui, settings: &mut JointSettings, model: &Model, member
         });
     }
     if settings.kind == JointKind::Dovetail {
-        let span = match (highlight::bounds(model, members[0]), highlight::bounds(model, members[1])) {
-            (Some(a), Some(b)) => (a.1.min(b.1) - a.0.max(b.0))[settings.width_axis],
-            _ => 0.,
-        };
+        let span = orientations.entries.get(&members).and_then(|entry| entry.2)
+            .map_or(0., |overlap| (overlap.bounds.1 - overlap.bounds.0)[settings.width_axis]);
         let mut width_mm = settings.dovetail_width.unwrap_or_else(||
             settings.dovetail_layout(span).map_or(0.025, |(_, width)| width)) * 1000.;
+        // New joints use the same fixed-width mode shown by the editor.
+        // Leave saved count-based joints intact until the user edits spacing.
+        if new_joint && settings.dovetail_width.is_none() {
+            settings.dovetail_width = Some(width_mm / 1000.);
+        }
         if inspector_field(ui, "joint_dovetail_width", "Tail width", |ui| {
             ui.add(egui::DragValue::new(&mut width_mm).range(0.1..=10000.).speed(0.5).suffix(" mm"))
         }).changed() {
             settings.dovetail_width = Some(width_mm / 1000.);
         }
+        let mut pin_mm = settings.dovetail_pin_width * 1000.;
+        if inspector_field(ui, "joint_dovetail_pin_width", "Minimum pin width", |ui| {
+            ui.add(egui::DragValue::new(&mut pin_mm).range(0.1..=10000.).speed(0.5).suffix(" mm"))
+                .on_hover_text("Minimum wood left between receiving sockets after clearance. Smaller pins allow more tails.")
+        }).changed() {
+            settings.dovetail_pin_width = pin_mm / 1000.;
+            settings.dovetail_width = Some(width_mm / 1000.);
+        }
+        if settings.dovetail_width.is_none() && ui.button("Fit maximum tails")
+            .on_hover_text("Keep the tail width and fit as many tails as the pin spacing allows.").clicked() {
+            settings.dovetail_width = Some(width_mm / 1000.);
+        }
         if let Some((count, _)) = settings.dovetail_layout(span) {
-            ui.text_weak(format!("{count} tails fit across this joint."));
+            ui.text_weak(if settings.dovetail_width.is_some() {
+                format!("{count} tails fit across this joint.")
+            } else { format!("{count} tails in the saved layout.") });
+        } else if span > 0. {
+            ui.text_weak("Tail and pin widths must fit the joint and produce 1–64 tails.");
         }
         inspector_field(ui, "joint_taper", "Dovetail angle", |ui| {
             ui.add(
@@ -364,6 +391,35 @@ fn fields(ui: &mut egui::Ui, settings: &mut JointSettings, model: &Model, member
     .changed()
     {
         settings.clearance = mm / 1000.;
+    }
+    inspector_field(ui, "joint_trim_board", "Trim excess", |ui| {
+        egui::ComboBox::from_id_salt("joint_trim_board").selected_text(settings.trim.label())
+            .show_ui(ui, |ui| {
+                for choice in [TrimBoard::None, TrimBoard::First, TrimBoard::Second] {
+                    ui.selectable_value(&mut settings.trim, choice, choice.label());
+                }
+            }).response
+            .on_hover_text("Shorten the selected board past the joint, following an angled outer face where possible.")
+    });
+    if settings.trim != TrimBoard::None {
+        inspector_field(ui, "joint_trim_axis", "Trim direction", |ui| {
+            let label = |axis: Option<usize>| axis.map_or("Automatic (longest axis)", |axis| ["Board X", "Board Y", "Board Z"][axis]);
+            egui::ComboBox::from_id_salt("joint_trim_axis").selected_text(label(settings.trim_axis))
+                .show_ui(ui, |ui| {
+                    for choice in [None, Some(0), Some(1), Some(2)] {
+                        ui.selectable_value(&mut settings.trim_axis, choice, label(choice));
+                    }
+                }).response.on_hover_text("Direction in the selected board's local axes.")
+        });
+        inspector_field(ui, "joint_trim_keep_end", "Keep end", |ui| {
+            egui::ComboBox::from_id_salt("joint_trim_keep_end").selected_text(settings.keep_end.label())
+                .show_ui(ui, |ui| {
+                    for choice in [KeepEnd::Lower, KeepEnd::Upper] {
+                        ui.selectable_value(&mut settings.keep_end, choice, choice.label());
+                    }
+                }).response
+                .on_hover_text("Keep the lower or upper end along the selected trim direction.")
+        });
     }
 }
 fn warning_colors(dark: bool) -> (Color32, Color32) {
@@ -392,7 +448,8 @@ impl KetchupApp {
     }
 
     fn joint_markers(&self, rect: Rect) -> Vec<(u64, Pos2)> {
-        if !self.doc.display.wood_joinery || self.joinery.open || self.history_preview.is_some() {
+        // The display toggle controls joint guides; edit icons stay available.
+        if self.joinery.open || self.history_preview.is_some() {
             return Vec::new();
         }
         self.doc.model.connections.iter().filter_map(|(id, connection)| {
@@ -404,13 +461,15 @@ impl KetchupApp {
             if connection.members.iter().any(|id| self.doc.model.is_hidden(*id)) {
                 return None;
             }
-            let a = highlight::bounds(&self.doc.model, connection.members[0])?;
-            let b = highlight::bounds(&self.doc.model, connection.members[1])?;
+            let frame = self.doc.model.joinery_frame(connection.members[0]).unwrap_or_default();
+            let a = frame.bounds(&self.doc.model, connection.members[0])?;
+            let b = frame.bounds(&self.doc.model, connection.members[1])?;
             let (lo, hi) = (a.0.max(b.0), a.1.min(b.1));
             // Separated boards still need an actionable warning marker.
             let center = if (hi - lo).min_element() < 0. {
                 (a.0 + a.1 + b.0 + b.1) * 0.25
             } else { (lo + hi) * 0.5 };
+            let center = frame.world(center);
             let model = self.joinery_geometry.result.as_ref()
                 .map_or(&self.doc.model, |evaluation| &evaluation.model);
             let owners = model.expand_entities(&connection.members.into_iter().collect());
@@ -460,12 +519,36 @@ impl KetchupApp {
                 }
             }
             if response.clicked() {
-                let members = self.doc.model.connections[&id].members;
-                self.selected = BTreeSet::from(members);
-                self.open_joinery(ui.ctx());
-                sidebar::set_section_open(ui.ctx(), "connections/wood_joinery", true);
+                self.edit_joint_from_marker(id, ui.ctx());
             }
         }
+    }
+    fn edit_joint_from_marker(&mut self, id: u64, ctx: &egui::Context) -> bool {
+        let Some(connection) = self.doc.model.connections.get(&id) else { return false; };
+        if !matches!(connection.operation, ConnectionOperation::Joinery(_)) { return false; }
+        let members = connection.members;
+        let parent = self.doc.model.parent(members[0]);
+        let pair = BTreeSet::from(members);
+        if pair.len() != 2 || members.iter().any(|member| {
+            !self.doc.model.objects.contains_key(member)
+                || self.doc.model.parent(*member) != parent
+                || self.doc.model.is_hidden(*member)
+        }) { return false; }
+        if self.doc.model.selection_protected(&pair) {
+            self.say(ctx, "Unlock both objects before editing their joint.");
+            return false;
+        }
+        if self.project.blocked() || self.screenshot.open || self.history_preview.is_some() {
+            return false;
+        }
+        // Root-level markers include joints nested inside assemblies. Navigate
+        // before validating the selected pair, just as selection in the Outliner
+        // navigates to an entity's parent. This is navigation, not a model edit.
+        self.navigate_context(parent, ctx);
+        self.selected = pair;
+        self.open_joinery(ctx);
+        sidebar::set_section_open(ctx, "connections/wood_joinery", true);
+        true
     }
     pub(super) fn open_joinery(&mut self, ctx: &egui::Context) {
         let Some(members) = self.selected_fastener_pair(ctx) else {
@@ -480,9 +563,9 @@ impl KetchupApp {
         self.inspector = true;
         self.set_tool(Tool::Select);
     }
-    fn refresh_joint_preview(&mut self) {
+    fn refresh_joint_preview(&mut self) -> bool {
         let Some(mut members) = self.joinery_dialog.members else {
-            return;
+            return false;
         };
         if self.joinery.reverse {
             members.swap(0, 1);
@@ -492,8 +575,13 @@ impl KetchupApp {
                 && p.members == members
                 && p.settings == self.joinery.settings
         }) {
-            return;
+            return false;
         }
+        // Keep machining and guides on the same scoped viewport model, and
+        // reuse unaffected cuts as the draft's trim/profile settings change.
+        let mut geometry = self.joinery_dialog.preview.take()
+            .and_then(|preview| preview.result.ok().map(|(_, geometry)| geometry))
+            .unwrap_or_default();
         let mut model = self.doc.model.clone();
         let result = model
             .add_connection(Connection {
@@ -501,27 +589,25 @@ impl KetchupApp {
                 entry_face: None,
                 operation: ConnectionOperation::Joinery(self.joinery.settings.clone()),
             })
-            .and_then(|_| {
-                let evaluation = model.evaluate_joinery();
-                if evaluation.errors.is_empty() {
-                    Ok(evaluation.model)
+            .and_then(|id| {
+                geometry.update(&model);
+                let errors = geometry.source_errors(&model);
+                if errors.is_empty() {
+                    Ok((id, geometry))
                 } else {
-                    Err(evaluation
-                        .errors
-                        .into_iter()
-                        .map(|(_, e)| e)
+                    Err(errors.iter()
+                        .map(|(_, e)| e.as_str())
                         .collect::<Vec<_>>()
                         .join(" · "))
                 }
             });
-        let region=result.as_ref().map(|model|highlight::Region::build(&self.doc.model,model,members,&self.joinery.settings)).unwrap_or_default();
         self.joinery_dialog.preview = Some(Preview {
             source: self.doc.model.clone(),
             members,
             settings: self.joinery.settings.clone(),
             result,
-            region,
         });
+        true
     }
     fn apply_joint_preview(&mut self, ctx: &egui::Context) -> bool {
         let Some(preview) = self.joinery_dialog.preview.as_ref() else {
@@ -594,8 +680,18 @@ impl KetchupApp {
                 }
                 ui.add_enabled_ui(eligible, |ui| {
                     if let ConnectionOperation::Joinery(settings) = &mut changed.operation {
+                        let trim_before = (settings.trim, settings.trim_axis, settings.keep_end);
+                        let pin_before = settings.dovetail_pin_width;
                         fields(ui, settings, &self.doc.model, original.members,
-                            &mut self.joinery_dialog.orientations, revision);
+                            &mut self.joinery_dialog.orientations, revision, false);
+                        if pin_before != settings.dovetail_pin_width {
+                            self.joinery.settings.dovetail_pin_width = settings.dovetail_pin_width;
+                        }
+                        if trim_before != (settings.trim, settings.trim_axis, settings.keep_end) {
+                            self.joinery.settings.trim = settings.trim;
+                            self.joinery.settings.trim_axis = settings.trim_axis;
+                            self.joinery.settings.keep_end = settings.keep_end;
+                        }
                     }
                     ui.horizontal(|ui| {
                         if ui.button("Swap parts").clicked() {
@@ -640,17 +736,16 @@ impl KetchupApp {
                         ui.separator();
                         let eligible = self.fastener_pair_eligible(&ctx, members);
                         if !eligible { warning(ui, self.fastener_pair_block_reason(&ctx, members)); }
-                        if ui.add_enabled(eligible, egui::Button::new("Add new dynamic joint")).clicked() {
+                        ui.add_enabled_ui(eligible, |ui| {
+                            ui.checkbox(&mut self.joinery.reverse, "Swap first and second boards");
                             let mut ordered = members;
                             if self.joinery.reverse { ordered.swap(0, 1); }
-                            let supported = self.doc.model.supported_joinery_axes(ordered, &self.joinery.settings);
-                            if !supported.contains(&(self.joinery.settings.depth_axis, self.joinery.settings.width_axis)) {
-                                if let Some(&(depth, width)) = supported.first() {
-                                    self.joinery.settings.depth_axis = depth;
-                                    self.joinery.settings.width_axis = width;
-                                }
-                            }
-                            self.refresh_joint_preview();
+                            fields(ui, &mut self.joinery.settings, &self.doc.model, ordered,
+                                &mut self.joinery_dialog.orientations, self.joinery_dialog.diagnostics.revision, true);
+                        });
+                        if eligible && self.refresh_joint_preview() { ctx.request_repaint(); }
+                        if ui.add_enabled(eligible, egui::Button::new("Apply")
+                            .min_size(egui::vec2(ui.available_width(), ui.spacing().interact_size.y))).clicked() {
                             self.apply_joint_preview(&ctx);
                         }
                         if let Some(Preview { result: Err(error), .. }) = &self.joinery_dialog.preview {
@@ -680,35 +775,37 @@ impl KetchupApp {
             }
         }
     }
+    fn active_joint_preview(&self) -> Option<&Preview> {
+        if !self.joinery.open || !self.doc.display.joinery_preview || self.history_preview.is_some()
+            || self.modeling.as_ref().is_some_and(|edit| edit.preview.is_some()) { return None; }
+        let mut members = self.joinery_dialog.members?;
+        if self.joinery.reverse { members.swap(0, 1); }
+        let preview = self.joinery_dialog.preview.as_ref()?;
+        (preview.source == self.doc.model && preview.settings == self.joinery.settings
+            && preview.members == members && self.selected == BTreeSet::from(members)
+            && preview.result.is_ok()).then_some(preview)
+    }
     pub(super) fn joint_highlight_preview_key(&self)->Option<([u64;2],JointSettings)> {
-        if !self.joinery.open || !self.doc.display.joinery_preview || self.history_preview.is_some() {return None;}
-        let preview=self.joinery_dialog.preview.as_ref()?;
-        (preview.source==self.doc.model && preview.settings==self.joinery.settings && preview.result.is_ok())
-            .then(||(preview.members,preview.settings.clone()))
+        self.active_joint_preview().map(|preview| (preview.members, preview.settings.clone()))
     }
     pub(super) fn paint_joint_highlights(&self,mesh:&mut renderer::Mesh,model:&Model,display:&ketchup_core::DisplaySettings,dark:bool) {
         #[cfg(not(target_arch = "wasm32"))]
         let _profile = super::viewport_benchmark::scope("joint_guides");
         if !display.wood_joinery { return; }
-        let preview = self.joint_highlight_preview_key().and(self.joinery_dialog.preview.as_ref());
+        let preview = self.active_joint_preview().and_then(|preview| preview.result.as_ref().ok());
+        let (geometry, draft) = preview.map_or((&self.joinery_geometry, None),
+            |(id, geometry)| (geometry, Some(*id)));
         let mut surfaces = BTreeMap::new();
-        for region in &self.joinery_geometry.regions {
+        for (_, region) in &geometry.regions {
             region.register_guides(mesh);
             region.surface_requests(&mut surfaces);
-        }
-        if let Some(preview) = preview {
-            preview.region.register_guides(mesh);
-            preview.region.surface_requests(&mut surfaces);
         }
         // Prepare each shared board once, then balance all strokes together.
         // Nested region/line workers duplicated masks and left uneven chunks.
         mesh.prepare_joint_surfaces(&surfaces.into_values().collect::<Vec<_>>());
         let mut guides = Vec::new();
-        for region in &self.joinery_geometry.regions {
-            region.prepare(mesh, model, display, dark, false, &mut guides);
-        }
-        if let Some(preview) = preview {
-            preview.region.prepare(mesh, model, display, dark, true, &mut guides);
+        for (id, region) in &geometry.regions {
+            region.prepare(mesh, model, display, dark, draft == Some(*id), &mut guides);
         }
         mesh.paint_overlays(&guides, 64, |mesh, guide| guide.paint(mesh));
     }
@@ -789,6 +886,169 @@ mod tests {
         app.selected = BTreeSet::from(members);
         (app, egui::Context::default(), members)
     }
+
+    fn trim_preview_fixture() -> (KetchupApp, egui::Context, [u64; 2]) {
+        let (mut app, ctx, members) = fixture();
+        app.doc.model.move_selection(&BTreeSet::from([members[1]]), -DVec3::X * 0.25).unwrap();
+        for vertex in app.doc.model.vertices.values_mut() { vertex.position.x *= 2.; }
+        app.doc.model.rotate_selection(&BTreeSet::from([members[1]]),
+            DVec3::new(0.3, 0.05, 0.02), DVec3::Z, 35.).unwrap();
+        app.open_joinery(&ctx);
+        app.joinery.settings = JointSettings {
+            kind: JointKind::HalfLap, trim: TrimBoard::First, trim_axis: Some(0),
+            clearance: 0., ..Default::default()
+        };
+        app.doc.display.joinery_preview = true;
+        app.doc.display.wood_joinery = true;
+        (app, ctx, members)
+    }
+
+    fn triangles(model: &Model) -> Vec<[DVec3; 3]> {
+        let mut faces = renderer::FaceCache::default();
+        faces.update(model);
+        faces.iter().flat_map(|(_, face)| face.triangles.iter().copied()).collect()
+    }
+
+    fn rendered_triangles(app: &mut KetchupApp, ctx: &egui::Context) -> Vec<[DVec3; 3]> {
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(800., 600.));
+        let _ = ctx.run_test_ui(egui::RawInput {
+            screen_rect: Some(rect), ..Default::default()
+        }, |ui| app.paint_scene(ui, rect));
+        app.render_face_cache.iter().flat_map(|(_, face)| face.triangles.iter().copied()).collect()
+    }
+
+    #[test]
+    fn trim_direction_and_kept_end_render_the_same_solids_before_and_after_apply() {
+        let (mut app, ctx, _) = trim_preview_fixture();
+        let source = app.doc.model.clone();
+        let mut previous = triangles(&source);
+        for (trim, trim_axis, keep_end) in [
+            (TrimBoard::First, Some(0), KeepEnd::Lower),
+            (TrimBoard::First, Some(0), KeepEnd::Upper),
+            (TrimBoard::Second, Some(1), KeepEnd::Lower),
+            (TrimBoard::Second, None, KeepEnd::Upper),
+        ] {
+            app.joinery.settings.trim = trim;
+            app.joinery.settings.trim_axis = trim_axis;
+            app.joinery.settings.keep_end = keep_end;
+            assert!(app.refresh_joint_preview());
+            assert!(app.joint_highlight_preview_key().is_some());
+            let expected = triangles(app.joinery_dialog.preview_model().unwrap());
+            let actual = rendered_triangles(&mut app, &ctx);
+            assert_eq!(actual, expected, "the solid viewport must use the draft's trimmed geometry");
+            assert_ne!(actual, previous, "changing the trim must visibly replace the previous solid");
+            let (_, draft) = app.active_joint_preview().unwrap().result.as_ref().unwrap();
+            assert_eq!(draft.regions.len(), 1, "guides must come from the same evaluated draft");
+            let revision = draft.revision;
+            let builds = app.scene_cache.mesh_builds;
+            assert!(!app.refresh_joint_preview(), "unchanged settings must not schedule another repaint");
+            assert_eq!(rendered_triangles(&mut app, &ctx), actual);
+            assert_eq!(app.active_joint_preview().unwrap().result.as_ref().unwrap().1.revision, revision);
+            assert_eq!(app.scene_cache.mesh_builds, builds, "unchanged previews must reuse the rendered mesh");
+            assert_eq!(app.doc.model, source);
+            assert!(app.doc.history.undo_label().is_none());
+            assert!(!app.project.modified);
+            previous = actual;
+        }
+        assert!(app.apply_joint_preview(&ctx));
+        assert_eq!(rendered_triangles(&mut app, &ctx), previous,
+            "Applying must preserve the solid geometry already shown in the preview");
+    }
+
+    #[test]
+    fn stale_disabled_invalid_and_closed_drafts_restore_the_committed_viewport() {
+        let (mut app, ctx, _) = trim_preview_fixture();
+        let stock = triangles(&app.doc.model);
+        app.refresh_joint_preview();
+        let preview = rendered_triangles(&mut app, &ctx);
+        assert_ne!(preview, stock);
+        app.doc.display.joinery_preview = false;
+        assert_eq!(rendered_triangles(&mut app, &ctx), stock);
+        app.doc.display.joinery_preview = true;
+        assert_eq!(rendered_triangles(&mut app, &ctx), preview);
+        app.joinery.settings.keep_end = KeepEnd::Upper;
+        assert!(app.joint_highlight_preview_key().is_none());
+        assert_eq!(rendered_triangles(&mut app, &ctx), stock, "do not render an out-of-date trim");
+        app.refresh_joint_preview();
+        assert_ne!(rendered_triangles(&mut app, &ctx), stock);
+        app.joinery.reverse = true;
+        assert_eq!(rendered_triangles(&mut app, &ctx), stock, "part order belongs to the draft key");
+        app.refresh_joint_preview();
+        assert!(app.joint_highlight_preview_key().is_some());
+        let mut history = app.doc.model.clone();
+        history.move_selection(&app.selected, DVec3::Z).unwrap();
+        let history_triangles = triangles(&history);
+        app.history_preview = Some(history);
+        assert_eq!(rendered_triangles(&mut app, &ctx), history_triangles, "history must take precedence over the draft");
+        app.history_preview = None;
+        app.joinery.settings.clearance = 0.01;
+        app.refresh_joint_preview();
+        assert!(app.joinery_dialog.preview.as_ref().unwrap().result.is_err());
+        assert_eq!(rendered_triangles(&mut app, &ctx), stock);
+        app.joinery.settings.clearance = 0.;
+        app.refresh_joint_preview();
+        assert_ne!(rendered_triangles(&mut app, &ctx), stock);
+        app.joinery.open = false;
+        app.joinery_dialog = Default::default();
+        assert_eq!(rendered_triangles(&mut app, &ctx), stock);
+        assert!(app.doc.model.connections.is_empty());
+        assert!(!app.project.modified);
+    }
+
+    #[test]
+    fn nested_draft_preview_preserves_the_same_group_scope_as_an_applied_joint() {
+        let (mut app, ctx, members) = trim_preview_fixture();
+        let boards = app.doc.model.copy_entities(&BTreeSet::from(members));
+        let group = app.doc.model.make_object(&BTreeSet::from(members), false, "Draft assembly").unwrap();
+        let members: [u64; 2] = app.doc.model.objects[&group].entities.iter().copied()
+            .collect::<Vec<_>>().try_into().unwrap();
+        app.doc.model.edit_context = None;
+        let outside: [u64; 2] = app.doc.model.paste_entities(&boards, DVec3::Y * 0.4).into_iter()
+            .collect::<Vec<_>>().try_into().unwrap();
+        let outside_joint = app.doc.model.add_connection(Connection {
+            members: outside, entry_face: None,
+            operation: ConnectionOperation::Joinery(app.joinery.settings.clone()),
+        }).unwrap();
+        app.doc.model.make_object(&BTreeSet::from(outside), false, "Other assembly").unwrap();
+        let outside = app.doc.model.connections[&outside_joint].members;
+        app.navigate_context(Some(group), &ctx);
+        app.selected = BTreeSet::from(members);
+        app.open_joinery(&ctx);
+        let source = app.doc.model.clone();
+        app.refresh_joint_preview();
+        let model = app.joinery_dialog.preview_model().unwrap();
+        for member in outside {
+            assert!((model.solid_volume(member).unwrap() - source.solid_volume(member).unwrap()).abs() < 1e-10,
+                "joints outside the edited assembly must remain suspended during preview");
+        }
+        let preview = rendered_triangles(&mut app, &ctx);
+        assert_eq!(app.doc.model, source);
+        assert!(app.apply_joint_preview(&ctx));
+        assert_eq!(rendered_triangles(&mut app, &ctx), preview);
+    }
+
+    #[test]
+    fn new_dovetails_fit_the_displayed_width_while_saved_count_layouts_stay_intact() {
+        let (app, ctx, members) = fixture();
+        let legacy = JointSettings {
+            kind: JointKind::Dovetail, dovetails: 3, clearance: 0., ..Default::default()
+        };
+        let mut saved = legacy.clone();
+        let mut draft = legacy.clone();
+        for (settings, new_joint) in [(&mut saved, false), (&mut draft, true)] {
+            let mut orientations = OrientationCache::default();
+            let _ = ctx.run_test_ui(egui::RawInput::default(), |ui| {
+                fields(ui, settings, &app.doc.model, members, &mut orientations, 1, new_joint);
+            });
+        }
+        assert_eq!(saved.dovetail_width, None);
+        assert_eq!(saved.dovetail_layout(0.1).unwrap().0, 3);
+        let displayed_width = legacy.dovetail_layout(0.1).unwrap().1;
+        assert!((draft.dovetail_width.unwrap() - displayed_width).abs() < 1e-12);
+        assert_eq!(draft.dovetail_layout(0.1).unwrap().0, 4,
+            "the fixed width shown by a new joint must determine its automatic count");
+    }
+
     #[test]
     fn editor_redraws_share_viewport_evaluation_and_refresh_after_settings_change() {
         let (mut app, ctx, _) = fixture();
@@ -910,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_joint_markers_follow_display_toggle_and_do_not_mark_drafts() {
+    fn saved_joint_markers_remain_visible_with_guides_hidden_and_do_not_mark_drafts() {
         let (mut app, ctx, members) = fixture();
         let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(1000., 800.));
         app.doc.display.wood_joinery = true;
@@ -925,8 +1185,100 @@ mod tests {
         assert_eq!(app.doc.model.connections[&markers[0].0].members, members);
         assert!(rect.contains(markers[0].1));
         app.doc.display.wood_joinery = false;
-        assert!(app.joint_markers(rect).is_empty());
+        assert_eq!(app.joint_markers(rect), markers, "hiding guides keeps edit icons visible");
     }
+
+    #[test]
+    fn clicking_joint_icons_enters_the_containing_group_and_opens_the_editor() {
+        for (depth, component, guides_visible) in [(0, false), (1, false), (1, true), (3, false)]
+            .into_iter().flat_map(|(depth, component)| [false, true].map(|visible| (depth, component, visible)))
+        {
+            let (mut app, ctx, members) = fixture();
+            let joint = app.doc.model.add_connection(Connection {
+                members, entry_face: None,
+                operation: ConnectionOperation::Joinery(JointSettings::default()),
+            }).unwrap();
+            let mut roots = BTreeSet::from(members);
+            for _ in 0..depth {
+                let group = app.doc.model.make_object(&roots, component, "Assembly").unwrap();
+                roots = BTreeSet::from([group]);
+            }
+            let members = app.doc.model.connections[&joint].members;
+            let parent = app.doc.model.parent(members[0]);
+            assert_eq!(app.doc.model.edit_context, None);
+            app.selected = roots;
+            app.inspector = false;
+            app.fasteners.open = true;
+            app.doc.display.wood_joinery = guides_visible;
+            sidebar::set_section_open(&ctx, "connections/wood_joinery", false);
+            let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(1000., 800.));
+            app.doc.camera.fit(app.doc.model.bounds(), dv(rect.size()));
+            let source = app.doc.model.clone();
+            let markers = app.joint_markers(rect);
+            assert_eq!(markers.len(), 1);
+            let (id, point) = markers[0];
+            assert_eq!(id, joint);
+            for pressed in [None, Some(true), Some(false)] {
+                let mut events = vec![egui::Event::PointerMoved(point)];
+                if let Some(pressed) = pressed {
+                    events.push(egui::Event::PointerButton {
+                        pos: point, button: egui::PointerButton::Primary, pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                let _ = ctx.run_test_ui(egui::RawInput {
+                    screen_rect: Some(rect), events, ..Default::default()
+                }, |ui| app.joint_marker_handles(ui, rect));
+            }
+            assert_eq!(app.doc.model.edit_context, parent, "depth={depth}, component={component}");
+            assert_eq!(app.selected, BTreeSet::from(members));
+            assert!(app.joinery.open);
+            assert!(app.inspector);
+            assert!(!app.fasteners.open);
+            assert_eq!(BTreeSet::from(app.joinery_dialog.members.unwrap()), BTreeSet::from(members));
+            assert!(app.fastener_pair_eligible(&ctx, members));
+            app.connection_sidebar_selection(&ctx);
+            assert!(app.joinery.open, "the panel must stay open on the next frame");
+            let disclosure = egui::Id::new("joint_marker_open_section");
+            sidebar::restore_section(&ctx, disclosure, "connections/wood_joinery", false);
+            assert!(egui::collapsing_header::CollapsingState::load(&ctx, disclosure).unwrap().is_open());
+            let mut expected = source;
+            expected.edit_context = parent;
+            assert_eq!(app.doc.model, expected, "opening the editor must only navigate");
+            assert!(app.doc.history.undo_label().is_none());
+            assert!(!app.project.modified);
+        }
+    }
+
+    #[test]
+    fn blocked_joint_icons_leave_selection_and_context_unchanged() {
+        for blocked in 0..5 {
+            let (mut app, ctx, members) = fixture();
+            let joint = app.doc.model.add_connection(Connection {
+                members, entry_face: None,
+                operation: ConnectionOperation::Joinery(JointSettings::default()),
+            }).unwrap();
+            let group = app.doc.model.make_object(&BTreeSet::from(members), false, "Assembly").unwrap();
+            let outer = app.doc.model.make_object(&BTreeSet::from([group]), false, "Outer").unwrap();
+            let members = app.doc.model.connections[&joint].members;
+            match blocked {
+                0 => { app.doc.model.locked.insert(outer); }
+                1 => { app.doc.model.hidden.insert(outer); }
+                2 => { app.doc.model.locked.insert(members[0]); }
+                3 => { app.screenshot.open = true; }
+                _ => { app.doc.model.connections.remove(&joint); }
+            }
+            app.selected = BTreeSet::from([outer]);
+            let source = app.doc.model.clone();
+            let selected = app.selected.clone();
+            assert!(!app.edit_joint_from_marker(joint, &ctx));
+            assert_eq!(app.doc.model, source);
+            assert_eq!(app.selected, selected);
+            assert!(!app.joinery.open);
+            assert!(app.joinery_dialog.members.is_none());
+        }
+    }
+
     #[test]
     fn failed_separated_joint_keeps_a_marker_and_clears_error_after_repair() {
         let (mut app, ctx, members) = fixture();

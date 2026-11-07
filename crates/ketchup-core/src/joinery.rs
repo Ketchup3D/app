@@ -8,6 +8,16 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+#[path = "joinery_frame.rs"]
+mod stock_frame;
+pub use stock_frame::JoineryFrame;
+#[path = "joinery_trim.rs"]
+mod trimming;
+use trimming::trim_excess;
+#[cfg(test)]
+#[path = "joinery_angle_tests.rs"]
+mod angle_tests;
+
 const EPS: f64 = 1e-7;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JointKind {
@@ -39,11 +49,39 @@ impl JointKind {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrimBoard {
+    #[default]
+    None,
+    First,
+    Second,
+}
+impl TrimBoard {
+    pub fn label(self) -> &'static str {
+        match self { Self::None => "None", Self::First => "First board", Self::Second => "Second board" }
+    }
+    pub fn member(self) -> Option<usize> {
+        match self { Self::None => None, Self::First => Some(0), Self::Second => Some(1) }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeepEnd {
+    #[default]
+    Lower,
+    Upper,
+}
+impl KeepEnd {
+    pub fn label(self) -> &'static str {
+        match self { Self::Lower => "Lower end", Self::Upper => "Upper end" }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JointSettings {
     pub kind: JointKind,
-    /// World axis along the insertion direction; width is a distinct world axis.
+    /// Axis in the first board's stock frame; width is a distinct stock axis.
     pub depth_axis: usize,
     pub width_axis: usize,
     pub width_ratio: f64,
@@ -53,9 +91,17 @@ pub struct JointSettings {
     pub dovetails: u32,
     /// Tail width in metres; absent for legacy count-based joints.
     pub dovetail_width: Option<f64>,
+    /// Minimum wood between sockets at their widest point, after clearance.
+    pub dovetail_pin_width: f64,
     pub taper_degrees: f64,
     /// Extra lateral clearance removed from the receiving part, in metres.
     pub clearance: f64,
+    /// Shorten this board past the far face of the other board at the joint.
+    pub trim: TrimBoard,
+    /// Local trimming axis; absent selects the board's longest axis.
+    pub trim_axis: Option<usize>,
+    /// End to retain along the chosen local trimming axis.
+    pub keep_end: KeepEnd,
 }
 impl Default for JointSettings {
     fn default() -> Self {
@@ -68,19 +114,29 @@ impl Default for JointSettings {
             fingers: 4,
             dovetails: 1,
             dovetail_width: None,
+            dovetail_pin_width: 0.005,
             taper_degrees: 8.,
             clearance: 0.0001,
+            trim: TrimBoard::None,
+            trim_axis: None,
+            keep_end: KeepEnd::Lower,
         }
     }
 }
 impl JointSettings {
-    /// Fit fixed-width tails evenly across the overlap, retaining legacy layouts.
+    /// Fit fixed-width tails with explicit pin spacing, retaining count-based
+    /// layouts for older joints. Each end receives half of the inter-tail gap.
     pub fn dovetail_layout(&self, span: f64) -> Option<(u32, f64)> {
         if !span.is_finite() || span <= 0. { return None; }
         if let Some(width) = self.dovetail_width {
             if !width.is_finite() || width <= 0. || width >= span { return None; }
-            let count = (span * self.width_ratio / width).floor().max(1.);
-            if count > 64. { return None; }
+            if !self.dovetail_pin_width.is_finite() || self.dovetail_pin_width <= 0.
+                || !self.clearance.is_finite() || self.clearance < 0. { return None; }
+            let pitch = width + self.dovetail_pin_width + 2. * self.clearance;
+            let fit = span / pitch;
+            // Do not lose a tail at an exact fit due to floating-point rounding.
+            let count = (fit + f64::EPSILON * fit.abs().max(1.) * 8.).floor();
+            if !(1. ..=64.).contains(&count) { return None; }
             Some((count as u32, width))
         } else {
             (self.dovetails > 0).then(|| (self.dovetails, span * self.width_ratio / self.dovetails as f64))
@@ -90,6 +146,7 @@ impl JointSettings {
         self.depth_axis < 3
             && self.width_axis < 3
             && self.depth_axis != self.width_axis
+            && self.trim_axis.is_none_or(|axis| axis < 3)
             && self.width_ratio.is_finite()
             && (0.1..=0.9).contains(&self.width_ratio)
             && self.height_ratio.is_finite()
@@ -97,6 +154,8 @@ impl JointSettings {
             && (2..=16).contains(&self.fingers)
             && (1..=16).contains(&self.dovetails)
             && self.dovetail_width.is_none_or(|width| width.is_finite() && width > 0.)
+            && self.dovetail_pin_width.is_finite()
+            && self.dovetail_pin_width > 0.
             && self.taper_degrees.is_finite()
             && (1. ..=30.).contains(&self.taper_degrees)
             && self.clearance.is_finite()
@@ -104,7 +163,7 @@ impl JointSettings {
     }
 }
 
-fn board(model: &Model, id: u64) -> Result<(DVec3, DVec3), &'static str> {
+fn board(model: &Model, id: u64, frame: JoineryFrame) -> Result<(DVec3, DVec3), &'static str> {
     let object = model
         .objects
         .get(&id)
@@ -118,40 +177,9 @@ fn board(model: &Model, id: u64) -> Result<(DVec3, DVec3), &'static str> {
             "Each part must contain only board geometry; select individual boards, not assemblies",
         );
     }
-    let contents = model.object_contents(id).ok_or("Missing board")?;
-    let mut points = contents.vertices.values().map(|v| v.position);
-    let first = points.next().ok_or("The board has no geometry")?;
-    let (lo, hi) = points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p)));
+    let (lo, hi) = frame.bounds(model, id).ok_or("The board has no geometry")?;
     if !lo.is_finite() || !hi.is_finite() || (hi - lo).min_element() <= EPS * 10. {
         return Err("Boards must have finite, positive dimensions");
-    }
-    // Volume alone cannot distinguish a rotated/non-box surface from a box.
-    for face in contents.faces.values() {
-        if !face.holes.is_empty() {
-            return Err("Start with rectangular boards without existing joints or holes");
-        }
-        let vertices: Vec<_> = face
-            .vertices
-            .iter()
-            .map(|id| contents.vertices[id].position)
-            .collect();
-        if !(0..3).any(|axis| {
-            [lo[axis], hi[axis]]
-                .into_iter()
-                .any(|x| vertices.iter().all(|p| (p[axis] - x).abs() < EPS))
-        }) {
-            return Err(
-                "Wood Joinery currently requires rectangular boards aligned with the project axes",
-            );
-        }
-    }
-    let volume = model
-        .copy_entities(&BTreeSet::from([id]))
-        .solid_volume(id)?;
-    let size = hi - lo;
-    let expected = size.x * size.y * size.z;
-    if (volume - expected).abs() > expected * 1e-6 {
-        return Err("Start with solid rectangular boards without existing joints or holes");
     }
     Ok((lo, hi))
 }
@@ -206,6 +234,43 @@ fn joint_direction(a: (DVec3, DVec3), b: (DVec3, DVec3), lo: DVec3, hi: DVec3, d
     if (!lower && !upper) || !receiver_stock { return None; }
     Some(lower && (!upper || a.0[d] + a.1[d] < b.0[d] + b.1[d]))
 }
+
+#[derive(Clone, Copy)]
+pub struct JoineryOverlap {
+    pub frame: JoineryFrame,
+    pub bounds: (DVec3, DVec3),
+}
+
+struct JointStock {
+    geometry: JoineryOverlap,
+    frame: Frame,
+    bounds: [(DVec3, DVec3); 2],
+    solids: [Vec<Polygon>; 2],
+    overlap: Vec<Polygon>,
+}
+impl JointStock {
+    fn new(model: &Model, members: [u64; 2]) -> Result<Self, &'static str> {
+        if members[0] == members[1] { return Err("Choose two different boards"); }
+        let axes = model.joinery_frame(members[0])?;
+        let bounds = [board(model, members[0], axes)?, board(model, members[1], axes)?];
+        let copies = members.map(|id| model.copy_entities(&BTreeSet::from([id])));
+        let frame = Frame::new(&[&copies[0], &copies[1]])?;
+        let solids = [solids::import(&copies[0], frame)?, solids::import(&copies[1], frame)?];
+        if solids.iter().any(|solid| !csg::volume(solid).is_finite() || csg::volume(solid).abs() <= frame.epsilon.powi(3)) {
+            return Err("Choose boards with positive solid volume");
+        }
+        let overlap = csg::apply(solids[0].clone(), solids[1].clone(), Boolean::Intersect, frame.epsilon)?;
+        let mut points = overlap.iter().flat_map(|polygon| &polygon.vertices)
+            .map(|p| axes.local(frame.world(*p)));
+        let first = points.next().ok_or("Position the boards with a shared volume: their overlap defines the joint depth")?;
+        let (lo, hi) = points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p)));
+        if (hi - lo).min_element() <= EPS * 10. || csg::volume(&overlap).abs() <= frame.epsilon.powi(3) * 8. {
+            return Err("Position the boards with a shared volume: their overlap defines the joint depth");
+        }
+        Ok(Self { geometry: JoineryOverlap { frame: axes, bounds: (lo, hi) }, frame, bounds, solids, overlap })
+    }
+}
+
 impl Model {
     /// Complete contours of material removed from one source board. Edges on
     /// the original stock rim can disappear from the retained solid entirely,
@@ -242,16 +307,18 @@ impl Model {
 
     /// Axis pairs that can cut the selected stock with the current profile.
     pub fn supported_joinery_axes(&self, members: [u64; 2], settings: &JointSettings) -> Vec<(usize, usize)> {
-        if members[0] == members[1] { return Vec::new(); }
-        let (Ok(a), Ok(b)) = (board(self, members[0]), board(self, members[1])) else {
-            return Vec::new();
-        };
-        let (lo, hi) = (a.0.max(b.0), a.1.min(b.1));
+        self.joinery_options(members, settings).1
+    }
+
+    /// Reuse the exact overlap for orientation choices and width measurements.
+    pub fn joinery_options(&self, members: [u64; 2], settings: &JointSettings)
+        -> (Option<JoineryOverlap>, Vec<(usize, usize)>)
+    {
+        let Ok(stock) = JointStock::new(self, members) else { return (None, Vec::new()); };
+        let (lo, hi) = stock.geometry.bounds;
         let size = hi - lo;
-        if size.min_element() <= EPS * 10. { return Vec::new(); }
         let mut supported = Vec::new();
         for d in 0..3 {
-            if joint_direction(a, b, lo, hi, d).is_none() { continue; }
             for u in 0..3 {
                 if u == d { continue; }
                 let v = 3 - d - u;
@@ -266,7 +333,7 @@ impl Model {
                 supported.push((d, u));
             }
         }
-        supported
+        (Some(stock.geometry), supported)
     }
     /// Apply a relation to a disposable evaluated model. Original board bounds
     /// always come from stock, allowing multiple joints to affect the same board.
@@ -279,35 +346,26 @@ impl Model {
         if !settings.valid() || members[0] == members[1] {
             return Err("Invalid wood joint settings or pair of boards");
         }
-        let (a, b) = (board(stock, members[0])?, board(stock, members[1])?);
-        self.cut_joint_with_bounds(members, settings, [a, b])
-    }
-
-    fn cut_joint_with_bounds(&mut self, members: [u64; 2], settings: &JointSettings,
-        [a, b]: [(DVec3, DVec3); 2]) -> Result<(), &'static str>
-    {
-        let (lo, hi) = (a.0.max(b.0), a.1.min(b.1));
+        let source = stock;
+        let stock = JointStock::new(source, members)?;
+        let stock_frame = stock.geometry.frame;
+        let (lo, hi) = stock.geometry.bounds;
+        let [a, b] = stock.bounds;
         let size = hi - lo;
-        if size.min_element() <= EPS * 10. {
-            return Err(
-                "Position the boards with a shared volume: their overlap defines the joint depth",
-            );
-        }
         let (d, u) = (settings.depth_axis, settings.width_axis);
         let v = 3 - d - u;
-        let forward = joint_direction(a, b, lo, hi, d).ok_or(
-            "Choose an orientation with a shoulder on the first board and stock remaining on the receiving board",
-        )?;
+        let forward = joint_direction(a, b, lo, hi, d)
+            .unwrap_or(a.0[d] + a.1[d] <= b.0[d] + b.1[d]);
         if settings.clearance * 2. >= size[u].min(size[v]) * 0.1 {
             return Err("Clearance is too large for this joint");
         }
         let copies = members.map(|id| self.copy_entities(&BTreeSet::from([id])));
-        let frame = Frame::new(&[&copies[0], &copies[1]])?;
+        let frame = stock.frame;
         let mut solids = [
             solids::import(&copies[0], frame)?,
             solids::import(&copies[1], frame)?,
         ];
-        let overlap = prism(box_points(lo, hi), frame)?;
+        let overlap = stock.overlap;
         let mut profiles = Vec::new();
         let mut pockets = Vec::new();
         let dovetail = if settings.kind == JointKind::Dovetail {
@@ -371,7 +429,7 @@ impl Model {
                     }
                 }
             }
-            profiles.push(prism(points, frame)?);
+            profiles.push(prism(points.map(|p| stock_frame.world(p)), frame)?);
             // Grow the receiver cut only laterally; clip it to its stock by CSG.
             let center = (l + h) * 0.5;
             for p in &mut points {
@@ -383,20 +441,45 @@ impl Model {
                     };
                 }
             }
-            pockets.push(prism(points, frame)?);
+            pockets.push(prism(points.map(|p| stock_frame.world(p)), frame)?);
         }
-        let mut waste = overlap;
+        let mut waste = overlap.clone();
         for profile in profiles {
             waste = csg::apply(waste, profile, Boolean::Difference, frame.epsilon)?;
         }
+        let overlap_volume = csg::volume(&overlap).abs();
+        let waste_volume = csg::volume(&waste).abs();
+        let minimum = (overlap_volume * 1e-9).max(frame.epsilon.powi(3) * 8.);
+        if waste_volume <= minimum || overlap_volume - waste_volume <= minimum {
+            return Err("The profile does not divide the shared material; choose another orientation or profile size");
+        }
         solids[0] = csg::apply(solids[0].clone(), waste, Boolean::Difference, frame.epsilon)?;
+        // Clip receiving pockets to the first board's stock, including a small
+        // lateral allowance. An angled overlap's bounding box is not material.
+        let envelope = stock.solids[0].iter().map(|polygon| {
+            let center = (a.0 + a.1) * 0.5;
+            let mut scale = DVec3::ONE;
+            for axis in [u, v] { scale[axis] += 2. * settings.clearance / (a.1[axis] - a.0[axis]); }
+            Polygon::new(polygon.vertices.iter().map(|p| {
+                let local = stock_frame.local(frame.world(*p));
+                frame.local(stock_frame.world(center + (local - center) * scale))
+            }).collect(), polygon.color, frame.epsilon).ok_or("The clearance is too small for the model precision")
+        }).collect::<Result<Vec<_>, _>>()?;
+        let envelope = if settings.clearance > 0. {
+            csg::apply(envelope, stock.solids[0].clone(), Boolean::Union, frame.epsilon)?
+        } else { envelope };
         for pocket in pockets {
+            let pocket = csg::apply(pocket, envelope.clone(), Boolean::Intersect, frame.epsilon)?;
             solids[1] = csg::apply(
                 solids[1].clone(),
                 pocket,
                 Boolean::Difference,
                 frame.epsilon,
             )?;
+        }
+        if let Some(index) = settings.trim.member() {
+            solids[index] = trim_excess(source, members, index, settings,
+                &stock.solids[1 - index], &overlap, solids[index].clone(), frame)?;
         }
         // Output and validate both members before replacing any live document data.
         let mut next = self.clone();
@@ -474,7 +557,6 @@ pub struct GeometryEvaluation {
 #[derive(Default)]
 pub struct EvaluationCache {
     cuts: std::collections::BTreeMap<u64, CachedCut>,
-    boards: std::collections::BTreeMap<u64, (BoardSnapshot, Result<(DVec3, DVec3), &'static str>)>,
     #[cfg(test)]
     evaluations: usize,
 }
@@ -530,46 +612,13 @@ impl BoardSnapshot {
             && self.faces == other.faces && self.objects == other.objects
     }
 
-    fn transformed_bounds(&self, old: &Self, bounds: (DVec3, DVec3)) -> Option<(DVec3, DVec3)> {
-        if self.edges != old.edges || self.faces != old.faces || self.vertices.len() != old.vertices.len()
-            || self.hidden != old.hidden || self.locked != old.locked || self.objects.len() != old.objects.len()
-            || !self.objects.iter().zip(&old.objects).all(|(a, b)| {
-                let (mut a, mut b) = (a.clone(), b.clone());
-                a.transform = None; b.transform = None; a == b
-            }) { return None; }
-        let lo = self.vertices.iter().map(|v| v.position).reduce(DVec3::min)?;
-        let hi = self.vertices.iter().map(|v| v.position).reduce(DVec3::max)?;
-        let size = hi - lo;
-        if !lo.is_finite() || !hi.is_finite() || size.min_element() <= EPS * 10. { return None; }
-        let scale = size / (bounds.1 - bounds.0);
-        self.vertices.iter().zip(&old.vertices).all(|(a, b)| a.id == b.id
-            && (a.position - (lo + (b.position - bounds.0) * scale)).abs().max_element() < EPS * 0.01)
-            .then_some((lo, hi))
-    }
 }
 
 impl EvaluationCache {
-    fn board_bounds(&mut self, source: &Model, id: u64) -> Result<(DVec3, DVec3), &'static str> {
-        let snapshot = BoardSnapshot::new(source, [id, id]);
-        if let Some((old, result)) = self.boards.get(&id) {
-            if *old == snapshot { return *result; }
-            if let Ok(bounds) = result {
-                if let Some(bounds) = snapshot.transformed_bounds(old, *bounds) {
-                    self.boards.insert(id, (snapshot, Ok(bounds)));
-                    return Ok(bounds);
-                }
-            }
-        }
-        let result = board(source, id);
-        self.boards.insert(id, (snapshot, result));
-        result
-    }
-
     pub fn evaluate(&mut self, source: &Model) -> GeometryEvaluation {
         use crate::connections::ConnectionOperation;
         self.cuts.retain(|id, _| source.connections.get(id)
             .is_some_and(|c| matches!(c.operation, ConnectionOperation::Joinery(_))));
-        self.boards.retain(|id, _| source.objects.contains_key(id));
         // Derived IDs are not saved. Give independent cuts stable disjoint
         // allocation ranges so a changed upstream cut cannot invalidate every
         // later cached cut merely by allocating a different number of faces.
@@ -599,13 +648,7 @@ impl EvaluationCache {
                 }
             }
             let before = model.clone();
-            let result = if !settings.valid() || connection.members[0] == connection.members[1] {
-                Err("Invalid wood joint settings or pair of boards")
-            } else {
-                self.board_bounds(source, connection.members[0]).and_then(|a|
-                    self.board_bounds(source, connection.members[1]).and_then(|b|
-                        model.cut_joint_with_bounds(connection.members, settings, [a, b])))
-            };
+            let result = model.cut_joint(connection.members, settings, source);
             let error = result.err().map(str::to_owned);
             if model.next_id >= start + STRIDE {
                 self.cuts.clear();
@@ -671,7 +714,7 @@ mod tests {
         connections::{Connection, ConnectionOperation},
     };
 
-    fn board_at(model: &mut Model, lo: DVec3, hi: DVec3, component: bool) -> u64 {
+    pub(super) fn board_at(model: &mut Model, lo: DVec3, hi: DVec3, component: bool) -> u64 {
         let mut body = Model::default();
         let corners = [
             lo,
@@ -830,7 +873,7 @@ mod tests {
         }
     }
     #[test]
-    fn invalid_settings_missing_locked_touching_and_rotated_boards_are_atomic() {
+    fn invalid_settings_missing_locked_and_touching_boards_are_atomic() {
         let (model, members) = pair();
         for settings in [
             JointSettings {
@@ -855,7 +898,7 @@ mod tests {
             assert!(next.test_cut_joint(members, &settings).is_err());
             assert_eq!(next, model);
         }
-        for variant in 0..5 {
+        for variant in 0..4 {
             let mut next = model.clone();
             match variant {
                 0 => {
@@ -867,17 +910,10 @@ mod tests {
                 2 => {
                     next.objects.remove(&members[1]);
                 }
-                3 => {
+                _ => {
                     let ids = next.selection_vertices(&BTreeSet::from([members[1]]));
                     for id in ids {
                         next.vertices.get_mut(&id).unwrap().position.x += 0.05;
-                    }
-                }
-                _ => {
-                    for vertex in next.vertices.values_mut() {
-                        let p = vertex.position;
-                        vertex.position =
-                            DVec3::new(p.x * 0.8 - p.y * 0.6, p.x * 0.6 + p.y * 0.8, p.z);
                     }
                 }
             }
@@ -950,6 +986,71 @@ mod tests {
     }
 
     #[test]
+    fn rotated_corner_boards_cut_all_profiles_in_both_part_orders() {
+        for reverse in [false, true] {
+            for kind in JointKind::ALL {
+                let mut stock = Model::default();
+                let horizontal = board_at(&mut stock, DVec3::ZERO, DVec3::new(0.3, 0.3, 0.04), false);
+                let vertical = board_at(&mut stock, DVec3::new(0.26, 0., 0.), DVec3::new(0.3, 0.3, 0.3), true);
+                let members = if reverse { [vertical, horizontal] } else { [horizontal, vertical] };
+                let mut settings = JointSettings { kind, clearance: 0., ..Default::default() };
+                let supported = stock.supported_joinery_axes(members, &settings);
+                (settings.depth_axis, settings.width_axis) = supported[0];
+                let mut aligned = stock.clone();
+                aligned.test_cut_joint(members, &settings).unwrap();
+                let expected = members.map(|id| aligned.solid_volume(id).unwrap());
+                for degrees in [23., 117.] {
+                    let mut rotated = stock.clone();
+                    rotated.rotate_selection(&BTreeSet::from(members), DVec3::new(2., -3., 1.),
+                        DVec3::new(1., 2., 3.), degrees).unwrap();
+                    assert_eq!(rotated.supported_joinery_axes(members, &settings), supported);
+                    rotated.test_cut_joint(members, &settings)
+                        .unwrap_or_else(|error| panic!("{kind:?}, reverse={reverse}, angle={degrees}: {error}"));
+                    rotated.validate().unwrap();
+                    for (id, expected) in members.into_iter().zip(expected) {
+                        assert!((rotated.solid_volume(id).unwrap() - expected).abs() < 1e-9);
+                    }
+                    assert!(rotated.boolean_solids(members[0], members[1], SolidOperation::Intersect).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotated_imported_stock_and_cached_motion_match_fresh_cuts() {
+        let (mut stock, members) = pair();
+        let settings = JointSettings::default();
+        let id = stock.add_connection(Connection { members, entry_face: None,
+            operation: ConnectionOperation::Joinery(settings.clone()) }).unwrap();
+        let mut cache = EvaluationCache::default();
+        assert!(cache.evaluate(&stock).errors.is_empty());
+        stock.rotate_selection(&BTreeSet::from(members), DVec3::ZERO,
+            DVec3::new(1., 2., 3.), 23.).unwrap();
+        // Imported/older projects may have no retained instance frames.
+        for object in stock.objects.values_mut() { object.transform = None; }
+        let frame = stock.joinery_frame(members[0]).unwrap();
+        assert!(stock.supported_joinery_axes(members, &settings).contains(&(0, 1)));
+        let restored = Document::from_json(&serde_json::to_string(&Document {
+            model: stock.clone(), ..Default::default()
+        }).unwrap()).unwrap();
+        assert_eq!(restored.model.connections[&id], stock.connections[&id]);
+        for offset in [0., 0.01, 1., -1., -0.01] {
+            stock.move_selection(&BTreeSet::from([members[1]]), frame.world(DVec3::X * offset)).unwrap();
+            let saved = stock.clone();
+            let cached = cache.evaluate(&stock);
+            let fresh = stock.evaluate_joinery();
+            assert_eq!(cached.errors, fresh.errors);
+            assert_eq!(cached.errors.is_empty(), offset != 1.);
+            for id in members {
+                assert!((cached.model.solid_volume(id).unwrap() - fresh.model.solid_volume(id).unwrap()).abs() < 1e-9);
+            }
+            cached.model.validate().unwrap();
+            assert_eq!(stock, saved, "evaluation must preserve source stock and relations");
+        }
+        assert!(cache.evaluate(&restored.model).errors.is_empty());
+    }
+
+    #[test]
     fn only_one_wood_joint_is_allowed_per_unordered_pair() {
         let (mut model, members) = pair();
         let connection = Connection {
@@ -999,8 +1100,8 @@ mod tests {
             kind: JointKind::Dovetail, dovetail_width: Some(0.01),
             taper_degrees: 1., clearance: 0., ..Default::default()
         };
-        assert_eq!(settings.dovetail_layout(0.1), Some((5, 0.01)));
-        assert_eq!(settings.dovetail_layout(0.2), Some((10, 0.01)));
+        assert_eq!(settings.dovetail_layout(0.1), Some((6, 0.01)));
+        assert_eq!(settings.dovetail_layout(0.2), Some((13, 0.01)));
         assert_eq!(settings.dovetail_layout(0.005), None);
         let (mut model, members) = pair();
         model.test_cut_joint(members, &settings).unwrap();
@@ -1009,7 +1110,57 @@ mod tests {
         assert!((total - 0.0022).abs() < 1e-9);
         let restored: JointSettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert_eq!(restored.dovetail_width, Some(0.01));
+        assert_eq!(restored.dovetail_pin_width, settings.dovetail_pin_width);
         assert!(!JointSettings { dovetail_width: Some(0.), ..Default::default() }.valid());
+    }
+
+    #[test]
+    fn fixed_tail_density_uses_pin_width_and_clearance_instead_of_hidden_coverage() {
+        let settings = JointSettings {
+            kind: JointKind::Dovetail, dovetail_width: Some(0.05),
+            clearance: 0.00157, ..Default::default()
+        };
+        let (count, width) = settings.dovetail_layout(0.35).unwrap();
+        assert_eq!((count, width), (6, 0.05));
+        for width_ratio in [0.1, 0.5, 0.9] {
+            assert_eq!(JointSettings { width_ratio, ..settings.clone() }.dovetail_layout(0.35), Some((count, width)));
+        }
+        let pin_left = 0.35 / count as f64 - width - 2. * settings.clearance;
+        assert!(pin_left >= settings.dovetail_pin_width);
+        assert!((count + 1) as f64 * (width + settings.dovetail_pin_width + 2. * settings.clearance) > 0.35);
+        assert_eq!(JointSettings { dovetail_pin_width: 0.02, ..settings.clone() }.dovetail_layout(0.35), Some((4, 0.05)));
+        assert_eq!(settings.dovetail_layout(0.055), None, "do not squeeze out the pins to force one tail");
+        let exact = JointSettings { clearance: 0., ..settings.clone() };
+        assert_eq!(exact.dovetail_layout(0.33), Some((6, 0.05)), "exact fits must survive rounding");
+        assert_eq!(exact.dovetail_layout(0.33 - 1e-6), Some((5, 0.05)));
+        assert_eq!(exact.dovetail_layout(64. * 0.055), Some((64, 0.05)));
+        assert_eq!(exact.dovetail_layout(65. * 0.055), None);
+        for invalid in [0., -0.001, f64::NAN, f64::INFINITY] {
+            let invalid = JointSettings { dovetail_pin_width: invalid, ..settings.clone() };
+            assert!(!invalid.valid());
+            assert_eq!(invalid.dovetail_layout(0.35), None);
+        }
+    }
+
+    #[test]
+    fn dense_fifty_mm_tails_generate_the_count_and_width_shown_in_the_editor() {
+        let mut model = Model::default();
+        let members = [
+            board_at(&mut model, DVec3::ZERO, DVec3::new(0.3, 0.35, 0.04), false),
+            board_at(&mut model, DVec3::new(0.28, 0., 0.), DVec3::new(0.58, 0.35, 0.04), false),
+        ];
+        let settings = JointSettings {
+            kind: JointKind::Dovetail, dovetail_width: Some(0.05),
+            taper_degrees: 10., clearance: 0.00157, ..Default::default()
+        };
+        let (count, width) = settings.dovetail_layout(0.35).unwrap();
+        assert_eq!(count, 6);
+        model.test_cut_joint(members, &settings).unwrap();
+        model.validate().unwrap();
+        let average_tail_width = width - 0.02 * settings.taper_degrees.to_radians().tan();
+        let expected = 0.28 * 0.35 * 0.04 + count as f64 * average_tail_width * 0.02 * 0.04;
+        assert!((model.solid_volume(members[0]).unwrap() - expected).abs() < 1e-9);
+        assert!(model.boolean_solids(members[0], members[1], SolidOperation::Intersect).is_err());
     }
 
     #[test]
@@ -1017,6 +1168,11 @@ mod tests {
         let old: JointSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(old.dovetails, 1);
         assert_eq!(old.dovetail_width, None);
+        assert_eq!(old.dovetail_pin_width, 0.005);
+        let legacy: JointSettings = serde_json::from_str(r#"{"dovetails":3,"width_ratio":0.5}"#).unwrap();
+        let (count, width) = legacy.dovetail_layout(0.3).unwrap();
+        assert_eq!(count, 3, "saved count-based layouts must remain unchanged");
+        assert!((width - 0.05).abs() < 1e-12);
         let settings = JointSettings { dovetails: 4, ..Default::default() };
         let restored: JointSettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert_eq!(restored, settings);

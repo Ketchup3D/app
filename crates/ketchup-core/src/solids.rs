@@ -53,7 +53,7 @@ impl Frame {
     pub(crate) fn local(self, p: DVec3) -> DVec3 {
         (p - self.center) / self.scale
     }
-    fn world(self, p: DVec3) -> DVec3 {
+    pub(crate) fn world(self, p: DVec3) -> DVec3 {
         p * self.scale + self.center
     }
 }

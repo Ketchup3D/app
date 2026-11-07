@@ -4426,8 +4426,11 @@ impl KetchupApp {
                 self.history_preview.is_none() && self.modeling.as_ref().is_some_and(|edit| edit.preview.is_some()),
                 ui.ctx(), &self.doc.display, &self.shadow_cache);
         }
-        let prepared_shadows = self.joinery_geometry.prepared_shadows.take();
-        let model=&self.joinery_geometry.result.as_ref().unwrap().model;
+        let joint_preview = self.joint_highlight_preview_key();
+        let prepared_shadows = self.joinery_geometry.prepared_shadows.take()
+            .filter(|_| joint_preview.is_none());
+        let model = joint_preview.as_ref().and_then(|_| self.joinery_dialog.preview_model())
+            .unwrap_or(&self.joinery_geometry.result.as_ref().unwrap().model);
         let model_revision = self.render_model.update(model);
         let empty_selection = BTreeSet::new();
         let selected = if self.history_preview.is_some() {
@@ -4486,7 +4489,7 @@ impl KetchupApp {
             ))
         .then(|| renderer::SceneKey {
             joinery_members: self.joinery_edit_members(),
-            joint_preview: self.joint_highlight_preview_key(),
+            joint_preview,
             model_revision,
             camera: camera.clone(),
             size,

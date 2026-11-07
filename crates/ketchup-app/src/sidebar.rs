@@ -707,6 +707,10 @@ mod preference_tests {
     fn joinery_preferences_save_without_model_edit_and_restore_legacy_defaults() {
         let defaults: InspectorPreferences=serde_json::from_str("{}").unwrap();
         assert_eq!(defaults.joinery,joinery::Preferences::default());
+        assert_eq!(defaults.joinery.settings.dovetail_pin_width, 0.005);
+        assert_eq!(defaults.joinery.settings.trim, ketchup_core::joinery::TrimBoard::None);
+        assert_eq!(defaults.joinery.settings.trim_axis, None);
+        assert_eq!(defaults.joinery.settings.keep_end, ketchup_core::joinery::KeepEnd::Lower);
         let display:DisplaySettings=serde_json::from_str("{}").unwrap();
         assert!(display.joinery_preview);
         let ctx=egui::Context::default();
@@ -720,8 +724,12 @@ mod preference_tests {
         app.joinery.settings.fingers=6;
         app.joinery.settings.dovetails=3;
         app.joinery.settings.dovetail_width=Some(0.02);
+        app.joinery.settings.dovetail_pin_width=0.003;
         app.joinery.settings.clearance=0.0002;
         app.joinery.settings.taper_degrees=12.;
+        app.joinery.settings.trim=ketchup_core::joinery::TrimBoard::Second;
+        app.joinery.settings.trim_axis=Some(1);
+        app.joinery.settings.keep_end=ketchup_core::joinery::KeepEnd::Upper;
         app.joinery.open=true;
         app.joinery.reverse=true;
         app.doc.display.joinery_preview=false;

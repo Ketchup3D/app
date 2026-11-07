@@ -39,6 +39,19 @@ struct BoardGeometry {
     own_entities: Arc<BTreeSet<u64>>,
     stock_surfaces: Arc<[[DVec3; 3]]>,
     cut_edges: Result<Arc<[[DVec3; 2]]>, &'static str>,
+    stock_boundaries: Vec<(DVec3, Vec<DVec3>)>,
+}
+impl BoardGeometry {
+    fn is_stock_edge(&self, a: DVec3, b: DVec3) -> bool {
+        let mut normals = Vec::new();
+        for (normal, boundary) in &self.stock_boundaries {
+            if on_face_boundary(a, b, boundary) {
+                if normals.iter().any(|other: &DVec3| other.cross(*normal).length() > EPS) { return true; }
+                normals.push(*normal);
+            }
+        }
+        false
+    }
 }
 impl BoardGeometryCache {
     fn get(&mut self, source: &Model, evaluated: &Model, member: u64) -> &BoardGeometry {
@@ -52,18 +65,16 @@ impl BoardGeometryCache {
                 .collect::<Vec<_>>()
                 .into(),
             cut_edges: source.joinery_cut_edges(evaluated, member).map(Arc::from),
+            stock_boundaries: source.expand_entities(&BTreeSet::from([member])).iter()
+                .filter_map(|id| source.faces.get(id))
+                .flat_map(|face| {
+                    let normal = ketchup_core::faces::plane(source, &face.vertices).map(|plane| plane.normal);
+                    std::iter::once(&face.vertices).chain(face.holes.iter()).filter_map(move |ring| {
+                        normal.map(|normal| (normal, ring.iter().map(|id| source.vertices[id].position).collect()))
+                    })
+                }).collect(),
         })
     }
-}
-pub(super) fn bounds(model: &Model, id: u64) -> Option<(DVec3, DVec3)> {
-    let entities = model.expand_entities(&BTreeSet::from([id]));
-    let mut points = entities
-        .iter()
-        .filter_map(|id| model.edges.get(id))
-        .flat_map(|edge| [edge.a, edge.b])
-        .filter_map(|id| model.vertices.get(&id).map(|v| v.position));
-    let first = points.next()?;
-    Some(points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p))))
 }
 fn clip(mut polygon: Vec<DVec3>, lo: DVec3, hi: DVec3) -> Vec<DVec3> {
     for axis in 0..3 {
@@ -152,6 +163,7 @@ fn on_face_boundary(a: DVec3, b: DVec3, boundary: &[DVec3]) -> bool {
 }
 // An untouched stock edge lies on two exterior planes. New cut boundaries
 // on an original face lie on only one and must still connect the joint outline.
+#[cfg(test)]
 fn is_stock_edge(a: DVec3, b: DVec3, stock: (DVec3, DVec3)) -> bool {
     (0..3)
         .filter(|&axis| {
@@ -172,6 +184,7 @@ impl Region {
         for line in &self.lines { mesh.register_joint_guide(line.owner, line.a, line.b); }
     }
 
+    #[cfg(test)]
     pub fn build(
         source: &Model,
         evaluated: &Model,
@@ -198,8 +211,9 @@ impl Region {
             members,
             ..Default::default()
         };
+        let frame = source.joinery_frame(members[0]).unwrap_or_default();
         let (Some(first_stock), Some(second_stock)) =
-            (bounds(source, members[0]), bounds(source, members[1]))
+            (frame.bounds(source, members[0]), frame.bounds(source, members[1]))
         else {
             return result;
         };
@@ -242,14 +256,20 @@ impl Region {
             } else {
                 second_stock
             };
-            match &boards.get(source, evaluated, owner).cut_edges {
+            // A trim extends past the overlap. Keep that board's complete cut
+            // outline, including the flush end cut, in the preview.
+            let trimmed = settings.trim.member().is_some_and(|index| members[index] == owner);
+            let (lo, hi) = if trimmed { (stock.0 - margin, stock.1 + margin) } else { (lo, hi) };
+            let geometry = boards.get(source, evaluated, owner);
+            match &geometry.cut_edges {
                 Ok(edges) => {
                     for &[a, b] in edges.iter() {
-                        if let Some((a, b)) = clip_edge(a, b, lo, hi) {
+                        if let Some((a, b)) = clip_edge(frame.local(a), frame.local(b), lo, hi) {
                             // A cut-volume closure can reuse the intersection
                             // of two original stock faces. Those are existing
                             // outer rims, not edges introduced by the cut.
-                            if is_stock_edge(a, b, stock) {
+                            let (a, b) = (frame.world(a), frame.world(b));
+                            if geometry.is_stock_edge(a, b) {
                                 continue;
                             }
                             outlines
@@ -266,10 +286,12 @@ impl Region {
         let entities = evaluated.expand_entities(&fallback_members);
         let mut stock_by_face = BTreeMap::new();
         for member in fallback_members {
-            if let Some(stock) = bounds(source, member) {
+            if let Some(stock) = frame.bounds(source, member) {
+                let trimmed = settings.trim.member().is_some_and(|index| members[index] == member);
+                let clip = if trimmed { (stock.0 - margin, stock.1 + margin) } else { (lo, hi) };
                 for entity in evaluated.expand_entities(&BTreeSet::from([member])) {
                     if evaluated.faces.contains_key(&entity) {
-                        stock_by_face.insert(entity, (member, stock));
+                        stock_by_face.insert(entity, (member, clip));
                     }
                 }
             }
@@ -277,19 +299,20 @@ impl Region {
         // Retain evaluated face edges, excluding artificial overlap borders
         // and triangulation diagonals.
         for face in entities.iter().filter_map(|id| evaluated.faces.get(id)) {
-            let Some((owner, stock)) = stock_by_face.get(&face.id).copied() else {
+            let Some((owner, (lo, hi))) = stock_by_face.get(&face.id).copied() else {
                 continue;
             };
             let rings: Vec<Vec<_>> = std::iter::once(&face.vertices)
                 .chain(face.holes.iter())
                 .map(|ring| {
                     ring.iter()
-                        .map(|id| evaluated.vertices[id].position)
+                        .map(|id| frame.local(evaluated.vertices[id].position))
                         .collect()
                 })
                 .collect();
             let mut boundaries = BTreeMap::new();
             for triangle in evaluated.face_triangles(face) {
+                let triangle = triangle.map(|p| frame.local(p));
                 let polygon = clip(triangle.to_vec(), lo, hi);
                 if polygon.len() < 3 {
                     continue;
@@ -304,10 +327,11 @@ impl Region {
                     let (a, b) = (polygon[i], polygon[(i + 1) % polygon.len()]);
                     if a.distance(b) <= EPS
                         || !rings.iter().any(|ring| on_face_boundary(a, b, ring))
-                        || is_stock_edge(a, b, stock)
+                        || boards.get(source, evaluated, owner).is_stock_edge(frame.world(a), frame.world(b))
                     {
                         continue;
                     }
+                    let (a, b) = (frame.world(a), frame.world(b));
                     let entry = boundaries
                         .entry(key(a, b))
                         .or_insert((Guide { a, b, owner }, 0));
@@ -407,6 +431,91 @@ mod tests {
     }
 
     #[test]
+    fn rotated_cut_guides_follow_board_axes_and_preserve_complete_contours() {
+        let mut source = Model::default();
+        let members = [
+            add_board(&mut source, DVec3::ZERO, DVec3::new(0.3, 0.3, 0.04)),
+            add_board(&mut source, DVec3::new(0.26, 0., 0.), DVec3::new(0.3, 0.3, 0.3)),
+        ];
+        let settings = ketchup_core::joinery::JointSettings {
+            kind: ketchup_core::joinery::JointKind::Finger,
+            fingers: 3,
+            ..Default::default()
+        };
+        source.add_connection(ketchup_core::connections::Connection {
+            members, entry_face: None,
+            operation: ketchup_core::connections::ConnectionOperation::Joinery(settings.clone()),
+        }).unwrap();
+        let evaluated = source.evaluate_joinery();
+        assert!(evaluated.errors.is_empty());
+        let aligned = Region::build(&source, &evaluated.model, members, &settings);
+        let axis = DVec3::new(1., 2., 3.).normalize();
+        let pivot = DVec3::new(2., -3., 1.);
+        source.rotate_selection(&BTreeSet::from(members), pivot, axis, 37.).unwrap();
+        let rotation = glam::DMat3::from_axis_angle(axis, 37_f64.to_radians());
+        let evaluated = source.evaluate_joinery();
+        assert!(evaluated.errors.is_empty());
+        let rotated = Region::build(&source, &evaluated.model, members, &settings);
+        for member in members {
+            let length = |region: &Region| region.lines.iter().filter(|line| line.owner == member)
+                .map(|line| line.a.distance(line.b)).sum::<f64>();
+            assert!(length(&aligned) > EPS);
+            assert!((length(&aligned) - length(&rotated)).abs() < 1e-6);
+            let frame = source.joinery_frame(members[0]).unwrap();
+            let stock = frame.bounds(&source, member).unwrap();
+            for line in rotated.lines.iter().filter(|line| line.owner == member) {
+                assert!(!is_stock_edge(frame.local(line.a), frame.local(line.b), stock));
+                for point in [line.a, line.a.lerp(line.b, 0.5), line.b] {
+                    let original = pivot + rotation.transpose() * (point - pivot);
+                    assert!(aligned.lines.iter().filter(|line| line.owner == member).any(|line| {
+                        let delta = line.b - line.a;
+                        let t = (original - line.a).dot(delta) / delta.length_squared();
+                        original.distance(line.a + delta * t.clamp(0., 1.)) < 1e-6
+                    }), "rotated guide must lie on the corresponding original cut contour");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn angled_trim_guides_include_the_flush_cut_and_exclude_original_rims() {
+        let mut source = Model::default();
+        let lo = DVec3::new(-0.4, -0.06, -0.02);
+        let members = [add_board(&mut source, lo, -lo), add_board(&mut source, lo, -lo)];
+        source.rotate_selection(&BTreeSet::from([members[1]]), DVec3::ZERO, DVec3::Z, 35.).unwrap();
+        let settings = ketchup_core::joinery::JointSettings {
+            kind: ketchup_core::joinery::JointKind::HalfLap,
+            trim: ketchup_core::joinery::TrimBoard::First,
+            clearance: 0.,
+            ..Default::default()
+        };
+        source.add_connection(ketchup_core::connections::Connection {
+            members, entry_face: None,
+            operation: ketchup_core::connections::ConnectionOperation::Joinery(settings.clone()),
+        }).unwrap();
+        let evaluated = source.evaluate_joinery();
+        assert!(evaluated.errors.is_empty(), "{:?}", evaluated.errors);
+        let mut boards = BoardGeometryCache::default();
+        let region = Region::build_cached(&source, &evaluated.model, members, &settings, &mut boards);
+        for member in members {
+            let geometry = boards.get(&source, &evaluated.model, member);
+            let lines: Vec<_> = region.lines.iter().filter(|line| line.owner == member).collect();
+            assert!(!lines.is_empty());
+            assert!(lines.iter().all(|line| !geometry.is_stock_edge(line.a, line.b)));
+        }
+        let receiving_faces: Vec<_> = source.expand_entities(&BTreeSet::from([members[1]])).iter()
+            .filter_map(|id| source.faces.get(id))
+            .filter_map(|face| ketchup_core::faces::plane(&source, &face.vertices)).collect();
+        assert!(region.lines.iter().filter(|line| line.owner == members[0]).any(|line| {
+            receiving_faces.iter().any(|plane| {
+                plane.normal.x.abs() > 0.1 && plane.normal.y.abs() > 0.1
+                    && (line.a - plane.origin).dot(plane.normal).abs() < EPS
+                    && (line.b - plane.origin).dot(plane.normal).abs() < EPS
+            })
+        }), "the angled flush end must remain visible in the cut contour");
+    }
+
+    #[test]
     fn three_finger_cuts_keep_lower_cut_edges_without_original_stock_rims() {
         let mut source = Model::default();
         let members = [
@@ -477,7 +586,7 @@ mod tests {
                     })
             })
         };
-        let stock = bounds(&source, members[1]).unwrap();
+        let stock = ketchup_core::joinery::JoineryFrame::default().bounds(&source, members[1]).unwrap();
         assert!(
             region
                 .lines
@@ -715,7 +824,7 @@ mod tests {
         let object = model
             .make_object(&BTreeSet::from([edge]), false, "Part")
             .unwrap();
-        assert_eq!(bounds(&model, object), Some((DVec3::ZERO, DVec3::ONE)));
+        assert_eq!(ketchup_core::joinery::JoineryFrame::default().bounds(&model, object), Some((DVec3::ZERO, DVec3::ONE)));
     }
     #[test]
     fn surface_clipping_stays_in_overlap_and_keeps_plane() {
