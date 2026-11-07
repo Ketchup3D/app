@@ -387,6 +387,7 @@ impl KetchupApp {
         self.project.operation = Operation::Open;
         let snapshot = self.project.snapshot.take();
         let (result, browser_file) = match result {
+            #[cfg(target_arch = "wasm32")]
             Ok(Outcome::BrowserOpened(doc, name, identity)) => (Ok(Outcome::Opened(doc, None)), Some((name, identity))),
             other => (other, None),
         };
@@ -448,6 +449,7 @@ impl KetchupApp {
                     (_, false) => "Geometry exported",
                 },
             ),
+            #[cfg(target_arch = "wasm32")]
             Ok(Outcome::BrowserOpened(..)) => unreachable!(),
             Ok(Outcome::Cancelled) => self.project.after_save = None,
             Err(error) => {

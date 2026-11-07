@@ -9,6 +9,7 @@ mod tests;
 #[derive(Debug)]
 pub enum Outcome {
     Opened(Box<Document>, Option<PathBuf>),
+    #[cfg(target_arch = "wasm32")]
     BrowserOpened(Box<Document>, String, String),
     Saved(Option<PathBuf>),
     Imported(Box<ketchup_core::Model>, std::collections::BTreeSet<u64>),
